@@ -159,15 +159,13 @@ export default function UserManagement() {
                                 </div>
                                 <div style={{ fontSize: '12px' }}>{user.quota_agent_ttl_hours}h</div>
                                 <div>
-                                    {user.role !== 'platform_admin' && (
-                                        <button
-                                            className="btn btn-secondary"
-                                            style={{ padding: '4px 10px', fontSize: '11px' }}
-                                            onClick={() => editingUserId === user.id ? setEditingUserId(null) : startEdit(user)}
-                                        >
-                                            {editingUserId === user.id ? t('common.cancel') : '✏️ Edit'}
-                                        </button>
-                                    )}
+                                    <button
+                                        className="btn btn-secondary"
+                                        style={{ padding: '4px 10px', fontSize: '11px' }}
+                                        onClick={() => editingUserId === user.id ? setEditingUserId(null) : startEdit(user)}
+                                    >
+                                        {editingUserId === user.id ? t('common.cancel') : '✏️ Edit'}
+                                    </button>
                                 </div>
                             </div>
 
