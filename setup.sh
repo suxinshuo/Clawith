@@ -90,24 +90,46 @@ if PG_BIN_DIR=$(find_psql 2>/dev/null); then
         echo -e "  ${GREEN}✓${NC} PostgreSQL is running on port 5432"
         PG_PORT=5432
 
-        # Try to create role and database using peer/trust auth
-        if ! psql -h localhost -p $PG_PORT -U "$USER" -d postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='clawith'" 2>/dev/null | grep -q 1; then
-            if createuser -h localhost -p $PG_PORT clawith 2>/dev/null; then
-                psql -h localhost -p $PG_PORT -U "$USER" -d postgres -c "ALTER ROLE clawith WITH LOGIN PASSWORD 'clawith';" &>/dev/null
-                echo -e "  ${GREEN}✓${NC} Created PostgreSQL role: clawith"
-            else
-                echo -e "  ${YELLOW}⚠${NC}  Could not create role via existing PG — will set up a local instance"
-                PG_BIN_DIR=""  # Force local PG setup below
-            fi
-        else
+        # Try to create role and database
+        ROLE_EXISTS=false
+        if psql -h localhost -p $PG_PORT -U "$USER" -d postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='clawith'" 2>/dev/null | grep -q 1; then
+            ROLE_EXISTS=true
+            echo -e "  ${GREEN}✓${NC} Role 'clawith' already exists"
+        elif sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='clawith'" 2>/dev/null | grep -q 1; then
+            ROLE_EXISTS=true
             echo -e "  ${GREEN}✓${NC} Role 'clawith' already exists"
         fi
 
-        if [ -n "$PG_BIN_DIR" ] || command -v psql &>/dev/null; then
-            if ! psql -h localhost -p $PG_PORT -U "$USER" -lqt 2>/dev/null | cut -d\| -f1 | grep -qw clawith; then
-                createdb -h localhost -p $PG_PORT -O clawith clawith 2>/dev/null && echo -e "  ${GREEN}✓${NC} Created database: clawith"
+        if [ "$ROLE_EXISTS" = false ]; then
+            # Try 1: as current user
+            if createuser -h localhost -p $PG_PORT clawith 2>/dev/null; then
+                psql -h localhost -p $PG_PORT -U "$USER" -d postgres -c "ALTER ROLE clawith WITH LOGIN PASSWORD 'clawith';" &>/dev/null
+                echo -e "  ${GREEN}✓${NC} Created PostgreSQL role: clawith"
+            # Try 2: via sudo -u postgres (standard Linux setup)
+            elif sudo -u postgres createuser clawith 2>/dev/null && \
+                 sudo -u postgres psql -c "ALTER ROLE clawith WITH LOGIN PASSWORD 'clawith';" &>/dev/null; then
+                echo -e "  ${GREEN}✓${NC} Created PostgreSQL role: clawith (via sudo)"
             else
+                echo -e "  ${YELLOW}⚠${NC}  Could not create role in existing PG — will init a local instance"
+                PG_BIN_DIR=""  # Force local PG setup below
+            fi
+        fi
+
+        if [ -n "$PG_BIN_DIR" ] || command -v psql &>/dev/null; then
+            DB_EXISTS=false
+            if psql -h localhost -p $PG_PORT -U "$USER" -lqt 2>/dev/null | cut -d\| -f1 | grep -qw clawith; then
+                DB_EXISTS=true
+            elif sudo -u postgres psql -lqt 2>/dev/null | cut -d\| -f1 | grep -qw clawith; then
+                DB_EXISTS=true
+            fi
+
+            if [ "$DB_EXISTS" = true ]; then
                 echo -e "  ${GREEN}✓${NC} Database 'clawith' already exists"
+            else
+                if createdb -h localhost -p $PG_PORT -O clawith clawith 2>/dev/null || \
+                   sudo -u postgres createdb -O clawith clawith 2>/dev/null; then
+                    echo -e "  ${GREEN}✓${NC} Created database: clawith"
+                fi
             fi
         fi
     else
