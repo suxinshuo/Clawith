@@ -51,6 +51,11 @@ async def configure_discord_channel(
         existing.encrypt_key = public_key
         existing.is_configured = True
         await db.flush()
+        try:
+            reg = await _register_slash_commands(application_id, bot_token)
+            print(f"[Discord] Slash command registration (update): {reg['status']}")
+        except Exception as e:
+            print(f"[Discord] Warning: could not register slash commands: {e}")
         return ChannelConfigOut.model_validate(existing)
 
     config = ChannelConfig(
@@ -63,6 +68,11 @@ async def configure_discord_channel(
     )
     db.add(config)
     await db.flush()
+    try:
+        reg = await _register_slash_commands(application_id, bot_token)
+        print(f"[Discord] Slash command registration (new): {reg['status']}")
+    except Exception as e:
+        print(f"[Discord] Warning: could not register slash commands: {e}")
     return ChannelConfigOut.model_validate(config)
 
 
@@ -120,6 +130,33 @@ async def delete_discord_channel(
     if not config:
         raise HTTPException(status_code=404, detail="Discord not configured")
     await db.delete(config)
+
+
+# ─── Slash Command Registration ─────────────────────────
+
+async def _register_slash_commands(application_id: str, bot_token: str) -> dict:
+    """Register /ask global slash command with Discord API."""
+    import httpx
+    command = {
+        "name": "ask",
+        "description": "Ask the AI agent a question",
+        "options": [
+            {
+                "name": "message",
+                "description": "Your question or message to the agent",
+                "type": 3,   # STRING
+                "required": True,
+            }
+        ],
+    }
+    url = f"https://discord.com/api/v10/applications/{application_id}/commands"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.put(
+            url,
+            headers={"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"},
+            json=[command],
+        )
+        return {"status": resp.status_code, "body": resp.text}
 
 
 # ─── Interactions Webhook ───────────────────────────────
