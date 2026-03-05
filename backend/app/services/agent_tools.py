@@ -954,9 +954,53 @@ async def _read_document(ws: Path, rel_path: str, max_chars: int = 8000) -> str:
 
         elif ext == ".docx":
             from docx import Document
+            from docx.oxml.ns import qn
             doc = Document(str(file_path))
-            paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-            content = "\n".join(paragraphs) if paragraphs else "(Document is empty)"
+            lines: list[str] = []
+
+            def _extract_para_text(para) -> str:
+                return para.text.strip()
+
+            def _extract_table(table) -> str:
+                """Flatten a table into readable text."""
+                rows = []
+                for row in table.rows:
+                    cells = [cell.text.strip() for cell in row.cells]
+                    # Remove duplicate adjacent cells (merged cells repeat)
+                    deduped = [cells[0]] + [c for i, c in enumerate(cells[1:]) if c != cells[i]]
+                    row_str = " | ".join(c for c in deduped if c)
+                    if row_str:
+                        rows.append(row_str)
+                return "\n".join(rows)
+
+            # 1. Main paragraphs
+            for para in doc.paragraphs:
+                t = _extract_para_text(para)
+                if t:
+                    lines.append(t)
+
+            # 2. Tables in main body
+            for table in doc.tables:
+                t = _extract_table(table)
+                if t:
+                    lines.append(t)
+
+            # 3. Text boxes / drawing shapes (wmf/shapes in body XML)
+            for shape in doc.element.body.iter(qn("w:txbxContent")):
+                for child in shape.iter(qn("w:t")):
+                    if child.text and child.text.strip():
+                        lines.append(child.text.strip())
+
+            # 4. Headers and footers
+            for section in doc.sections:
+                for hf in [section.header, section.footer]:
+                    if hf and hf.is_linked_to_previous is False:
+                        for para in hf.paragraphs:
+                            t = para.text.strip()
+                            if t:
+                                lines.append(t)
+
+            content = "\n".join(lines) if lines else "(Document is empty or uses unsupported formatting)"
 
         elif ext == ".xlsx":
             from openpyxl import load_workbook
