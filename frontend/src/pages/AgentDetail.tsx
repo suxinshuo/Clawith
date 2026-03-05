@@ -438,11 +438,18 @@ export default function AgentDetail() {
     }, [agent]);
 
     // Load chat history + connect websocket when chat tab is active
+    const parseChatMsg = (msg: ChatMsg): ChatMsg => {
+        if (msg.role !== 'user') return msg;
+        const m = msg.content.match(/^\[file:([^\]]+)\]\n?/);
+        if (m) return { ...msg, fileName: m[1], content: msg.content.slice(m[0].length) };
+        return msg;
+    };
+
     useEffect(() => {
         if (!id || !token || activeTab !== 'chat') return;
         fetch(`/api/chat/${id}/history`, { headers: { Authorization: `Bearer ${token}` } })
             .then(r => r.json())
-            .then((h: ChatMsg[]) => { if (h.length > 0) setChatMessages(h); })
+            .then((h: ChatMsg[]) => { if (h.length > 0) setChatMessages(h.map(parseChatMsg)); })
             .catch(() => { });
     }, [id, token, activeTab]);
 
@@ -554,7 +561,7 @@ export default function AgentDetail() {
             userMsg = userMsg || `⌇ ${attachedFile.name}`;
         }
         setChatMessages(prev => [...prev, { role: 'user', content: userMsg, fileName: attachedFile?.name }]);
-        wsRef.current.send(JSON.stringify({ content: contentForLLM, display_content: userMsg }));
+        wsRef.current.send(JSON.stringify({ content: contentForLLM, display_content: userMsg, file_name: attachedFile?.name || '' }));
         setChatInput(''); setAttachedFile(null);
     };
 

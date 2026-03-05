@@ -80,6 +80,14 @@ export default function Chat() {
         enabled: !!id,
     });
 
+    // Parse message content that may include [file:name] prefix from saved history
+    const parseMessage = (msg: Message): Message => {
+        if (msg.role !== 'user') return msg;
+        const m = msg.content.match(/^\[file:([^\]]+)\]\n?/);
+        if (m) return { ...msg, fileName: m[1], content: msg.content.slice(m[0].length) };
+        return msg;
+    };
+
     // Load chat history on mount
     useEffect(() => {
         if (!id || !token) return;
@@ -88,7 +96,7 @@ export default function Chat() {
         })
             .then(r => r.json())
             .then((history: Message[]) => {
-                if (history.length > 0) setMessages(history);
+                if (history.length > 0) setMessages(history.map(parseMessage));
             })
             .catch(() => { /* ignore */ });
     }, [id, token]);
@@ -238,7 +246,7 @@ export default function Chat() {
             content: userMsg,
             fileName: attachedFile?.name,
         }]);
-        wsRef.current.send(JSON.stringify({ content: contentForLLM, display_content: userMsg }));
+        wsRef.current.send(JSON.stringify({ content: contentForLLM, display_content: userMsg, file_name: attachedFile?.name || '' }));
         setInput('');
         setAttachedFile(null);
     };

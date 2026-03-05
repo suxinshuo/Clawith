@@ -428,6 +428,7 @@ async def websocket_chat(
             data = await websocket.receive_json()
             content = data.get("content", "")
             display_content = data.get("display_content", "")  # User-facing display text
+            file_name = data.get("file_name", "")  # Original file name for attachment display
             print(f"[WS] Received: {content[:50]}")
 
             if not content:
@@ -453,7 +454,10 @@ async def websocket_chat(
             conversation.append({"role": "user", "content": content})
 
             # Save user message — display_content for history display, content for LLM
+            # Prefix with [file:name] if there's a file attachment so history can show it
             saved_content = display_content if display_content else content
+            if file_name:
+                saved_content = f"[file:{file_name}]\n{saved_content}"
             async with async_session() as db:
                 user_msg = ChatMessage(
                     agent_id=agent_id,
