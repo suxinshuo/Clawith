@@ -12,6 +12,50 @@ from app.schemas.schemas import HealthResponse
 settings = get_settings()
 
 
+async def _start_ss_local() -> None:
+    """Start ss-local SOCKS5 proxy for Discord API calls. Tries nodes in priority order."""
+    import asyncio, json, os, shutil, tempfile
+    if not shutil.which("ss-local"):
+        print("[Proxy] ss-local not found — Discord proxy disabled", flush=True)
+        return
+    nodes = [
+        # Priority order: Macau, Taiwan, Thailand, Indonesia, Netherlands
+        {"server": os.environ.get("SS_SERVER", "maca.domndd.blog"),
+         "port": int(os.environ.get("SS_PORT", "12991")),
+         "password": os.environ.get("SS_PASSWORD", "f2de98b1-2621-4566-9ace-0d24774c9ae3"),
+         "method": os.environ.get("SS_METHOD", "chacha20-ietf-poly1305"), "label": "Macau-1"},
+        {"server": "maca.domndd.blog", "port": 12993, "password": "f2de98b1-2621-4566-9ace-0d24774c9ae3",
+         "method": "chacha20-ietf-poly1305", "label": "Macau-2"},
+        {"server": "tw.domndd.blog",  "port": 19042, "password": "f2de98b1-2621-4566-9ace-0d24774c9ae3",
+         "method": "chacha20-ietf-poly1305", "label": "Taiwan"},
+        {"server": "th.ndnddm.pro",  "port": 36048, "password": "f2de98b1-2621-4566-9ace-0d24774c9ae3",
+         "method": "aes-128-gcm", "label": "Thailand"},
+        {"server": "ind.ndnddm.pro", "port": 22321, "password": "f2de98b1-2621-4566-9ace-0d24774c9ae3",
+         "method": "chacha20-ietf-poly1305", "label": "Indonesia"},
+        {"server": "eur.ndnddm.pro", "port": 47497, "password": "f2de98b1-2621-4566-9ace-0d24774c9ae3",
+         "method": "aes-128-gcm", "label": "Netherlands"},
+    ]
+    for node in nodes:
+        cfg = {"server": node["server"], "server_port": node["port"], "local_address": "127.0.0.1",
+               "local_port": 1080, "password": node["password"], "method": node["method"], "timeout": 10}
+        tf = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        json.dump(cfg, tf); tf.close()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ss-local", "-c", tf.name,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            await asyncio.sleep(2)
+            if proc.returncode is None:
+                os.environ["DISCORD_PROXY"] = "socks5h://127.0.0.1:1080"
+                print(f"[Proxy] ss-local → {node['label']} ({node['server']}:{node['port']})", flush=True)
+                return
+            err = (await proc.stderr.read()).decode()[:120]
+            print(f"[Proxy] {node['label']} failed: {err}", flush=True)
+        except Exception as e:
+            print(f"[Proxy] {node['label']} error: {e}", flush=True)
+    print("[Proxy] All SS nodes failed — Discord API calls will run without proxy", flush=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup and shutdown events."""
@@ -66,6 +110,9 @@ async def lifespan(app: FastAPI):
         print(f"[startup] ⛔ Background tasks failed: {e}", flush=True)
         import traceback
         traceback.print_exc()
+
+    # Start ss-local SOCKS5 proxy for Discord API calls (non-fatal)
+    asyncio.create_task(_start_ss_local(), name="ss-local-proxy")
 
     yield
 
