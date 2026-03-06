@@ -2856,19 +2856,21 @@ export default function AgentDetail() {
                             <input type="datetime-local" value={expiryValue} onChange={e => setExpiryValue(e.target.value)}
                                 style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-subtle)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: '13px', boxSizing: 'border-box' }} />
                         </div>
-                        <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                        <div style={{ display: 'flex', gap: '8px', justifyContent: 'space-between', alignItems: 'center' }}>
                             <button onClick={() => saveExpiry(true)} disabled={expirySaving}
-                                style={{ padding: '7px 14px', borderRadius: '8px', border: '1px solid var(--border-subtle)', background: 'none', cursor: 'pointer', fontSize: '13px', color: 'var(--text-secondary)' }}>
+                                style={{ padding: '7px 12px', borderRadius: '8px', border: '1px solid var(--border-subtle)', background: 'none', cursor: 'pointer', fontSize: '12px', color: 'var(--text-secondary)' }}>
                                 🔓 永不过期
                             </button>
-                            <button onClick={() => setShowExpiryModal(false)} disabled={expirySaving}
-                                style={{ padding: '7px 14px', borderRadius: '8px', border: '1px solid var(--border-subtle)', background: 'none', cursor: 'pointer', fontSize: '13px', color: 'var(--text-secondary)' }}>
-                                取消
-                            </button>
-                            <button onClick={() => saveExpiry(false)} disabled={expirySaving || !expiryValue}
-                                style={{ padding: '7px 16px', borderRadius: '8px', background: 'var(--accent)', border: 'none', cursor: 'pointer', fontSize: '13px', color: '#fff', fontWeight: 600, opacity: !expiryValue ? 0.5 : 1 }}>
-                                {expirySaving ? '保存中…' : '保存'}
-                            </button>
+                            <div style={{ display: 'flex', gap: '8px' }}>
+                                <button onClick={() => setShowExpiryModal(false)} disabled={expirySaving}
+                                    style={{ padding: '7px 14px', borderRadius: '8px', border: '1px solid var(--border-subtle)', background: 'none', cursor: 'pointer', fontSize: '13px', color: 'var(--text-secondary)' }}>
+                                    取消
+                                </button>
+                                <button onClick={() => saveExpiry(false)} disabled={expirySaving || !expiryValue}
+                                    style={{ padding: '7px 16px', borderRadius: '8px', background: 'var(--accent)', border: 'none', cursor: 'pointer', fontSize: '13px', color: '#fff', fontWeight: 600, opacity: !expiryValue ? 0.5 : 1 }}>
+                                    {expirySaving ? '保存中…' : '保存'}
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
