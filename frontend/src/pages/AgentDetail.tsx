@@ -516,6 +516,42 @@ export default function AgentDetail() {
 
     // Websocket chat state (for 'me' conversation)
     const token = useAuthStore((s) => s.token);
+    const currentUser = useAuthStore((s) => s.user);
+    const isAdmin = currentUser?.role === 'platform_admin' || currentUser?.role === 'org_admin';
+
+    // Expiry editor modal state
+    const [showExpiryModal, setShowExpiryModal] = useState(false);
+    const [expiryValue, setExpiryValue] = useState('');       // datetime-local string or ''
+    const [expirySaving, setExpirySaving] = useState(false);
+
+    const openExpiryModal = () => {
+        const cur = (agent as any)?.expires_at;
+        // Convert ISO to datetime-local format (YYYY-MM-DDTHH:MM)
+        setExpiryValue(cur ? new Date(cur).toISOString().slice(0, 16) : '');
+        setShowExpiryModal(true);
+    };
+
+    const addHours = (h: number) => {
+        const base = (agent as any)?.expires_at ? new Date((agent as any).expires_at) : new Date();
+        const next = new Date(base.getTime() + h * 3600_000);
+        setExpiryValue(next.toISOString().slice(0, 16));
+    };
+
+    const saveExpiry = async (permanent = false) => {
+        setExpirySaving(true);
+        try {
+            const token = localStorage.getItem('token');
+            const body = permanent ? { expires_at: null } : { expires_at: expiryValue ? new Date(expiryValue).toISOString() : null };
+            await fetch(`/api/agents/${id}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                body: JSON.stringify(body),
+            });
+            queryClient.invalidateQueries({ queryKey: ['agent', id] });
+            setShowExpiryModal(false);
+        } catch (e) { alert('Failed: ' + e); }
+        setExpirySaving(false);
+    };
     interface ChatMsg { role: 'user' | 'assistant' | 'tool_call'; content: string; fileName?: string; toolName?: string; toolArgs?: any; toolStatus?: 'running' | 'done'; toolResult?: string; }
     const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
     const [chatInput, setChatInput] = useState('');
@@ -967,6 +1003,15 @@ export default function AgentDetail() {
                                     <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
                                         Expires: {new Date((agent as any).expires_at).toLocaleString()}
                                     </span>
+                                )}
+                                {isAdmin && (
+                                    <button
+                                        onClick={openExpiryModal}
+                                        title="Edit expiry time"
+                                        style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px', color: 'var(--text-tertiary)', padding: '1px 4px', borderRadius: '4px', lineHeight: 1 }}
+                                        onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-secondary)')}
+                                        onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                                    >✏️ {(agent as any).expires_at || (agent as any).is_expired ? '续期' : '设置过期'}</button>
                                 )}
                             </p>
                         </div>
@@ -2776,6 +2821,59 @@ export default function AgentDetail() {
                     </div>
                 )
             }
+
+            {/* ── Expiry Editor Modal (admin only) ── */}
+            {showExpiryModal && (
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 9000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                    onClick={() => setShowExpiryModal(false)}>
+                    <div style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)', borderRadius: '12px', padding: '24px', width: '360px', maxWidth: '90vw' }}
+                        onClick={e => e.stopPropagation()}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
+                            <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 600 }}>⏰ Agent 过期时间</h3>
+                            <button onClick={() => setShowExpiryModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', fontSize: '18px', lineHeight: 1 }}>×</button>
+                        </div>
+                        <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '16px' }}>
+                            {(agent as any).is_expired
+                                ? <span style={{ color: 'var(--error)', fontWeight: 600 }}>⏰ 已过期</span>
+                                : (agent as any).expires_at
+                                    ? <>当前过期时间：<strong>{new Date((agent as any).expires_at).toLocaleString()}</strong></>
+                                    : <span style={{ color: 'var(--success)' }}>永不过期</span>
+                            }
+                        </div>
+                        <div style={{ marginBottom: '16px' }}>
+                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '8px' }}>快速续期（从当前基础上）</div>
+                            <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                                {([['+ 24h', 24], ['+ 7天', 168], ['+ 30天', 720], ['+ 90天', 2160]] as [string, number][]).map(([label, h]) => (
+                                    <button key={h} onClick={() => addHours(h)}
+                                        style={{ padding: '4px 10px', borderRadius: '6px', border: '1px solid var(--border-subtle)', background: 'var(--bg-primary)', cursor: 'pointer', fontSize: '12px', color: 'var(--text-primary)' }}>
+                                        {label}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                        <div style={{ marginBottom: '20px' }}>
+                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '6px' }}>自定义截止时间</div>
+                            <input type="datetime-local" value={expiryValue} onChange={e => setExpiryValue(e.target.value)}
+                                style={{ width: '100%', padding: '8px 10px', borderRadius: '8px', border: '1px solid var(--border-subtle)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: '13px', boxSizing: 'border-box' }} />
+                        </div>
+                        <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                            <button onClick={() => saveExpiry(true)} disabled={expirySaving}
+                                style={{ padding: '7px 14px', borderRadius: '8px', border: '1px solid var(--border-subtle)', background: 'none', cursor: 'pointer', fontSize: '13px', color: 'var(--text-secondary)' }}>
+                                🔓 永不过期
+                            </button>
+                            <button onClick={() => setShowExpiryModal(false)} disabled={expirySaving}
+                                style={{ padding: '7px 14px', borderRadius: '8px', border: '1px solid var(--border-subtle)', background: 'none', cursor: 'pointer', fontSize: '13px', color: 'var(--text-secondary)' }}>
+                                取消
+                            </button>
+                            <button onClick={() => saveExpiry(false)} disabled={expirySaving || !expiryValue}
+                                style={{ padding: '7px 16px', borderRadius: '8px', background: 'var(--accent)', border: 'none', cursor: 'pointer', fontSize: '13px', color: '#fff', fontWeight: 600, opacity: !expiryValue ? 0.5 : 1 }}>
+                                {expirySaving ? '保存中…' : '保存'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
         </>
     );
 }

@@ -311,10 +311,11 @@ async def update_agent(
     if "expires_at" in update_data:
         if not is_admin:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admin can modify agent expiry time")
-        # If extending expiry, re-activate the agent
         from datetime import datetime, timezone as tz
         new_expires = update_data["expires_at"]
-        if new_expires and (not agent.expires_at or new_expires > agent.expires_at):
+        # Allow any value: extend, shorten, or null (permanent).
+        # Re-activate the agent if new expiry is in the future or cleared.
+        if new_expires is None or new_expires > datetime.now(tz.utc):
             if agent.is_expired:
                 agent.is_expired = False
                 agent.status = "idle"
