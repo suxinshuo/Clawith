@@ -93,6 +93,18 @@ async def lifespan(app: FastAPI):
     # Startup: seed data (non-fatal)
     try:
         print("[startup] seeding...", flush=True)
+
+        # Seed default company (Tenant) — required before users can register
+        from app.models.tenant import Tenant
+        from app.database import async_session as _session
+        from sqlalchemy import select as _select
+        async with _session() as _db:
+            _existing = await _db.execute(_select(Tenant).where(Tenant.slug == "default"))
+            if not _existing.scalar_one_or_none():
+                _db.add(Tenant(name="Default", slug="default", im_provider="web_only"))
+                await _db.commit()
+                print("[startup] ✅ Default company created", flush=True)
+
         await seed_builtin_tools()
         await seed_agent_templates()
         from app.services.skill_seeder import seed_skills
