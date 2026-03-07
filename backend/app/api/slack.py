@@ -282,6 +282,7 @@ async def slack_event_webhook(
     import random as _random
     from pathlib import Path as _Path
     import httpx as _httpx
+    from datetime import datetime, timezone
     from app.api.feishu import _FILE_ACK_MESSAGES
     _file_user_messages = []
     _settings = _gs()
@@ -335,7 +336,6 @@ async def slack_event_webhook(
         user_text += "\n" + " ".join(f"[文件已上传: {p}]" for p in _file_user_messages)
 
     # Save user message
-    from datetime import datetime, timezone
     db.add(ChatMessage(agent_id=agent_id, user_id=platform_user_id, role="user", content=user_text, conversation_id=session_conv_id))
     sess.last_message_at = datetime.now(timezone.utc)
     await db.commit()
