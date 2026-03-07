@@ -734,7 +734,13 @@ export default function AgentDetail() {
                     // Silently refresh session list to update last_message_at (no loading spinner)
                     fetchMySessions(true);
                 } else if (d.type === 'error' || d.type === 'quota_exceeded') {
-                    setChatMessages(prev => [...prev, { role: 'assistant', content: `⚠️ ${d.content || d.detail || d.message || 'Request denied'}` }]);
+                    const msg = d.content || d.detail || d.message || 'Request denied';
+                    setChatMessages(prev => [...prev, { role: 'assistant', content: `⚠️ ${msg}` }]);
+                    // Agent expired — permanently stop reconnecting
+                    if (msg.includes('expired')) {
+                        cancelled = true;
+                        setAgentExpired(true);
+                    }
                 } else {
                     setChatMessages(prev => [...prev, { role: d.role, content: d.content }]);
                 }
