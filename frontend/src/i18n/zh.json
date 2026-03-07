@@ -291,6 +291,10 @@
         "typeToConfirm": "输入数字员工名称以确认"
       }
     },
+    "tools": {
+      "platformTools": "平台预置工具",
+      "agentInstalled": "Agent 自行安装的工具"
+    },
     "toolCategories": {
       "file": "文件操作",
       "task": "任务管理",

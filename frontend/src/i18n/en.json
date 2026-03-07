@@ -292,6 +292,10 @@
         "typeToConfirm": "Type the agent name to confirm"
       }
     },
+    "tools": {
+      "platformTools": "Platform Tools",
+      "agentInstalled": "Agent-Installed Tools"
+    },
     "toolCategories": {
       "file": "File Operations",
       "task": "Task Management",

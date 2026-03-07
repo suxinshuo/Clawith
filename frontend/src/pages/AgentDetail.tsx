@@ -87,91 +87,115 @@ function ToolsManager({ agentId }: { agentId: string }) {
 
     if (loading) return <div style={{ color: 'var(--text-tertiary)', padding: '20px' }}>{t('common.loading')}</div>;
 
-    // Group by category
-    const grouped = tools.reduce((acc: Record<string, any[]>, t) => {
-        const cat = t.category || 'general';
-        (acc[cat] = acc[cat] || []).push(t);
-        return acc;
-    }, {});
+    // Split by source first, then group by category
+    const systemTools = tools.filter(t => t.source !== 'user_installed');
+    const agentInstalledTools = tools.filter(t => t.source === 'user_installed');
+
+    const groupByCategory = (toolList: any[]) =>
+        toolList.reduce((acc: Record<string, any[]>, t) => {
+            const cat = t.category || 'general';
+            (acc[cat] = acc[cat] || []).push(t);
+            return acc;
+        }, {});
+
+    const renderToolGroup = (groupedTools: Record<string, any[]>) =>
+        Object.entries(groupedTools).map(([category, catTools]) => (
+            <div key={category}>
+                <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                    {getCategoryLabels(t)[category] || category}
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    {(catTools as any[]).map((tool: any) => {
+                        const hasConfig = tool.config_schema?.fields?.length > 0 || tool.type === 'mcp';
+                        const hasAgentOverride = tool.agent_config && Object.keys(tool.agent_config).length > 0;
+                        return (
+                            <div key={tool.id} className="card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1, minWidth: 0 }}>
+                                    <span style={{ fontSize: '18px' }}>{tool.icon}</span>
+                                    <div style={{ minWidth: 0 }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                            <span style={{ fontWeight: 500, fontSize: '13px' }}>{tool.display_name}</span>
+                                            {tool.type === 'mcp' && (
+                                                <span style={{ fontSize: '10px', background: 'var(--primary)', color: '#fff', borderRadius: '4px', padding: '1px 5px' }}>MCP</span>
+                                            )}
+                                            {tool.type === 'builtin' && (
+                                                <span style={{ fontSize: '10px', background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', borderRadius: '4px', padding: '1px 5px' }}>Built-in</span>
+                                            )}
+                                            {hasAgentOverride && (
+                                                <span style={{ fontSize: '10px', background: 'rgba(99,102,241,0.15)', color: 'var(--accent-color)', borderRadius: '4px', padding: '1px 5px' }}>Configured</span>
+                                            )}
+                                        </div>
+                                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                            {tool.description}
+                                            {tool.mcp_server_name && <span> · {tool.mcp_server_name}</span>}
+                                        </div>
+                                    </div>
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+                                    {hasConfig && (
+                                        <button
+                                            onClick={() => openConfig(tool)}
+                                            style={{ background: 'none', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', color: 'var(--text-secondary)' }}
+                                            title="Configure per-agent settings"
+                                        >⚙️ Config</button>
+                                    )}
+                                    <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: 'pointer', flexShrink: 0 }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={tool.enabled}
+                                            onChange={e => toggleTool(tool.id, e.target.checked)}
+                                            style={{ opacity: 0, width: 0, height: 0 }}
+                                        />
+                                        <span style={{
+                                            position: 'absolute', inset: 0,
+                                            background: tool.enabled ? '#22c55e' : 'var(--bg-tertiary)',
+                                            borderRadius: '11px', transition: 'background 0.2s',
+                                        }}>
+                                            <span style={{
+                                                position: 'absolute', left: tool.enabled ? '20px' : '2px', top: '2px',
+                                                width: '18px', height: '18px', background: '#fff',
+                                                borderRadius: '50%', transition: 'left 0.2s',
+                                            }} />
+                                        </span>
+                                    </label>
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+        ));
 
     return (
         <>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                {Object.entries(grouped).map(([category, catTools]) => (
-                    <div key={category}>
-                        <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                            {getCategoryLabels(t)[category] || category}
+                {/* Platform Tools Section */}
+                {systemTools.length > 0 && (
+                    <>
+                        <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            🔧 {t('agent.tools.platformTools', 'Platform Tools')}
+                            <span style={{ fontSize: '11px', fontWeight: 400, color: 'var(--text-tertiary)' }}>({systemTools.length})</span>
                         </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                            {(catTools as any[]).map((tool: any) => {
-                                const hasConfig = tool.config_schema?.fields?.length > 0 || tool.type === 'mcp';
-                                const hasAgentOverride = tool.agent_config && Object.keys(tool.agent_config).length > 0;
-                                return (
-                                    <div key={tool.id} className="card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px' }}>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1, minWidth: 0 }}>
-                                            <span style={{ fontSize: '18px' }}>{tool.icon}</span>
-                                            <div style={{ minWidth: 0 }}>
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                    <span style={{ fontWeight: 500, fontSize: '13px' }}>{tool.display_name}</span>
-                                                    {tool.type === 'mcp' && (
-                                                        <span style={{ fontSize: '10px', background: 'var(--primary)', color: '#fff', borderRadius: '4px', padding: '1px 5px' }}>MCP</span>
-                                                    )}
-                                                    {tool.type === 'builtin' && (
-                                                        <span style={{ fontSize: '10px', background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', borderRadius: '4px', padding: '1px 5px' }}>Built-in</span>
-                                                    )}
-                                                    {hasAgentOverride && (
-                                                        <span style={{ fontSize: '10px', background: 'rgba(99,102,241,0.15)', color: 'var(--accent-color)', borderRadius: '4px', padding: '1px 5px' }}>Configured</span>
-                                                    )}
-                                                </div>
-                                                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                                    {tool.description}
-                                                    {tool.mcp_server_name && <span> · {tool.mcp_server_name}</span>}
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
-                                            {hasConfig && (
-                                                <button
-                                                    onClick={() => openConfig(tool)}
-                                                    style={{ background: 'none', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', color: 'var(--text-secondary)' }}
-                                                    title="Configure per-agent settings"
-                                                >⚙️ Config</button>
-                                            )}
-                                            <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: 'pointer', flexShrink: 0 }}>
-                                                <input
-                                                    type="checkbox"
-                                                    checked={tool.enabled}
-                                                    onChange={e => toggleTool(tool.id, e.target.checked)}
-                                                    style={{ opacity: 0, width: 0, height: 0 }}
-                                                />
-                                                <span style={{
-                                                    position: 'absolute', inset: 0,
-                                                    background: tool.enabled ? '#22c55e' : 'var(--bg-tertiary)',
-                                                    borderRadius: '11px', transition: 'background 0.2s',
-                                                }}>
-                                                    <span style={{
-                                                        position: 'absolute', left: tool.enabled ? '20px' : '2px', top: '2px',
-                                                        width: '18px', height: '18px', background: '#fff',
-                                                        borderRadius: '50%', transition: 'left 0.2s',
-                                                    }} />
-                                                </span>
-                                            </label>
-                                        </div>
-                                    </div>
-                                );
-                            })}
+                        {renderToolGroup(groupByCategory(systemTools))}
+                    </>
+                )}
+
+                {/* Agent-Installed Tools Section */}
+                {agentInstalledTools.length > 0 && (
+                    <>
+                        <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '6px', marginTop: systemTools.length > 0 ? '8px' : 0, paddingTop: systemTools.length > 0 ? '12px' : 0, borderTop: systemTools.length > 0 ? '1px solid var(--border-subtle)' : 'none' }}>
+                            🤖 {t('agent.tools.agentInstalled', 'Agent-Installed Tools')}
+                            <span style={{ fontSize: '11px', fontWeight: 400, color: 'var(--text-tertiary)' }}>({agentInstalledTools.length})</span>
                         </div>
-                    </div>
-                ))
-                }
-                {
-                    tools.length === 0 && (
-                        <div className="card" style={{ textAlign: 'center', padding: '30px', color: 'var(--text-tertiary)' }}>
-                            {t('common.noData')}
-                        </div>
-                    )
-                }
+                        {renderToolGroup(groupByCategory(agentInstalledTools))}
+                    </>
+                )}
             </div>
+            {tools.length === 0 && (
+                <div className="card" style={{ textAlign: 'center', padding: '30px', color: 'var(--text-tertiary)' }}>
+                    {t('common.noData')}
+                </div>
+            )}
 
             {/* Tool Config Modal */}
             {configTool && (
