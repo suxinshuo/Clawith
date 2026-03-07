@@ -50,7 +50,8 @@ export default function App() {
         <Routes>
             <Route path="/login" element={<Login />} />
             <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-                <Route index element={<Dashboard />} />
+                <Route index element={<Navigate to="/plaza" replace />} />
+                <Route path="dashboard" element={<Dashboard />} />
                 <Route path="plaza" element={<Plaza />} />
                 <Route path="agents/new" element={<AgentCreate />} />
                 <Route path="agents/:id" element={<AgentDetail />} />

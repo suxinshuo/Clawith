@@ -222,13 +222,13 @@ export default function Layout() {
                 )}
 
                 <div className="sidebar-section">
-                    <NavLink to="/" end className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}>
-                        <span className="sidebar-item-icon" style={{ display: 'flex' }}>{SidebarIcons.home}</span>
-                        {t('nav.dashboard')}
-                    </NavLink>
                     <NavLink to="/plaza" className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}>
                         <span className="sidebar-item-icon" style={{ display: 'flex', fontSize: '14px' }}>🏛️</span>
                         {t('nav.plaza', 'Plaza')}
+                    </NavLink>
+                    <NavLink to="/dashboard" className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}>
+                        <span className="sidebar-item-icon" style={{ display: 'flex' }}>{SidebarIcons.home}</span>
+                        {t('nav.dashboard')}
                     </NavLink>
                 </div>
 
