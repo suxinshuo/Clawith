@@ -1491,6 +1491,48 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
                     content=content, receive_id_type="open_id",
                 )
 
+            async def _save_outgoing_to_feishu_session(open_id: str):
+                """Save the outgoing message to the Feishu P2P chat session."""
+                try:
+                    from app.models.audit import ChatMessage
+                    from app.models.agent import Agent as AgentModel
+                    from app.services.channel_session import find_or_create_channel_session
+                    from datetime import datetime as _dt, timezone as _tz
+
+                    agent_r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+                    agent_obj = agent_r.scalar_one_or_none()
+                    creator_id = agent_obj.creator_id if agent_obj else agent_id
+
+                    # Look up the platform user for this Feishu open_id
+                    from app.models.user import User as UserModel
+                    u_r = await db.execute(
+                        select(UserModel).where(UserModel.feishu_open_id == open_id)
+                    )
+                    feishu_user = u_r.scalar_one_or_none()
+                    user_id = feishu_user.id if feishu_user else creator_id
+
+                    ext_conv_id = f"feishu_p2p_{open_id}"
+                    sess = await find_or_create_channel_session(
+                        db=db,
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        external_conv_id=ext_conv_id,
+                        source_channel="feishu",
+                        first_message_title=f"[Agent → {member_name}]",
+                    )
+                    db.add(ChatMessage(
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        role="assistant",
+                        content=message_text,
+                        conversation_id=str(sess.id),
+                    ))
+                    sess.last_message_at = _dt.now(_tz.utc)
+                    await db.commit()
+                    print(f"[Feishu] Saved outgoing message to session {sess.id} ({member_name})")
+                except Exception as e:
+                    print(f"[Feishu] Failed to save outgoing message to history: {e}")
+
             # Step 1: Try resolve open_id for this agent's app (needs contact:user.id:readonly)
             # If successful, update stored open_id so future sends work directly
             if target_member.email or target_member.phone:
@@ -1506,6 +1548,7 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
                             # Update stored open_id for this app so future sends skip resolve
                             target_member.feishu_open_id = resolved
                             await db.commit()
+                            await _save_outgoing_to_feishu_session(resolved)
                             return f"✅ Successfully sent message to {member_name}"
                 except Exception:
                     pass
@@ -1514,6 +1557,7 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
             if target_member.feishu_open_id:
                 resp = await _try_send(config.app_id, config.app_secret, target_member.feishu_open_id)
                 if resp.get("code") == 0:
+                    await _save_outgoing_to_feishu_session(target_member.feishu_open_id)
                     return f"✅ Successfully sent message to {member_name}"
 
                 # Step 3: If cross-app error, try org sync app as fallback
@@ -1527,6 +1571,7 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
                             target_member.feishu_open_id,
                         )
                         if resp2.get("code") == 0:
+                            await _save_outgoing_to_feishu_session(target_member.feishu_open_id)
                             return f"✅ Successfully sent message to {member_name}"
                         return f"❌ Send failed: {resp2.get('msg', str(resp2))}"
 
