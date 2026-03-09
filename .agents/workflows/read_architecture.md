@@ -9,7 +9,7 @@ At the start of every conversation about Clawith, always read the full architect
 // turbo
 1. Read the feature specification:
 ```
-cat /Users/ray/Documents/antigravity/Clawith/ARCHITECTURE_SPEC.md
+cat ARCHITECTURE_SPEC.md
 ```
 
 2. Confirm you have read and understood the full architecture spec, then ask the user what they would like to work on.
