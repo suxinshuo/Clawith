@@ -1443,7 +1443,7 @@ export default function AgentDetail() {
                                         </div>
                                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
                                             <span style={{ color: 'var(--text-tertiary)' }}>🌐 Timezone</span>
-                                            <span>{(agent as any).timezone || t('agent.settings.heartbeat.timezoneDefault', '↩ Company default')}</span>
+                                            <span>{(agent as any).effective_timezone || agent.timezone || 'UTC'}</span>
                                         </div>
                                     </div>
                                 </div>
@@ -2016,14 +2016,14 @@ export default function AgentDetail() {
                                                                     discord: t('common.channels.discord'),
                                                                     slack: t('common.channels.slack'),
                                                                 } as Record<string, string>)[s.source_channel] && (
-                                                                    <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '3px', background: 'var(--bg-tertiary)', color: 'var(--text-tertiary)', flexShrink: 0 }}>
-                                                                        {({
-                                                                            feishu: t('common.channels.feishu'),
-                                                                            discord: t('common.channels.discord'),
-                                                                            slack: t('common.channels.slack'),
-                                                                        } as Record<string, string>)[s.source_channel]}
-                                                                    </span>
-                                                                )}
+                                                                        <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '3px', background: 'var(--bg-tertiary)', color: 'var(--text-tertiary)', flexShrink: 0 }}>
+                                                                            {({
+                                                                                feishu: t('common.channels.feishu'),
+                                                                                discord: t('common.channels.discord'),
+                                                                                slack: t('common.channels.slack'),
+                                                                            } as Record<string, string>)[s.source_channel]}
+                                                                        </span>
+                                                                    )}
                                                             </div>
                                                             <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', display: 'flex', gap: '4px' }}>
                                                                 <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{s.username || ''}</span>
@@ -2693,6 +2693,50 @@ export default function AgentDetail() {
                                     );
                                 })()}
 
+                                {/* Timezone */}
+                                <div className="card" style={{ marginBottom: '12px' }}>
+                                    <h4 style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        {t('agent.settings.timezone.title', '🌐 Timezone')}
+                                    </h4>
+                                    <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '16px' }}>
+                                        {t('agent.settings.timezone.description', 'The timezone used for this agent\'s scheduling, active hours, and time awareness. Defaults to the company timezone if not set.')}
+                                    </p>
+                                    <div style={{
+                                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                        padding: '10px 14px', background: 'var(--bg-elevated)', borderRadius: '8px',
+                                        border: '1px solid var(--border-subtle)',
+                                    }}>
+                                        <div>
+                                            <div style={{ fontWeight: 500, fontSize: '13px' }}>{t('agent.settings.timezone.current', 'Agent Timezone')}</div>
+                                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                                {agent?.timezone
+                                                    ? t('agent.settings.timezone.override', 'Custom timezone for this agent')
+                                                    : t('agent.settings.timezone.inherited', 'Using company default timezone')}
+                                            </div>
+                                        </div>
+                                        <select
+                                            className="input"
+                                            disabled={!canManage}
+                                            value={agent?.timezone || ''}
+                                            onChange={async (e) => {
+                                                if (!canManage) return;
+                                                const val = e.target.value || null;
+                                                await agentApi.update(id!, { timezone: val } as any);
+                                                queryClient.invalidateQueries({ queryKey: ['agent', id] });
+                                            }}
+                                            style={{ width: '200px', fontSize: '12px', opacity: canManage ? 1 : 0.6 }}
+                                        >
+                                            <option value="">{t('agent.settings.timezone.default', '↩ Company default')}</option>
+                                            {['UTC', 'Asia/Shanghai', 'Asia/Tokyo', 'Asia/Seoul', 'Asia/Singapore', 'Asia/Kolkata', 'Asia/Dubai',
+                                                'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Europe/Moscow',
+                                                'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+                                                'America/Sao_Paulo', 'Australia/Sydney', 'Pacific/Auckland'].map(tz => (
+                                                    <option key={tz} value={tz}>{tz}</option>
+                                                ))}
+                                        </select>
+                                    </div>
+                                </div>
+
                                 {/* Heartbeat */}
                                 <div className="card" style={{ marginBottom: '12px' }}>
                                     <h4 style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -2795,41 +2839,7 @@ export default function AgentDetail() {
                                             />
                                         </div>
 
-                                        {/* Timezone */}
-                                        <div style={{
-                                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                            padding: '10px 14px', background: 'var(--bg-elevated)', borderRadius: '8px',
-                                            border: '1px solid var(--border-subtle)',
-                                        }}>
-                                            <div>
-                                                <div style={{ fontWeight: 500, fontSize: '13px' }}>🌐 {t('agent.settings.heartbeat.timezone', 'Timezone')}</div>
-                                                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
-                                                    {agent?.timezone
-                                                        ? t('agent.settings.heartbeat.timezoneOverride', 'Agent-level override')
-                                                        : t('agent.settings.heartbeat.timezoneInherited', 'Inherited from company')}
-                                                </div>
-                                            </div>
-                                            <select
-                                                className="input"
-                                                disabled={!canManage}
-                                                value={agent?.timezone || ''}
-                                                onChange={async (e) => {
-                                                    if (!canManage) return;
-                                                    const val = e.target.value || null;
-                                                    await agentApi.update(id!, { timezone: val } as any);
-                                                    queryClient.invalidateQueries({ queryKey: ['agent', id] });
-                                                }}
-                                                style={{ width: '200px', fontSize: '12px', opacity: canManage ? 1 : 0.6 }}
-                                            >
-                                                <option value="">{t('agent.settings.heartbeat.timezoneDefault', '↩ Company default')}</option>
-                                                {['UTC', 'Asia/Shanghai', 'Asia/Tokyo', 'Asia/Seoul', 'Asia/Singapore', 'Asia/Kolkata', 'Asia/Dubai',
-                                                    'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Europe/Moscow',
-                                                    'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
-                                                    'America/Sao_Paulo', 'Australia/Sydney', 'Pacific/Auckland'].map(tz => (
-                                                        <option key={tz} value={tz}>{tz}</option>
-                                                    ))}
-                                            </select>
-                                        </div>
+
 
                                         {/* Last Heartbeat */}
                                         {agent?.last_heartbeat_at && (

@@ -229,6 +229,16 @@ async def get_agent(
         creator = creator_result.scalar_one_or_none()
         out["creator_username"] = creator.username if creator else None
 
+    # Resolve effective timezone (agent → tenant → UTC)
+    effective_tz = agent.timezone
+    if not effective_tz and agent.tenant_id:
+        from app.models.tenant import Tenant
+        t_result = await db.execute(select(Tenant).where(Tenant.id == agent.tenant_id))
+        tenant = t_result.scalar_one_or_none()
+        if tenant:
+            effective_tz = tenant.timezone or "UTC"
+    out["effective_timezone"] = effective_tz or "UTC"
+
     return out
 
 

@@ -170,7 +170,7 @@ export default function UserManagement() {
                         <input
                             className="form-input"
                             type="text"
-                            placeholder={isChinese ? '🔍 搜索用户名、显示名或邮箱…' : '🔍 Search username, name or email…'}
+                            placeholder={isChinese ? '搜索用户名、显示名或邮箱…' : 'Search username, name or email…'}
                             value={searchQuery}
                             onChange={e => { setSearchQuery(e.target.value); setPage(1); }}
                             style={{
