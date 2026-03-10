@@ -255,7 +255,7 @@ async def call_llm(
                 async with httpx.AsyncClient(timeout=120) as client:
                     async with client.stream("POST", url, json=payload, headers=headers) as resp:
                         # Debug: log HTTP status and request ID
-                        _req_id = resp.headers.get("x-request-id") or resp.headers.get("request-id") or resp.headers.get("cf-ray") or ""
+                        _req_id = resp.headers.get("x-infron-request-id") or resp.headers.get("x-request-id") or resp.headers.get("request-id") or resp.headers.get("cf-ray") or ""
                         _last_req_id = _req_id
                         # Log all response headers for debugging provider request IDs
                         _hdr_keys = ", ".join(f"{k}={v[:60]}" for k, v in resp.headers.items() if k.lower() not in ("set-cookie", "content-type", "transfer-encoding", "connection"))
