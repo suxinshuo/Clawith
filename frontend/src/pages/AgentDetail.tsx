@@ -2003,7 +2003,7 @@ function AgentDetailInner() {
                                         </span>
                                     </div>
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                                        {(showAllTriggers ? standaloneTriggers : standaloneTriggers.slice(0, SECTION_PAGE_SIZE)).map((trig: any) => (
+                                        {(showAllTriggers ? standaloneTriggers : standaloneTriggers.slice(0, SECTION_PAGE_SIZE)).sort((a: any, b: any) => (b.is_enabled ? 1 : 0) - (a.is_enabled ? 1 : 0)).map((trig: any) => (
                                             <div key={trig.id} style={{
                                                 padding: '10px 14px', borderRadius: '8px',
                                                 border: '1px solid var(--border-subtle)',
