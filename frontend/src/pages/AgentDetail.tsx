@@ -848,6 +848,8 @@ function AgentDetailInner() {
             setWmSaved(false);
             // Invalidate all queries for the old agent to force fresh data
             queryClient.invalidateQueries({ queryKey: ['agent', id] });
+            // Re-apply hash so refresh preserves the current tab
+            window.history.replaceState(null, '', `#${activeTab}`);
         }
     }, [id]);
 
