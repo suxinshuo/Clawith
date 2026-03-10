@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, Component, ErrorInfo } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { agentApi, taskApi, fileApi, channelApi, enterpriseApi, activityApi, scheduleApi, skillApi, triggerApi, uploadFileWithProgress } from '../services/api';
@@ -569,7 +569,16 @@ function AgentDetailInner() {
     const { id } = useParams<{ id: string }>();
     const navigate = useNavigate();
     const queryClient = useQueryClient();
-    const [activeTab, setActiveTab] = useState<string>('status');
+    const location = useLocation();
+    const validTabs = ['status', 'aware', 'mind', 'tools', 'skills', 'relationships', 'workspace', 'chat', 'activityLog', 'settings'];
+    const hashTab = location.hash?.replace('#', '');
+    const [activeTab, setActiveTabRaw] = useState<string>(hashTab && validTabs.includes(hashTab) ? hashTab : 'status');
+
+    // Sync URL hash when tab changes
+    const setActiveTab = (tab: string) => {
+        setActiveTabRaw(tab);
+        window.history.replaceState(null, '', `#${tab}`);
+    };
 
     const { data: agent, isLoading } = useQuery({
         queryKey: ['agent', id],
@@ -822,10 +831,25 @@ function AgentDetailInner() {
         }
     }, [agent]);
 
-    // Welcome message editor state (must be at top level — not inside IIFE)
+    // Welcome message editor state (must be at top level -- not inside IIFE)
     const [wmDraft, setWmDraft] = useState('');
     const [wmSaved, setWmSaved] = useState(false);
     useEffect(() => { setWmDraft((agent as any)?.welcome_message || ''); }, [(agent as any)?.welcome_message]);
+
+    // Reset cached state when switching to a different agent
+    const prevIdRef = useRef(id);
+    useEffect(() => {
+        if (id && id !== prevIdRef.current) {
+            prevIdRef.current = id;
+            settingsInitRef.current = false;
+            setSettingsSaved(false);
+            setSettingsError('');
+            setWmDraft('');
+            setWmSaved(false);
+            // Invalidate all queries for the old agent to force fresh data
+            queryClient.invalidateQueries({ queryKey: ['agent', id] });
+        }
+    }, [id]);
 
     // Load chat history + connect websocket when chat tab is active
     const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'];
