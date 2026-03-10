@@ -495,7 +495,7 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
             on_tool_call=on_tool_call,
         )
 
-        # Store the reply in the Pulse Session
+        # Save assistant reply to Pulse session
         async with async_session() as db:
             result = await db.execute(
                 select(Participant).where(Participant.type == "agent", Participant.ref_id == agent_id)
@@ -511,26 +511,9 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
                 participant_id=agent_participant.id if agent_participant else None,
             ))
 
-            # Update trigger states
-            for t in triggers:
-                result = await db.execute(select(AgentTrigger).where(AgentTrigger.id == t.id))
-                trigger = result.scalar_one_or_none()
-                if trigger:
-                    trigger.last_fired_at = datetime.now(timezone.utc)
-                    trigger.fire_count += 1
-                    # Auto-disable single-shot types
-                    if trigger.type == "once":
-                        trigger.is_enabled = False
-                    if trigger.type == "on_message":
-                        trigger.is_enabled = False  # single-shot for agent-to-agent
-                    if trigger.type == "webhook":
-                        trigger.is_enabled = False  # single-shot by default
-                    # Clear webhook pending state
-                    if trigger.type == "webhook" and trigger.config:
-                        trigger.config = {**trigger.config, "_webhook_pending": False, "_webhook_payload": None}
-                    # Auto-disable expired
-                    if trigger.max_fires and trigger.fire_count >= trigger.max_fires:
-                        trigger.is_enabled = False
+            # NOTE: trigger state (last_fired_at, fire_count, auto-disable)
+            # is already updated in _tick() BEFORE this task was launched,
+            # to prevent race-condition duplicate fires.
 
             await db.commit()
 
@@ -660,6 +643,37 @@ async def _tick():
         if last and (now - last).total_seconds() < DEDUP_WINDOW:
             continue  # Skip — invoked too recently
         _last_invoke[agent_id] = now
+
+        # ── Immediately update trigger state BEFORE launching async task ──
+        # This prevents the next tick from re-evaluating the same trigger as
+        # "should fire" while the LLM call is still running (which can take
+        # minutes). Without this, the 15s tick interval + 30s dedup window
+        # would cause repeated invocations for long-running triggers.
+        try:
+            async with async_session() as db:
+                for t in agent_triggers:
+                    result = await db.execute(
+                        select(AgentTrigger).where(AgentTrigger.id == t.id)
+                    )
+                    trigger = result.scalar_one_or_none()
+                    if trigger:
+                        trigger.last_fired_at = now
+                        trigger.fire_count += 1
+                        # Auto-disable single-shot types immediately
+                        if trigger.type in ("once", "on_message", "webhook"):
+                            trigger.is_enabled = False
+                        if trigger.type == "webhook" and trigger.config:
+                            trigger.config = {
+                                **trigger.config,
+                                "_webhook_pending": False,
+                                "_webhook_payload": None,
+                            }
+                        if trigger.max_fires and trigger.fire_count >= trigger.max_fires:
+                            trigger.is_enabled = False
+                await db.commit()
+        except Exception as e:
+            logger.warning(f"Failed to pre-update trigger state: {e}")
+
         asyncio.create_task(_invoke_agent_for_triggers(agent_id, agent_triggers))
 
 
