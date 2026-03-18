@@ -711,6 +711,22 @@ select:focus {
   background: transparent;
 }
 
+/* OpenClaw link icon — top-right of avatar */
+.agent-avatar-link {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+}
+
 /* Small badge dot — absolute over avatar */
 .agent-avatar-badge {
   position: absolute;

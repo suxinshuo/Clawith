@@ -550,7 +550,7 @@ function SkillsTab() {
                             placeholder="ghp_xxxxxxxxxxxx"
                             value={tokenInput}
                             onChange={e => setTokenInput(e.target.value)}
-                            style={{ flex: 1, fontSize: '13px', fontFamily: 'monospace', WebkitTextSecurity: 'disc' as any }}
+                            style={{ flex: 1, fontSize: '13px', fontFamily: 'monospace', WebkitTextSecurity: 'disc' } as React.CSSProperties}
                         />
                         <button
                             className="btn btn-primary"
