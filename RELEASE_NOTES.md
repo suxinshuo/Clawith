@@ -85,7 +85,8 @@ All changes include `open_id` fallback for environments that haven't enabled `us
 
 3. **Update backend dependencies** (new dependency: `loguru`):
    ```bash
-   pip install -r requirements.txt
+   cd backend
+   pip install -e .
    ```
 
 4. **Restart**:
