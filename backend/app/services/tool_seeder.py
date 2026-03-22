@@ -243,6 +243,25 @@ BUILTIN_TOOLS = [
         "config_schema": {},
     },
     {
+        "name": "send_file_to_agent",
+        "display_name": "Agent File Transfer",
+        "description": "Send a workspace file to another digital employee. The file is copied to the target agent's workspace/inbox/files/ and an inbox note is created.",
+        "category": "communication",
+        "icon": "📤",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "agent_name": {"type": "string", "description": "Target agent name"},
+                "file_path": {"type": "string", "description": "Workspace-relative source file path"},
+                "message": {"type": "string", "description": "Optional delivery note"},
+            },
+            "required": ["agent_name", "file_path"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
         "name": "web_search",
         "display_name": "DuckDuckGo Search",
         "description": "Search the internet via DuckDuckGo. May be unavailable on some networks. Use Bing Search as an alternative.",
@@ -909,6 +928,38 @@ BUILTIN_TOOLS = [
         "config": {},
         "config_schema": {},
     },
+    # --- Pages: public HTML hosting ---
+    {
+        "name": "publish_page",
+        "display_name": "Publish Page",
+        "description": "Publish an HTML file from workspace as a public page. Returns a public URL that anyone can access without login. Only .html/.htm files can be published.",
+        "category": "pages",
+        "icon": "🌐",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path in workspace, e.g. 'workspace/output.html'"},
+            },
+            "required": ["path"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "list_published_pages",
+        "display_name": "List Published Pages",
+        "description": "List all pages published by this agent, showing their public URLs and view counts.",
+        "category": "pages",
+        "icon": "📋",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {},
+        },
+        "config": {},
+        "config_schema": {},
+    },
 ]
 
 
@@ -1095,4 +1146,3 @@ async def get_atlassian_api_key() -> str:
         if tool and tool.config:
             return tool.config.get("api_key", "")
     return ""
-
