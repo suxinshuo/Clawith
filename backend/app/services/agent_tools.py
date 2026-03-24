@@ -2844,12 +2844,30 @@ async def _send_file_to_agent(from_agent_id: uuid.UUID, ws: Path, args: dict) ->
                 )
                 target_agent = fuzzy_result.scalars().first()
             if not target_agent:
-                all_r = await db.execute(select(Agent).where(*base_filter))
-                names = [a.name for a in all_r.scalars().all()]
-                return f"❌ No agent found matching '{agent_name}'. Available: {', '.join(names) if names else 'none'}"
+                # Only show agents from relationships, not all agents
+                from app.models.org import AgentAgentRelationship
+                rel_r = await db.execute(
+                    select(Agent.name).join(
+                        AgentAgentRelationship,
+                        (AgentAgentRelationship.target_agent_id == Agent.id) & (AgentAgentRelationship.agent_id == from_agent_id)
+                    )
+                )
+                rel_names = [n for (n,) in rel_r.all()]
+                return f"❌ No agent found matching '{agent_name}'. Your connected colleagues: {', '.join(rel_names) if rel_names else 'none — ask your administrator to set up relationships'}"
 
             if target_agent.is_expired or (target_agent.expires_at and datetime.now(timezone.utc) >= target_agent.expires_at):
                 return f"⚠️ {target_agent.name} is currently unavailable — their service period has ended. Please contact the platform administrator."
+
+            # Enforce relationship: only allow file transfer with agents in relationships
+            from app.models.org import AgentAgentRelationship
+            rel_check = await db.execute(
+                select(AgentAgentRelationship.id).where(
+                    ((AgentAgentRelationship.agent_id == from_agent_id) & (AgentAgentRelationship.target_agent_id == target_agent.id))
+                    | ((AgentAgentRelationship.agent_id == target_agent.id) & (AgentAgentRelationship.target_agent_id == from_agent_id))
+                ).limit(1)
+            )
+            if not rel_check.scalar_one_or_none():
+                return f"❌ You do not have a relationship with {target_agent.name}. Only agents in your relationship list can receive files. Ask your administrator to add a relationship if needed."
 
             target_tenant_id = str(target_agent.tenant_id) if target_agent.tenant_id else None
             target_name = target_agent.name
@@ -2984,29 +3002,32 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                 )
                 target = fuzzy_result.scalars().first()
             if not target:
-                all_r = await db.execute(select(Agent).where(*base_filter))
-                names = [a.name for a in all_r.scalars().all()]
-                return f"❌ No agent found matching '{agent_name}'. Available: {', '.join(names) if names else 'none'}"
+                # Only show agents from relationships, not all agents
+                from app.models.org import AgentAgentRelationship
+                rel_r = await db.execute(
+                    select(Agent.name).join(
+                        AgentAgentRelationship,
+                        (AgentAgentRelationship.target_agent_id == Agent.id) & (AgentAgentRelationship.agent_id == from_agent_id)
+                    )
+                )
+                rel_names = [n for (n,) in rel_r.all()]
+                return f"❌ No agent found matching '{agent_name}'. Your connected colleagues: {', '.join(rel_names) if rel_names else 'none — ask your administrator to set up relationships'}"
 
             # Check if target agent has expired
             if target.is_expired or (target.expires_at and datetime.now(timezone.utc) >= target.expires_at):
                 return f"⚠️ {target.name} is currently unavailable — their service period has ended. Please contact the platform administrator."
 
-            # ── OpenClaw target: queue message for gateway poll ──
-            if getattr(target, "agent_type", "native") == "openclaw":
-                from app.models.gateway_message import GatewayMessage as GMsg
-                gw_msg = GMsg(
-                    agent_id=target.id,
-                    sender_agent_id=from_agent_id,
-                    sender_user_id=source_agent.creator_id if source_agent else None,
-                    content=f"[From {source_name}] {message_text}",
-                    status="pending",
-                )
-                db.add(gw_msg)
-                await db.commit()
-                online = target.openclaw_last_seen and (datetime.now(timezone.utc) - target.openclaw_last_seen).total_seconds() < 300
-                status_hint = "online" if online else "offline (message will be delivered on next heartbeat)"
-                return f"✅ Message sent to {target.name} (OpenClaw agent, currently {status_hint}). The message has been queued and will be delivered when the agent polls for updates."
+            # Enforce relationship: only allow communication with agents in relationships
+            from app.models.org import AgentAgentRelationship
+            rel_check = await db.execute(
+                select(AgentAgentRelationship.id).where(
+                    ((AgentAgentRelationship.agent_id == from_agent_id) & (AgentAgentRelationship.target_agent_id == target.id))
+                    | ((AgentAgentRelationship.agent_id == target.id) & (AgentAgentRelationship.target_agent_id == from_agent_id))
+                ).limit(1)
+            )
+            if not rel_check.scalar_one_or_none():
+                return f"❌ You do not have a relationship with {target.name}. Only agents in your relationship list can be contacted. Ask your administrator to add a relationship if needed."
+
             src_part_r = await db.execute(select(Participant).where(Participant.type == "agent", Participant.ref_id == from_agent_id))
             src_participant = src_part_r.scalar_one_or_none()
             tgt_part_r = await db.execute(select(Participant).where(Participant.type == "agent", Participant.ref_id == target.id))
@@ -3023,8 +3044,8 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                 )
             )
             chat_session = sess_r.scalar_one_or_none()
+            owner_id = source_agent.creator_id if source_agent else from_agent_id
             if not chat_session:
-                owner_id = source_agent.creator_id if source_agent else from_agent_id
                 src_part_id = src_participant.id if src_participant else None
                 chat_session = ChatSession(
                     agent_id=session_agent_id,
@@ -3038,6 +3059,44 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                 await db.flush()
 
             session_id = str(chat_session.id)
+
+            # ── OpenClaw target: queue message for gateway poll ──
+            if getattr(target, "agent_type", "native") == "openclaw":
+                # 1. Save the source message to the chat session
+                db.add(ChatMessage(
+                    agent_id=session_agent_id,
+                    user_id=owner_id,
+                    role="user",
+                    content=message_text,
+                    conversation_id=session_id,
+                    participant_id=src_participant.id if src_participant else None,
+                ))
+                chat_session.last_message_at = datetime.now(timezone.utc)
+                
+                # 2. Queue for Gateway
+                from app.models.gateway_message import GatewayMessage as GMsg
+                gw_msg = GMsg(
+                    agent_id=target.id,
+                    sender_agent_id=from_agent_id,
+                    sender_user_id=owner_id,
+                    content=f"[From {source_name}] {message_text}",
+                    status="pending",
+                    conversation_id=session_id,
+                )
+                db.add(gw_msg)
+                await db.commit()
+                
+                # 3. Log activity
+                from app.services.activity_logger import log_activity
+                await log_activity(
+                    from_agent_id, "agent_msg_sent",
+                    f"Sent message to {target.name} (queued)",
+                    detail={"partner": target.name, "message": message_text[:200]},
+                )
+
+                online = target.openclaw_last_seen and (datetime.now(timezone.utc) - target.openclaw_last_seen).total_seconds() < 300
+                status_hint = "online" if online else "offline (message will be delivered on next heartbeat)"
+                return f"✅ Message sent to {target.name} (OpenClaw agent, currently {status_hint}). The message has been queued and will be delivered when the agent polls for updates."
 
             # Prepare target LLM
             from app.services.agent_context import build_agent_context
@@ -3065,6 +3124,11 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                 "\n\n--- Agent-to-Agent Message ---\n"
                 "You are receiving a message from another digital employee. "
                 "Reply concisely and helpfully. Focus on the request and provide a clear answer.\n"
+                "\n** CRITICAL FILE DELIVERY RULE **\n"
+                "After you write any file (report, document, analysis, etc.) that the requesting agent needs, "
+                "you MUST call `send_file_to_agent(agent_name=\"<requester_name>\", file_path=\"<path>\")` "
+                "to deliver it. The other agent CANNOT access your workspace. "
+                "Never just tell them the path — always deliver explicitly.\n"
             )
 
             # Load recent history for context
@@ -3159,7 +3223,7 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                             response = await llm_client.complete(
                                 messages=full_msgs,
                                 tools=tools_for_llm if tools_for_llm else None,
-                                temperature=0.7,
+                                temperature=target_model.temperature,
                                 max_tokens=4096,
                             )
                             break
@@ -3216,6 +3280,15 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                                     tool_args = {}
 
                             tool_result = await execute_tool(tool_name, tool_args, target.id, owner_id)
+
+                            # Nudge: after write_file in A2A, remind to deliver via send_file_to_agent
+                            if tool_name == "write_file" and isinstance(tool_result, str) and tool_result.startswith("\u2705"):
+                                wrote_path = tool_args.get("path", "")
+                                tool_result += (
+                                    f"\n\n⚠️ REMINDER: The requesting agent ({source_name}) cannot access your workspace. "
+                                    f"You MUST now call `send_file_to_agent(agent_name=\"{source_name}\", file_path=\"{wrote_path}\")` "
+                                    f"to deliver this file to them."
+                                )
 
                             # Save tool_call to DB so it appears in chat history
                             try:

@@ -252,7 +252,7 @@ async def call_llm(
             response = await client.stream(
                 messages=api_messages,
                 tools=tools_for_llm if tools_for_llm else None,
-                temperature=0.7,
+                temperature=model.temperature,
                 max_tokens=max_tokens,
                 on_chunk=on_chunk,
                 on_thinking=on_thinking,

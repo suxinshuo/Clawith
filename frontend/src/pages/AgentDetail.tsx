@@ -9,6 +9,7 @@ import FileBrowser from '../components/FileBrowser';
 import ChannelConfig from '../components/ChannelConfig';
 import MarkdownRenderer from '../components/MarkdownRenderer';
 import PromptModal from '../components/PromptModal';
+import OpenClawSettings from './OpenClawSettings';
 import { activityApi, agentApi, channelApi, enterpriseApi, fileApi, scheduleApi, skillApi, taskApi, triggerApi, uploadFileWithProgress } from '../services/api';
 import { useAuthStore } from '../stores';
 
@@ -433,22 +434,49 @@ function schedToCron(sched: { freq: string; interval: number; time: string; week
 }
 
 const getRelationOptions = (t: any) => [
-    { value: 'direct_leader', label: t('agent.detail.supervisor') },
-    { value: 'collaborator', label: t('agent.detail.collaborator') },
-    { value: 'stakeholder', label: 'Stakeholder' },
-    { value: 'team_member', label: 'Team Member' },
+    { value: 'supervisor', label: t('agent.detail.supervisor') },
     { value: 'subordinate', label: t('agent.detail.subordinate') },
-    { value: 'mentor', label: 'Mentor' },
-    { value: 'other', label: 'Other' },
+    { value: 'collaborator', label: t('agent.detail.collaborator') },
+    { value: 'peer', label: t('agent.detail.peer') },
+    { value: 'mentor', label: t('agent.detail.mentor') },
+    { value: 'stakeholder', label: t('agent.detail.stakeholder') },
+    { value: 'other', label: t('agent.detail.other') },
 ];
 
-const getAgentRelationOptions = (t: any) => [
-    { value: 'peer', label: t('agent.detail.colleague') },
-    { value: 'supervisor', label: t('agent.detail.supervisor') },
-    { value: 'assistant', label: 'Assistant' },
-    { value: 'collaborator', label: t('agent.detail.collaborator') },
-    { value: 'other', label: 'Other' },
-];
+const getAgentRelationOptions = getRelationOptions;
+
+/** Tiny copy button shown on hover at the bottom of message bubbles */
+function CopyMessageButton({ text }: { text: string }) {
+    const [copied, setCopied] = React.useState(false);
+    const handleCopy = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        navigator.clipboard.writeText(text).then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+        });
+    };
+    return (
+        <button
+            onClick={handleCopy}
+            title="Copy"
+            style={{
+                background: 'none', border: 'none', cursor: 'pointer', padding: '2px',
+                color: copied ? 'var(--accent-text)' : 'var(--text-tertiary)',
+                opacity: copied ? 1 : 0.5, transition: 'opacity .15s, color .15s',
+                display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle',
+                marginLeft: '6px', flexShrink: 0,
+            }}
+            onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
+            onMouseLeave={e => (e.currentTarget.style.opacity = copied ? '1' : '0.5')}
+        >
+            {copied ? (
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+            ) : (
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+            )}
+        </button>
+    );
+}
 
 function fetchAuth<T>(url: string, options?: RequestInit): Promise<T> {
     const token = localStorage.getItem('token');
@@ -678,11 +706,11 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
                 {!readOnly && addingAgent && (
                     <div style={{ border: '1px solid rgba(16,185,129,0.5)', borderRadius: '8px', padding: '12px', background: 'var(--bg-elevated)' }}>
                         <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
-                            <select className="input" value={selectedAgentId} onChange={e => setSelectedAgentId(e.target.value)} style={{ flex: 1, fontSize: '12px' }}>
-                                <option value="">— Select —</option>
+                            <select className="input" value={selectedAgentId} onChange={e => setSelectedAgentId(e.target.value)} style={{ flex: 1, minWidth: 0, fontSize: '12px' }}>
+                                <option value="">— Select Agent —</option>
                                 {availableAgents.map((a: any) => <option key={a.id} value={a.id}>{a.name} — {a.role_description || 'Agent'}</option>)}
                             </select>
-                            <select className="input" value={agentRelation} onChange={e => setAgentRelation(e.target.value)} style={{ width: '140px', fontSize: '12px' }}>
+                            <select className="input" value={agentRelation} onChange={e => setAgentRelation(e.target.value)} style={{ width: '150px', flexShrink: 0, fontSize: '12px' }}>
                                 {getAgentRelationOptions(t).map((o: any) => <option key={o.value} value={o.value}>{o.label}</option>)}
                             </select>
                         </div>
@@ -815,33 +843,148 @@ function AgentDetailInner() {
     const [allUserFilter, setAllUserFilter] = useState<string>('');  // filter by username in All Users
     const [historyMsgs, setHistoryMsgs] = useState<any[]>([]);
     const [sessionsLoading, setSessionsLoading] = useState(false);
+    const [allSessionsLoading, setAllSessionsLoading] = useState(false);
     const [agentExpired, setAgentExpired] = useState(false);
+    // Websocket chat state (for 'me' conversation)
+    const token = useAuthStore((s) => s.token);
+    const currentUser = useAuthStore((s) => s.user);
+    const isAdmin = currentUser?.role === 'platform_admin' || currentUser?.role === 'org_admin';
+    type SessionRuntimeKey = string;
+    const wsMapRef = useRef<Record<SessionRuntimeKey, WebSocket>>({});
+    const reconnectTimerRef = useRef<Record<SessionRuntimeKey, ReturnType<typeof setTimeout> | null>>({});
+    const reconnectDisabledRef = useRef<Record<SessionRuntimeKey, boolean>>({});
+    const sessionUiStateRef = useRef<Record<SessionRuntimeKey, { isWaiting: boolean; isStreaming: boolean }>>({});
+    const activeSessionIdRef = useRef<string | null>(null);
+    const currentAgentIdRef = useRef<string | undefined>(id);
+    const sessionMsgAbortRef = useRef<AbortController | null>(null);
+    const sessionLoadSeqRef = useRef(0);
 
-    const fetchMySessions = async (silent = false) => {
-        if (!id) return;
-        if (!silent) setSessionsLoading(true);
+    const buildSessionRuntimeKey = (agentId: string, sessionId: string) => `${agentId}:${sessionId}`;
+
+    const clearReconnectTimer = (key: SessionRuntimeKey) => {
+        const timer = reconnectTimerRef.current[key];
+        if (timer) {
+            clearTimeout(timer);
+            reconnectTimerRef.current[key] = null;
+        }
+    };
+
+    const closeSessionSocket = (key: SessionRuntimeKey, disableReconnect = true) => {
+        if (disableReconnect) reconnectDisabledRef.current[key] = true;
+        clearReconnectTimer(key);
+        const ws = wsMapRef.current[key];
+        if (ws && ws.readyState !== WebSocket.CLOSED) ws.close();
+        delete wsMapRef.current[key];
+        delete sessionUiStateRef.current[key];
+    };
+
+    const setSessionUiState = (key: SessionRuntimeKey, next: Partial<{ isWaiting: boolean; isStreaming: boolean }>) => {
+        const prev = sessionUiStateRef.current[key] || { isWaiting: false, isStreaming: false };
+        sessionUiStateRef.current[key] = { ...prev, ...next };
+    };
+
+    const isWritableSession = (sess: any) => {
+        if (!sess) return false;
+        const isAgentSession = sess.source_channel === 'agent' || sess.participant_type === 'agent';
+        if (isAgentSession) return false;
+        if (sess.user_id && currentUser && sess.user_id !== String(currentUser.id)) return false;
+        return true;
+    };
+
+    const syncActiveSocketState = (sess: any | null = activeSession, agentId: string | undefined = id) => {
+        if (!sess || !agentId) {
+            wsRef.current = null;
+            setWsConnected(false);
+            return;
+        }
+        const key = buildSessionRuntimeKey(agentId, sess.id);
+        const ws = wsMapRef.current[key];
+        wsRef.current = ws ?? null;
+        setWsConnected(!!ws && ws.readyState === WebSocket.OPEN);
+    };
+
+    const fetchMySessions = async (silent = false, agentId: string | undefined = id) => {
+        if (!agentId) return [];
+        if (!silent && currentAgentIdRef.current === agentId) setSessionsLoading(true);
         try {
             const tkn = localStorage.getItem('token');
-            const res = await fetch(`/api/agents/${id}/sessions?scope=mine`, { headers: { Authorization: `Bearer ${tkn}` } });
-            if (res.ok) { const data = await res.json(); setSessions(data); return data; }
+            const res = await fetch(`/api/agents/${agentId}/sessions?scope=mine`, { headers: { Authorization: `Bearer ${tkn}` } });
+            if (res.ok) {
+                const data = await res.json();
+                if (currentAgentIdRef.current === agentId) setSessions(data);
+                if (!silent && currentAgentIdRef.current === agentId) setSessionsLoading(false);
+                return data;
+            }
         } catch { }
-        if (!silent) setSessionsLoading(false);
+        if (!silent && currentAgentIdRef.current === agentId) setSessionsLoading(false);
         return [];
     };
 
     const fetchAllSessions = async () => {
         if (!id) return;
+        setAllSessionsLoading(true);
         try {
             const tkn = localStorage.getItem('token');
             const res = await fetch(`/api/agents/${id}/sessions?scope=all`, { headers: { Authorization: `Bearer ${tkn}` } });
             if (res.ok) {
                 const all = await res.json();
-                setAllSessions(all.filter((s: any) => s.source_channel !== 'trigger'));
+                if (currentAgentIdRef.current === id) {
+                    setAllSessions(all.filter((s: any) => s.source_channel !== 'trigger'));
+                }
             }
         } catch { }
+        setAllSessionsLoading(false);
+    };
+
+    const selectSession = async (sess: any) => {
+        const targetAgentId = id;
+        if (!targetAgentId) return;
+        const runtimeKey = buildSessionRuntimeKey(targetAgentId, String(sess.id));
+        const runtimeState = sessionUiStateRef.current[runtimeKey] || { isWaiting: false, isStreaming: false };
+        activeSessionIdRef.current = sess.id;
+        setChatMessages([]);
+        setHistoryMsgs([]);
+        setIsStreaming(runtimeState.isStreaming);
+        setIsWaiting(runtimeState.isWaiting);
+        setActiveSession(sess);
+        setAgentExpired(false);
+        syncActiveSocketState(sess, targetAgentId);
+
+        // Abort any pending message load and increment sequence
+        sessionMsgAbortRef.current?.abort();
+        const controller = new AbortController();
+        sessionMsgAbortRef.current = controller;
+        const loadSeq = ++sessionLoadSeqRef.current;
+        try {
+            const tkn = localStorage.getItem('token');
+            const res = await fetch(`/api/agents/${targetAgentId}/sessions/${sess.id}/messages`, {
+                headers: { Authorization: `Bearer ${tkn}` },
+                signal: controller.signal,
+            });
+            if (!res.ok) return;
+            const msgs = await res.json();
+            if (controller.signal.aborted || loadSeq !== sessionLoadSeqRef.current) return;
+            if (currentAgentIdRef.current !== targetAgentId) return;
+            if (activeSessionIdRef.current !== sess.id) return;
+            const isAgentSession = sess.source_channel === 'agent' || sess.participant_type === 'agent';
+            if (!isAgentSession && sess.user_id === String(currentUser?.id)) {
+                setChatMessages(msgs.map((m: any) => parseChatMsg({
+                    role: m.role, content: m.content,
+                    ...(m.toolName && { toolName: m.toolName, toolArgs: m.toolArgs, toolStatus: m.toolStatus, toolResult: m.toolResult }),
+                    ...(m.thinking && { thinking: m.thinking }),
+                    ...(m.created_at && { timestamp: m.created_at }),
+                })));
+            } else {
+                setHistoryMsgs(msgs);
+            }
+        } catch (err: any) {
+            if (err?.name === 'AbortError') return;
+            console.error('Failed to load session messages:', err);
+        }
     };
 
     const createNewSession = async () => {
+        if (!id) return;
         try {
             const tkn = localStorage.getItem('token');
             const res = await fetch(`/api/agents/${id}/sessions`, {
@@ -851,9 +994,9 @@ function AgentDetailInner() {
             if (res.ok) {
                 const newSess = await res.json();
                 setSessions(prev => [newSess, ...prev]);
-                setChatMessages([]);
-                setHistoryMsgs([]);
-                setActiveSession(newSess);
+                setIsStreaming(false);
+                setIsWaiting(false);
+                await selectSession(newSess);
             } else {
                 const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
                 console.error('Failed to create session:', err);
@@ -870,63 +1013,23 @@ function AgentDetailInner() {
         const tkn = localStorage.getItem('token');
         try {
             await fetch(`/api/agents/${id}/sessions/${sessionId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${tkn}` } });
+            if (id) closeSessionSocket(buildSessionRuntimeKey(id, sessionId), true);
             // If deleted the active session, clear it
             if (activeSession?.id === sessionId) {
+                activeSessionIdRef.current = null;
                 setActiveSession(null);
                 setChatMessages([]);
                 setHistoryMsgs([]);
+                setWsConnected(false);
+                setIsStreaming(false);
+                setIsWaiting(false);
             }
-            // Refresh session lists
-            const r1 = await fetch(`/api/agents/${id}/sessions?scope=mine`, { headers: { Authorization: `Bearer ${tkn}` } });
-            if (r1.ok) setSessions(await r1.json());
-            const r2 = await fetch(`/api/agents/${id}/sessions?scope=all`, { headers: { Authorization: `Bearer ${tkn}` } });
-            if (r2.ok) {
-                const all2 = await r2.json();
-                setAllSessions(all2.filter((s: any) => s.source_channel !== 'trigger'));
-            }
+            await fetchMySessions(false, id);
+            await fetchAllSessions();
         } catch (e: any) {
             alert(e.message || 'Delete failed');
         }
     };
-
-    const selectSession = async (sess: any) => {
-        // Close the existing WS before switching so its onmessage can no longer
-        // write stale streaming data into the new session's message list.
-        if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
-            wsRef.current.close();
-            wsRef.current = null;
-        }
-        setChatMessages([]);
-        setHistoryMsgs([]);
-        setIsStreaming(false);
-        setIsWaiting(false);
-        setActiveSession(sess);
-        // Always load stored messages for the selected session
-        const tkn = localStorage.getItem('token');
-        const res = await fetch(`/api/agents/${id}/sessions/${sess.id}/messages`, { headers: { Authorization: `Bearer ${tkn}` } });
-        if (res.ok) {
-            const msgs = await res.json();
-            // Agent-to-agent sessions are always read-only
-            const isAgentSession = sess.source_channel === 'agent' || sess.participant_type === 'agent';
-            if (!isAgentSession && sess.user_id === String(currentUser?.id)) {
-                // Own session: load into chatMessages so WS can append new replies seamlessly
-                setChatMessages(msgs.map((m: any) => parseChatMsg({
-                    role: m.role, content: m.content,
-                    ...(m.toolName && { toolName: m.toolName, toolArgs: m.toolArgs, toolStatus: m.toolStatus, toolResult: m.toolResult }),
-                    ...(m.thinking && { thinking: m.thinking }),
-                    ...(m.created_at && { timestamp: m.created_at }),
-                })));
-            } else {
-                // Other user's session or agent-to-agent: read-only view
-                setHistoryMsgs(msgs);
-            }
-        }
-    };
-
-    // Websocket chat state (for 'me' conversation)
-    const token = useAuthStore((s) => s.token);
-    const currentUser = useAuthStore((s) => s.user);
-    const isAdmin = currentUser?.role === 'platform_admin' || currentUser?.role === 'org_admin';
 
     // Expiry editor modal state
     const [showExpiryModal, setShowExpiryModal] = useState(false);
@@ -1066,17 +1169,22 @@ function AgentDetailInner() {
     };
 
 
-    // Reset state whenever the viewed agent changes
     useEffect(() => {
-        if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
-            wsRef.current.close();
-            wsRef.current = null;
-        }
+        currentAgentIdRef.current = id;
+    }, [id]);
+
+    // Reset visible state whenever the viewed agent changes.
+    // Existing background sockets keep running and will be cleaned up on unmount.
+    useEffect(() => {
+        sessionMsgAbortRef.current?.abort();
+        activeSessionIdRef.current = null;
         setActiveSession(null);
         setChatMessages([]);
         setHistoryMsgs([]);
         setIsStreaming(false);
         setIsWaiting(false);
+        setWsConnected(false);
+        wsRef.current = null;
         setChatScope('mine');
         setAgentExpired(false);
         settingsInitRef.current = false;
@@ -1084,105 +1192,173 @@ function AgentDetailInner() {
 
     useEffect(() => {
         if (!id || !token || activeTab !== 'chat') return;
-        // Load sessions when entering chat tab; auto-select first and load its history
-        fetchMySessions().then((data: any) => {
+        fetchMySessions(false, id).then((data: any) => {
+            if (currentAgentIdRef.current !== id) return;
             setSessionsLoading(false);
             if (data && data.length > 0) selectSession(data[0]);
         });
-    }, [id, activeTab]);
+    }, [id, token, activeTab]);
+
+    const ensureSessionSocket = (sess: any, agentId: string, authToken: string) => {
+        const sessionId = String(sess.id);
+        const key = buildSessionRuntimeKey(agentId, sessionId);
+        const existing = wsMapRef.current[key];
+        if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return;
+        reconnectDisabledRef.current[key] = false;
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const sessionParam = `&session_id=${sessionId}`;
+
+        const scheduleReconnect = () => {
+            if (reconnectDisabledRef.current[key]) return;
+            clearReconnectTimer(key);
+            reconnectTimerRef.current[key] = setTimeout(() => {
+                reconnectTimerRef.current[key] = null;
+                if (!reconnectDisabledRef.current[key]) ensureSessionSocket(sess, agentId, authToken);
+            }, 2000);
+        };
+
+        const ws = new WebSocket(`${protocol}//${window.location.host}/ws/chat/${agentId}?token=${authToken}${sessionParam}`);
+        wsMapRef.current[key] = ws;
+        ws.onopen = () => {
+            if (reconnectDisabledRef.current[key]) {
+                ws.close();
+                return;
+            }
+            if (currentAgentIdRef.current === agentId && activeSessionIdRef.current === sessionId) {
+                wsRef.current = ws;
+                setWsConnected(true);
+            }
+        };
+        ws.onclose = (e) => {
+            if (wsMapRef.current[key] === ws) delete wsMapRef.current[key];
+            setSessionUiState(key, { isWaiting: false, isStreaming: false });
+            const isActiveRuntime = currentAgentIdRef.current === agentId && activeSessionIdRef.current === sessionId;
+            if (isActiveRuntime) {
+                wsRef.current = null;
+                setWsConnected(false);
+                setIsWaiting(false);
+                setIsStreaming(false);
+            }
+            if (e.code === 4003 || e.code === 4002) {
+                reconnectDisabledRef.current[key] = true;
+                clearReconnectTimer(key);
+                if (isActiveRuntime && e.code === 4003) setAgentExpired(true);
+                return;
+            }
+            scheduleReconnect();
+        };
+        ws.onerror = (error) => {
+            const isActiveRuntime = currentAgentIdRef.current === agentId && activeSessionIdRef.current === sessionId;
+            if (isActiveRuntime) setWsConnected(false);
+            console.warn(`WebSocket error for session ${sessionId}:`, error);
+            // Error automatically triggers onclose with abnormal code, which handles reconnect
+        };
+        ws.onmessage = (e) => {
+            const d = JSON.parse(e.data);
+            const isActiveRuntime = currentAgentIdRef.current === agentId && activeSessionIdRef.current === sessionId;
+            if (['thinking', 'chunk', 'tool_call', 'done', 'error', 'quota_exceeded'].includes(d.type)) {
+                const nextStreaming = ['thinking', 'chunk', 'tool_call'].includes(d.type);
+                const endStreaming = ['done', 'error', 'quota_exceeded'].includes(d.type);
+                setSessionUiState(key, {
+                    isWaiting: false,
+                    isStreaming: endStreaming ? false : nextStreaming,
+                });
+            }
+            if (!isActiveRuntime) {
+                if (['done', 'error', 'quota_exceeded', 'trigger_notification'].includes(d.type)) {
+                    fetchMySessions(true, agentId);
+                }
+                if (['done', 'error', 'quota_exceeded'].includes(d.type)) {
+                    closeSessionSocket(key, true);
+                }
+                return;
+            }
+
+            if (['thinking', 'chunk', 'tool_call', 'done', 'error', 'quota_exceeded'].includes(d.type)) {
+                setIsWaiting(false);
+                if (['thinking', 'chunk', 'tool_call'].includes(d.type)) setIsStreaming(true);
+                if (['done', 'error', 'quota_exceeded'].includes(d.type)) setIsStreaming(false);
+            }
+
+            if (d.type === 'thinking') {
+                setChatMessages(prev => {
+                    const last = prev[prev.length - 1];
+                    if (last && last.role === 'assistant' && (last as any)._streaming) {
+                        return [...prev.slice(0, -1), { ...last, thinking: (last.thinking || '') + d.content } as any];
+                    }
+                    return [...prev, { role: 'assistant', content: '', thinking: d.content, _streaming: true } as any];
+                });
+            } else if (d.type === 'tool_call') {
+                setChatMessages(prev => {
+                    const toolMsg: ChatMsg = { role: 'tool_call', content: '', toolName: d.name, toolArgs: d.args, toolStatus: d.status, toolResult: d.result };
+                    if (d.status === 'done') {
+                        const lastIdx = prev.length - 1;
+                        const last = prev[lastIdx];
+                        if (last && last.role === 'tool_call' && last.toolName === d.name && last.toolStatus === 'running') return [...prev.slice(0, lastIdx), toolMsg];
+                    }
+                    return [...prev, toolMsg];
+                });
+            } else if (d.type === 'chunk') {
+                setChatMessages(prev => {
+                    const last = prev[prev.length - 1];
+                    if (last && last.role === 'assistant' && (last as any)._streaming) return [...prev.slice(0, -1), { ...last, content: last.content + d.content } as any];
+                    return [...prev, { role: 'assistant', content: d.content, _streaming: true } as any];
+                });
+            } else if (d.type === 'done') {
+                setChatMessages(prev => {
+                    const last = prev[prev.length - 1];
+                    const thinking = (last && last.role === 'assistant' && (last as any)._streaming) ? last.thinking : undefined;
+                    if (last && last.role === 'assistant' && (last as any)._streaming) return [...prev.slice(0, -1), { role: 'assistant', content: d.content, thinking, timestamp: new Date().toISOString() }];
+                    return [...prev, { role: d.role, content: d.content, timestamp: new Date().toISOString() }];
+                });
+                fetchMySessions(true, agentId);
+            } else if (d.type === 'error' || d.type === 'quota_exceeded') {
+                const msg = d.content || d.detail || d.message || 'Request denied';
+                setChatMessages(prev => {
+                    const last = prev[prev.length - 1];
+                    if (last && last.role === 'assistant' && last.content === `⚠️ ${msg}`) return prev;
+                    return [...prev, { role: 'assistant', content: `⚠️ ${msg}` }];
+                });
+                if (msg.includes('expired') || msg.includes('Setup failed') || msg.includes('no LLM model') || msg.includes('No model')) {
+                    reconnectDisabledRef.current[key] = true;
+                    if (msg.includes('expired')) setAgentExpired(true);
+                }
+            } else if (d.type === 'trigger_notification') {
+                setChatMessages(prev => [...prev, { role: 'assistant', content: d.content }]);
+                fetchMySessions(true, agentId);
+            } else {
+                setChatMessages(prev => [...prev, { role: d.role, content: d.content }]);
+            }
+        };
+    };
 
     useEffect(() => {
         if (!id || !token || activeTab !== 'chat') return;
-        if (!activeSession) return;  // wait for session to be set
-        // Only connect WS for own sessions (not other users' and not agent-to-agent)
-        const isAgentSession = activeSession.source_channel === 'agent' || activeSession.participant_type === 'agent';
-        if (isAgentSession) return;
-        if (activeSession.user_id && currentUser && activeSession.user_id !== String(currentUser.id)) return;
-        let cancelled = false;
-        const sessionParam = activeSession?.id ? `&session_id=${activeSession.id}` : '';
-        const connect = () => {
-            if (cancelled) return;
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const ws = new WebSocket(`${protocol}//${window.location.host}/ws/chat/${id}?token=${token}${sessionParam}`);
-            ws.onopen = () => { if (cancelled) { ws.close(); return; } setWsConnected(true); wsRef.current = ws; };
-            ws.onclose = (e) => {
-                if (e.code === 4003 || e.code === 4002) {
-                    // 4003 = Agent expired, 4002 = Config error (no model, setup failed)
-                    if (e.code === 4003) setAgentExpired(true);
-                    setWsConnected(false);
-                    setIsWaiting(false);
-                    setIsStreaming(false);
-                    return;
-                }
-                if (!cancelled) { setWsConnected(false); setIsWaiting(false); setIsStreaming(false); setTimeout(connect, 2000); }
-            };
-            ws.onerror = () => { if (!cancelled) setWsConnected(false); };
-            ws.onmessage = (e) => {
-                const d = JSON.parse(e.data);
-                if (['thinking', 'chunk', 'tool_call', 'done', 'error', 'quota_exceeded'].includes(d.type)) {
-                    setIsWaiting(false);
-                    if (['thinking', 'chunk', 'tool_call'].includes(d.type)) setIsStreaming(true);
-                    if (['done', 'error', 'quota_exceeded'].includes(d.type)) setIsStreaming(false);
-                }
-
-                if (d.type === 'thinking') {
-                    setChatMessages(prev => {
-                        const last = prev[prev.length - 1];
-                        if (last && last.role === 'assistant' && (last as any)._streaming) {
-                            return [...prev.slice(0, -1), { ...last, thinking: (last.thinking || '') + d.content } as any];
-                        }
-                        return [...prev, { role: 'assistant', content: '', thinking: d.content, _streaming: true } as any];
-                    });
-                } else if (d.type === 'tool_call') {
-                    setChatMessages(prev => {
-                        const toolMsg: ChatMsg = { role: 'tool_call', content: '', toolName: d.name, toolArgs: d.args, toolStatus: d.status, toolResult: d.result };
-                        if (d.status === 'done') {
-                            const lastIdx = prev.length - 1;
-                            const last = prev[lastIdx];
-                            if (last && last.role === 'tool_call' && last.toolName === d.name && last.toolStatus === 'running') return [...prev.slice(0, lastIdx), toolMsg];
-                        }
-                        return [...prev, toolMsg];
-                    });
-                } else if (d.type === 'chunk') {
-                    setChatMessages(prev => {
-                        const last = prev[prev.length - 1];
-                        if (last && last.role === 'assistant' && (last as any)._streaming) return [...prev.slice(0, -1), { ...last, content: last.content + d.content } as any];
-                        return [...prev, { role: 'assistant', content: d.content, _streaming: true } as any];
-                    });
-                } else if (d.type === 'done') {
-                    setChatMessages(prev => {
-                        const last = prev[prev.length - 1];
-                        const thinking = (last && last.role === 'assistant' && (last as any)._streaming) ? last.thinking : undefined;
-                        if (last && last.role === 'assistant' && (last as any)._streaming) return [...prev.slice(0, -1), { role: 'assistant', content: d.content, thinking, timestamp: new Date().toISOString() }];
-                        return [...prev, { role: d.role, content: d.content, timestamp: new Date().toISOString() }];
-                    });
-                    // Silently refresh session list to update last_message_at (no loading spinner)
-                    fetchMySessions(true);
-                } else if (d.type === 'error' || d.type === 'quota_exceeded') {
-                    const msg = d.content || d.detail || d.message || 'Request denied';
-                    // Only add message if not a duplicate of the last one
-                    setChatMessages(prev => {
-                        const last = prev[prev.length - 1];
-                        if (last && last.role === 'assistant' && last.content === `⚠️ ${msg}`) return prev;
-                        return [...prev, { role: 'assistant', content: `⚠️ ${msg}` }];
-                    });
-                    // Permanent errors — stop reconnecting
-                    if (msg.includes('expired') || msg.includes('Setup failed') || msg.includes('no LLM model') || msg.includes('No model')) {
-                        cancelled = true;
-                        if (msg.includes('expired')) setAgentExpired(true);
-                    }
-                } else if (d.type === 'trigger_notification') {
-                    // Trigger fired — show the result as a new assistant message
-                    setChatMessages(prev => [...prev, { role: 'assistant', content: d.content }]);
-                    fetchMySessions(true);
-                } else {
-                    setChatMessages(prev => [...prev, { role: d.role, content: d.content }]);
-                }
-            };
-        };
-        connect();
-        return () => { cancelled = true; wsRef.current?.close(); wsRef.current = null; setWsConnected(false); };
+        if (!activeSession) {
+            syncActiveSocketState(null, id);
+            return;
+        }
+        activeSessionIdRef.current = String(activeSession.id);
+        if (!isWritableSession(activeSession)) {
+            syncActiveSocketState(activeSession, id);
+            return;
+        }
+        ensureSessionSocket(activeSession, id, token);
+        syncActiveSocketState(activeSession, id);
     }, [id, token, activeTab, activeSession?.id]);
+
+    useEffect(() => {
+        return () => {
+            sessionMsgAbortRef.current?.abort();
+            Object.keys(reconnectDisabledRef.current).forEach((key) => { reconnectDisabledRef.current[key] = true; });
+            Object.keys(reconnectTimerRef.current).forEach((key) => clearReconnectTimer(key));
+            Object.values(wsMapRef.current).forEach((ws) => {
+                if (ws.readyState !== WebSocket.CLOSED) ws.close();
+            });
+            wsMapRef.current = {};
+            wsRef.current = null;
+        };
+    }, []);
 
     // Smart scroll: only auto-scroll if user is at the bottom
     const isNearBottom = useRef(true);
@@ -1247,7 +1423,10 @@ function AgentDetailInner() {
     }, [activeSession?.id, activeTab]);
 
     const sendChatMsg = () => {
-        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+        if (!id || !activeSession?.id) return;
+        const activeRuntimeKey = buildSessionRuntimeKey(id, String(activeSession.id));
+        const activeSocket = wsMapRef.current[activeRuntimeKey];
+        if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) return;
         if (!chatInput.trim() && attachedFiles.length === 0) return;
         
         let userMsg = chatInput.trim();
@@ -1284,6 +1463,7 @@ function AgentDetailInner() {
 
         setIsWaiting(true);
         setIsStreaming(false);
+        setSessionUiState(activeRuntimeKey, { isWaiting: true, isStreaming: false });
         setChatMessages(prev => [...prev, { 
             role: 'user', 
             content: userMsg, 
@@ -1291,7 +1471,7 @@ function AgentDetailInner() {
             imageUrl: attachedFiles.length === 1 ? attachedFiles[0].imageUrl : undefined, 
             timestamp: new Date().toISOString() 
         }]);
-        wsRef.current.send(JSON.stringify({ 
+        activeSocket.send(JSON.stringify({
             content: contentForLLM, 
             display_content: userMsg, 
             file_name: attachedFiles.map(f => f.name).join(', ') 
@@ -3000,8 +3180,21 @@ function AgentDetailInner() {
                                                     ))}
                                                 </select>
                                             </div>
+                                            {/* Loading skeleton */}
+                                            {allSessionsLoading ? (
+                                                <div style={{ padding: '8px 12px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                                    {[...Array(6)].map((_, i) => (
+                                                        <div key={i} style={{ padding: '6px 0', animation: 'pulse 1.5s ease-in-out infinite', animationDelay: `${i * 0.1}s` }}>
+                                                            <div style={{ height: '12px', width: `${70 + (i % 3) * 10}%`, background: 'var(--bg-tertiary)', borderRadius: '4px', marginBottom: '6px' }} />
+                                                            <div style={{ height: '10px', width: `${40 + (i % 4) * 8}%`, background: 'var(--bg-tertiary)', borderRadius: '3px', opacity: 0.6 }} />
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            ) : allSessions.length === 0 ? (
+                                                <div style={{ padding: '20px 12px', fontSize: '12px', color: 'var(--text-tertiary)', textAlign: 'center' }}>{t('agent.chat.noSessionsYet')}</div>
+                                            ) : null}
                                             {/* Filtered session list */}
-                                            {allSessions
+                                            {!allSessionsLoading && allSessions
                                                 .filter((s: any) => !allUserFilter || (s.username || s.user_id) === allUserFilter)
                                                 .map((s: any) => {
                                                     const isActive = activeSession?.id === s.id;
@@ -3062,8 +3255,22 @@ function AgentDetailInner() {
                                             <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '12px', padding: '4px 8px', background: 'var(--bg-secondary)', borderRadius: '4px', display: 'inline-block' }}>
                                                 {activeSession.source_channel === 'agent' ? `🤖 Agent Conversation · ${activeSession.username || 'Agents'}` : `Read-only · ${activeSession.username || 'User'}`}
                                             </div>
-                                            {historyMsgs.map((m: any, i: number) => {
-                                                if (m.role === 'tool_call') {
+                                            {(() => {
+                                                // For A2A sessions, determine which participant is "this agent" (left side)
+                                                // Use agent.name matching against sender_name from messages
+                                                const isA2A = activeSession.source_channel === 'agent' || activeSession.participant_type === 'agent';
+                                                const thisAgentName = (agent as any)?.name;
+                                                // Find this agent's participant_id from loaded messages
+                                                const thisAgentPid = isA2A && thisAgentName
+                                                    ? historyMsgs.find((m: any) => m.sender_name === thisAgentName)?.participant_id
+                                                    : null;
+                                                return historyMsgs.map((m: any, i: number) => {
+                                                // Determine if this message is from "this agent" (left) or peer (right)
+                                                // Actually, "this agent" should be on the RIGHT (like 'me'), and peer on the LEFT
+                                                const isLeft = isA2A && thisAgentPid
+                                                    ? m.participant_id !== thisAgentPid
+                                                    : m.role === 'assistant';
+                                            if (m.role === 'tool_call') {
                                                     const tName = m.toolName || (() => { try { return JSON.parse(m.content || '{}').name; } catch { return 'tool'; } })();
                                                     const tArgs = m.toolArgs || (() => { try { return JSON.parse(m.content || '{}').args; } catch { return {}; } })();
                                                     const tResult = m.toolResult ?? (() => { try { return JSON.parse(m.content || '{}').result; } catch { return ''; } })();
@@ -3110,9 +3317,9 @@ function AgentDetailInner() {
                                                     return null;
                                                 }
                                                 return (
-                                                    <div key={i} style={{ display: 'flex', flexDirection: m.role === 'assistant' ? 'row' : 'row-reverse', gap: '8px', marginBottom: '8px' }}>
-                                                        <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: m.role === 'assistant' ? 'var(--bg-elevated)' : 'rgba(16,185,129,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', flexShrink: 0, color: 'var(--text-secondary)', fontWeight: 600 }}>{m.sender_name ? m.sender_name[0] : (m.role === 'assistant' ? 'A' : 'U')}</div>
-                                                        <div style={{ maxWidth: '70%', padding: '8px 12px', borderRadius: '12px', background: m.role === 'assistant' ? 'var(--bg-secondary)' : 'rgba(16,185,129,0.1)', fontSize: '13px', lineHeight: '1.5', wordBreak: 'break-word' }}>
+                                                    <div key={i} style={{ display: 'flex', flexDirection: isLeft ? 'row' : 'row-reverse', gap: '8px', marginBottom: '8px' }}>
+                                                        <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: isLeft ? 'var(--bg-elevated)' : 'rgba(16,185,129,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', flexShrink: 0, color: 'var(--text-secondary)', fontWeight: 600 }}>{m.sender_name ? m.sender_name[0] : (isLeft ? 'A' : 'U')}</div>
+                                                        <div style={{ maxWidth: '70%', padding: '8px 12px', borderRadius: '12px', background: isLeft ? 'var(--bg-secondary)' : 'rgba(16,185,129,0.1)', fontSize: '13px', lineHeight: '1.5', wordBreak: 'break-word' }}>
                                                             {m.sender_name && <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginBottom: '2px', fontWeight: 600 }}>🤖 {m.sender_name}</div>}
                                                             {(() => {
                                                                 const pm = parseChatMsg({ role: m.role as ChatMsg['role'], content: m.content || '' });
@@ -3154,11 +3361,12 @@ function AgentDetailInner() {
                                                                     </>
                                                                 );
                                                             })()}
-                                                            {m.created_at && <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px', opacity: 0.6 }}>{(() => { const d = new Date(m.created_at); const now = new Date(); const diffMs = now.getTime() - d.getTime(); const isToday = d.toDateString() === now.toDateString(); if (isToday) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); if (diffMs < 7 * 86400000) return d.toLocaleDateString([], { weekday: 'short' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); })()}</div>}
+                                                            {m.created_at && <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px', opacity: 0.6, display: 'flex', alignItems: 'center' }}>{(() => { const d = new Date(m.created_at); const now = new Date(); const diffMs = now.getTime() - d.getTime(); const isToday = d.toDateString() === now.toDateString(); if (isToday) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); if (diffMs < 7 * 86400000) return d.toLocaleDateString([], { weekday: 'short' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); })()}{m.content && <CopyMessageButton text={m.content} />}</div>}
                                                         </div>
                                                     </div>
                                                 );
-                                            })}
+                                            });
+                                            })()}
                                         </div>
                                         {showHistoryScrollBtn && (
                                             <button onClick={scrollHistoryToBottom} style={{ position: 'absolute', bottom: '20px', right: '20px', width: '32px', height: '32px', borderRadius: '50%', background: 'var(--bg-elevated)', border: '1px solid var(--border-default)', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '16px', boxShadow: '0 2px 8px rgba(0,0,0,0.3)', zIndex: 10 }} title="Scroll to bottom">↓</button>
@@ -3268,7 +3476,7 @@ function AgentDetailInner() {
                                                                     </div>
                                                                 ) : <MarkdownRenderer content={msg.content} />
                                                             ) : msg.content ? <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div> : null}
-                                                            {msg.timestamp && <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px', opacity: 0.6, textAlign: msg.role === 'user' ? 'right' : 'left' }}>{(() => { const d = new Date(msg.timestamp); const now = new Date(); const diffMs = now.getTime() - d.getTime(); const isToday = d.toDateString() === now.toDateString(); if (isToday) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); if (diffMs < 7 * 86400000) return d.toLocaleDateString([], { weekday: 'short' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); })()}</div>}
+                                                            {msg.timestamp && <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px', opacity: 0.6, display: 'flex', alignItems: 'center', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>{(() => { const d = new Date(msg.timestamp); const now = new Date(); const diffMs = now.getTime() - d.getTime(); const isToday = d.toDateString() === now.toDateString(); if (isToday) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); if (diffMs < 7 * 86400000) return d.toLocaleDateString([], { weekday: 'short' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); })()}{msg.content && <CopyMessageButton text={msg.content} />}</div>}
                                                         </div>
                                                     </div>
                                                 );
@@ -3346,7 +3554,17 @@ function AgentDetailInner() {
                                                 placeholder={!wsConnected && (!activeSession?.user_id || !currentUser || activeSession.user_id === String(currentUser?.id)) ? 'Connecting...' : attachedFiles.length > 0 ? t('agent.chat.askAboutFile', { name: attachedFiles.length === 1 ? attachedFiles[0].name : `${attachedFiles.length} files` }) : t('chat.placeholder')}
                                                 disabled={!wsConnected || isWaiting || isStreaming} style={{ flex: 1 }} autoFocus />
                                             {(isStreaming || isWaiting) ? (
-                                                <button className="btn btn-stop-generation" onClick={() => { if (wsRef.current?.readyState === WebSocket.OPEN) { wsRef.current.send(JSON.stringify({ type: 'abort' })); setIsStreaming(false); setIsWaiting(false); } }} style={{ padding: '6px 16px' }} title={t('chat.stop', 'Stop')}>
+                                                <button className="btn btn-stop-generation" onClick={() => {
+                                                    if (!id || !activeSession?.id) return;
+                                                    const activeRuntimeKey = buildSessionRuntimeKey(id, String(activeSession.id));
+                                                    const activeSocket = wsMapRef.current[activeRuntimeKey];
+                                                    if (activeSocket?.readyState === WebSocket.OPEN) {
+                                                        activeSocket.send(JSON.stringify({ type: 'abort' }));
+                                                        setIsStreaming(false);
+                                                        setIsWaiting(false);
+                                                        setSessionUiState(activeRuntimeKey, { isWaiting: false, isStreaming: false });
+                                                    }
+                                                }} style={{ padding: '6px 16px' }} title={t('chat.stop', 'Stop')}>
                                                     <span className="stop-icon" />
                                                 </button>
                                             ) : (
@@ -3597,7 +3815,12 @@ function AgentDetailInner() {
 
                 {/* ── Settings Tab ── */}
                 {
-                    activeTab === 'settings' && (() => {
+                    activeTab === 'settings' && (agent as any)?.agent_type === 'openclaw' && (
+                        <OpenClawSettings agent={agent} agentId={id!} />
+                    )
+                }
+                {
+                    activeTab === 'settings' && (agent as any)?.agent_type !== 'openclaw' && (() => {
                         // Check if form has unsaved changes
                         const hasChanges = (
                             settingsForm.primary_model_id !== (agent?.primary_model_id || '') ||
