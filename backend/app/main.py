@@ -100,17 +100,6 @@ async def lifespan(app: FastAPI):
         import app.models.gateway_message # noqa
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-            # Add 'atlassian' and 'agentbay' to channel_type_enum if they don't exist yet (idempotent)
-            await conn.execute(
-                __import__("sqlalchemy").text(
-                    "ALTER TYPE channel_type_enum ADD VALUE IF NOT EXISTS 'atlassian'"
-                )
-            )
-            await conn.execute(
-                __import__("sqlalchemy").text(
-                    "ALTER TYPE channel_type_enum ADD VALUE IF NOT EXISTS 'agentbay'"
-                )
-            )
         logger.info("[startup] Database tables ready")
     except Exception as e:
         logger.warning(f"[startup] create_all failed: {e}")
