@@ -15,17 +15,38 @@ from loguru import logger
 async def get_desktop_live_url(agent_id: uuid.UUID) -> Optional[str]:
     """Get the VNC viewer URL for an agent's active computer session.
 
+    Searches for any active computer session for this agent in the
+    session cache, then calls get_link() to obtain the VNC URL.
     Returns None if no computer session is active or the URL
     cannot be retrieved.
     """
     from app.services.agentbay_client import _agentbay_sessions
 
+    # Log all available sessions for debugging
+    logger.info(f"[LivePreview] Looking up desktop session for agent {agent_id}")
+    logger.info(f"[LivePreview] Available sessions: {list(_agentbay_sessions.keys())}")
+
+    # Try exact key first, then search for any computer-type session
     cache_key = (agent_id, "computer")
     if cache_key not in _agentbay_sessions:
-        return None
+        # Also try UUID string comparison in case of type mismatch
+        found = False
+        for key in _agentbay_sessions:
+            key_agent_id, key_type = key
+            if str(key_agent_id) == str(agent_id) and key_type == "computer":
+                cache_key = key
+                found = True
+                logger.info(f"[LivePreview] Found session via string match: {cache_key}")
+                break
+        if not found:
+            logger.warning(f"[LivePreview] No computer session found for agent {agent_id}")
+            return None
 
     client, _last_used = _agentbay_sessions[cache_key]
-    return await client.get_live_url()
+    logger.info(f"[LivePreview] Found computer session, calling get_live_url()")
+    url = await client.get_live_url()
+    logger.info(f"[LivePreview] get_live_url() returned: {str(url)[:100] if url else 'None'}")
+    return url
 
 
 async def get_browser_snapshot(agent_id: uuid.UUID) -> Optional[str]:
@@ -36,9 +57,19 @@ async def get_browser_snapshot(agent_id: uuid.UUID) -> Optional[str]:
     """
     from app.services.agentbay_client import _agentbay_sessions
 
+    logger.info(f"[LivePreview] Looking up browser session for agent {agent_id}")
+
     cache_key = (agent_id, "browser")
     if cache_key not in _agentbay_sessions:
-        return None
+        # String-based fallback lookup
+        for key in _agentbay_sessions:
+            key_agent_id, key_type = key
+            if str(key_agent_id) == str(agent_id) and key_type == "browser":
+                cache_key = key
+                break
+        else:
+            logger.warning(f"[LivePreview] No browser session found for agent {agent_id}")
+            return None
 
     client, _last_used = _agentbay_sessions[cache_key]
     return await client.get_browser_snapshot_base64()
