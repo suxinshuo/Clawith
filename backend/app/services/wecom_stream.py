@@ -299,13 +299,16 @@ async def _process_wecom_stream_message(
         platform_user_id = platform_user.id
 
         # Find or create session
+        _is_group = (chat_type == "group" and bool(chat_id))
         sess = await find_or_create_channel_session(
             db=db,
             agent_id=agent_id,
-            user_id=platform_user_id,
+            user_id=agent_obj.creator_id if _is_group else platform_user_id,
             external_conv_id=conv_id,
             source_channel="wecom",
             first_message_title=user_text,
+            is_group=_is_group,
+            group_name=f"WeCom Group {chat_id[:8]}" if _is_group else None,
         )
         session_conv_id = str(sess.id)
 

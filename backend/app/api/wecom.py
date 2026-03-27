@@ -337,6 +337,8 @@ async def wecom_event_webhook(
     msg_id = msg_root.findtext("MsgId", "")
     open_kfid = msg_root.findtext("OpenKfId", "")
     token = msg_root.findtext("Token", "")
+    # Group chat ID — present when message comes from a WeCom group
+    chat_id = msg_root.findtext("ChatId", "")
 
     # Dedup
     dedup_key = msg_id if msg_id else token
@@ -347,7 +349,7 @@ async def wecom_event_webhook(
         if len(_processed_wecom_events) > 1000:
             _processed_wecom_events.clear()
 
-    logger.info(f"[WeCom] Message type={msg_type}, from={from_user}, msg_id={msg_id}")
+    logger.info(f"[WeCom] Message type={msg_type}, from={from_user}, msg_id={msg_id}, chat_id={chat_id or 'N/A'}")
 
     if msg_type == "text":
         user_text = msg_root.findtext("Content", "").strip()
@@ -357,7 +359,7 @@ async def wecom_event_webhook(
         # Process in background task
         import asyncio
         asyncio.create_task(
-            _process_wecom_text(db, agent_id, config, from_user, user_text)
+            _process_wecom_text(db, agent_id, config, from_user, user_text, chat_id=chat_id)
         )
 
     elif msg_type == "event":
@@ -455,6 +457,7 @@ async def _process_wecom_text(
     is_kf: bool = False,
     open_kfid: str = None,
     kf_msg_id: str = None,
+    chat_id: str = "",
 ):
     """Process an incoming WeCom text message and reply."""
     import json
@@ -479,7 +482,12 @@ async def _process_wecom_text(
         creator_id = agent_obj.creator_id
         ctx_size = agent_obj.context_window_size if agent_obj else 20
 
-        conv_id = f"wecom_p2p_{from_user}"
+        # Distinguish group chat from P2P by chat_id presence
+        _is_group = bool(chat_id)
+        if _is_group:
+            conv_id = f"wecom_group_{chat_id}"
+        else:
+            conv_id = f"wecom_p2p_{from_user}"
 
         # Find or create platform user
         wc_username = f"wecom_{from_user}"
@@ -524,10 +532,12 @@ async def _process_wecom_text(
         sess = await find_or_create_channel_session(
             db=db,
             agent_id=agent_id,
-            user_id=platform_user_id,
+            user_id=creator_id if _is_group else platform_user_id,
             external_conv_id=conv_id,
             source_channel="wecom",
             first_message_title=user_text,
+            is_group=_is_group,
+            group_name=f"WeCom Group {chat_id[:8]}" if _is_group else None,
         )
         session_conv_id = str(sess.id)
 
