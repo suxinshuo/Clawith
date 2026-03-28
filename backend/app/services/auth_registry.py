@@ -30,7 +30,7 @@ class AuthProviderRegistry:
         self._cache: dict[str, BaseAuthProvider] = {}
 
     async def get_provider(
-        self, db: AsyncSession, provider_type: str, tenant_id: str 
+        self, db: AsyncSession, provider_type: str, tenant_id: str
     ) -> BaseAuthProvider | None:
         """Get or create an authentication provider instance.
 

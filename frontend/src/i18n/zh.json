@@ -1108,10 +1108,9 @@
     "providerHints": {
       "feishu": "飞书：需填写 app_id, app_secret（可选：encrypt_key, verification_token）",
       "dingtalk": "钉钉：需填写 app_key, app_secret",
-      "wecom": "企业微信：需填写 corp_id, secret, agent_id",
+      "wecom": "企业微信：传统模式需 corp_id, secret, agent_id；智能机器人模式需 bot_id, bot_secret",
       "oauth2": "OAuth2：填写 App ID、App Secret、授权地址、Token地址、用户信息地址",
       "saml": "SAML：需填写 entry_point, issuer, cert (公钥)",
-      "microsoft_teams": "Microsoft Teams：需填写 client_id, client_secret, tenant_id"
-    }
+      "microsoft_teams": "Microsoft Teams：需填写 client_id, client_secret, tenant_id"    }
   }
 }

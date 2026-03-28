@@ -366,6 +366,36 @@ AGENT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "send_channel_message",
+            "description": (
+                "Send a message to a colleague via their configured channel (Feishu, DingTalk, WeCom). "
+                "Automatically detects the recipient's channel based on their org relationship. "
+                "Use this as the primary method to send messages to colleagues in your relationship network."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "member_name": {
+                        "type": "string",
+                        "description": "Recipient's name as shown in relationships, e.g. '张三'. Must be a person in your relationship network.",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Message content to send",
+                    },
+                    "channel": {
+                        "type": "string",
+                        "description": "Optional: Specific channel to use (feishu, dingtalk, wecom). Use this if multiple people have the same name in different channels.",
+                        "enum": ["feishu", "dingtalk", "wecom"]
+                    },
+                },
+                "required": ["member_name", "message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "send_web_message",
             "description": "Send a message to a user on the Clawith web platform. The message will appear in their web chat history and be pushed in real-time if they are online. Use this to proactively notify web users.",
             "parameters": {
@@ -1113,6 +1143,11 @@ _ALWAYS_INCLUDE_CORE = {
     "send_channel_file",
     "send_file_to_agent",
     "write_file",
+    "send_channel_message",
+}
+# Channel message tool - available when any channel (Feishu/DingTalk/WeCom) is configured
+_CHANNEL_MESSAGE_TOOL_NAMES = {
+    "send_channel_message",
 }
 # Feishu tools are ONLY included when the agent has a configured Feishu channel,
 # to avoid exposing unnecessary tools to non-Feishu agents (reduces hallucination risk).
@@ -1131,6 +1166,7 @@ _FEISHU_TOOL_NAMES = {
 }
 _always_core_tools = [t for t in AGENT_TOOLS if t["function"]["name"] in _ALWAYS_INCLUDE_CORE]
 _feishu_tools = [t for t in AGENT_TOOLS if t["function"]["name"] in _FEISHU_TOOL_NAMES]
+_channel_tools = [t for t in AGENT_TOOLS if t["function"]["name"] in _CHANNEL_MESSAGE_TOOL_NAMES]
 
 
 async def _agent_has_feishu(agent_id: uuid.UUID) -> bool:
@@ -1150,17 +1186,35 @@ async def _agent_has_feishu(agent_id: uuid.UUID) -> bool:
         return False
 
 
+async def _agent_has_any_channel(agent_id: uuid.UUID) -> bool:
+    """Check if agent has any configured channel (Feishu/DingTalk/WeCom)."""
+    try:
+        from app.models.channel_config import ChannelConfig
+        async with async_session() as db:
+            r = await db.execute(
+                select(ChannelConfig).where(
+                    ChannelConfig.agent_id == agent_id,
+                    ChannelConfig.is_configured == True,
+                )
+            )
+            return r.scalar_one_or_none() is not None
+    except Exception:
+        return False
+
+
 # ─── Dynamic Tool Loading from DB ──────────────────────────────
 
 async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
     """Load enabled tools for an agent from DB (OpenAI function-calling format).
-    
+
     Falls back to hardcoded AGENT_TOOLS if DB not ready.
     Always includes core system tools (send_channel_file, write_file).
     Feishu tools are only included when the agent has a configured Feishu channel.
+    send_channel_message is included when any channel (Feishu/DingTalk/WeCom) is configured.
     """
     has_feishu = await _agent_has_feishu(agent_id)
-    _always_tools = _always_core_tools + (_feishu_tools if has_feishu else [])
+    has_any_channel = await _agent_has_any_channel(agent_id)
+    _always_tools = _always_core_tools + (_feishu_tools if has_feishu else []) + (_channel_tools if has_any_channel else [])
 
     try:
         from app.models.tool import Tool, AgentTool
@@ -1439,6 +1493,8 @@ async def execute_tool(
             result = await _send_feishu_message(agent_id, arguments)
         elif tool_name == "send_web_message":
             result = await _send_web_message(agent_id, arguments)
+        elif tool_name == "send_channel_message":
+            result = await _send_channel_message(agent_id, arguments)
         elif tool_name == "send_message_to_agent":
             result = await _send_message_to_agent(agent_id, arguments)
         elif tool_name == "send_file_to_agent":
@@ -2810,6 +2866,244 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
                 return f"发送失败 {resp}"
     except Exception as e:
         return f"❌ Message send error: {str(e)[:200]}"
+
+
+async def _send_channel_message(agent_id: uuid.UUID, args: dict) -> str:
+    """Send message via the recipient's configured channel (Feishu/DingTalk/WeCom).
+
+    1. Find target user from relationships (AgentRelationship -> OrgMember)
+    2. Determine user's provider type (via OrgMember.provider_id -> IdentityProvider)
+    3. Find corresponding channel config (ChannelConfig)
+    4. Send via the appropriate channel
+    """
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+    from app.models.org import AgentRelationship, OrgMember
+    from app.models.identity import IdentityProvider
+
+    member_name = (args.get("member_name") or "").strip()
+    message_text = (args.get("message") or "").strip()
+    target_channel = (args.get("channel") or "").strip().lower()
+
+    if not member_name:
+        return "❌ Please provide member_name"
+    if not message_text:
+        return "❌ Please provide message content"
+
+    try:
+        async with async_session() as db:
+            # 1. Find target member from relationships with provider info (only active members)
+            result = await db.execute(
+                select(AgentRelationship, OrgMember, IdentityProvider)
+                .join(OrgMember, AgentRelationship.member_id == OrgMember.id)
+                .outerjoin(IdentityProvider, OrgMember.provider_id == IdentityProvider.id)
+                .where(AgentRelationship.agent_id == agent_id, OrgMember.name == member_name, OrgMember.status == "active")
+                .options(selectinload(AgentRelationship.member))
+            )
+            rows = result.all()
+
+            if not rows:
+                return f"❌ {member_name} is not in your relationship network"
+
+            target_member = None
+            provider_type = None
+
+            # Handle multiple matches across different providers
+            if target_channel:
+                for rel, member, provider in rows:
+                    if provider and provider.provider_type == target_channel:
+                        target_member = member
+                        provider_type = target_channel
+                        break
+                if not target_member:
+                    available = [p.provider_type for _, _, p in rows if p]
+                    return f"❌ {member_name} not found in {target_channel} channel. Available channels: {', '.join(available)}"
+            else:
+                if len(rows) > 1:
+                    available = [p.provider_type for _, _, p in rows if p]
+                    logger.warning(f"[ChannelMessage] Ambiguous member '{member_name}' found in multiple channels: {available}")
+                    # Pick the first one as before, but mention others if possible
+                
+                rel, member, provider = rows[0]
+                target_member = member
+                provider_type = provider.provider_type if provider else None
+
+            # 2. Determine channel based on provider type
+            if not provider_type:
+                # Fallback: check which channel configs exist and has user info
+                if target_member.external_id or target_member.open_id:
+                    # Try Feishu as default
+                    provider_type = "feishu"
+                else:
+                    return f"❌ {member_name} has no linked channel (no provider info)"
+
+            logger.info(f"[ChannelMessage] Sending to {member_name} via {provider_type}")
+
+            # 3. Route to appropriate channel
+            if provider_type == "feishu":
+                return await _send_feishu_message(agent_id, {"member_name": member_name, "message": message_text})
+            elif provider_type == "dingtalk":
+                return await _send_dingtalk_message(agent_id, member_name, message_text, target_member)
+            elif provider_type == "wecom":
+                return await _send_wecom_message(agent_id, member_name, message_text, target_member)
+            else:
+                return f"❌ Unsupported channel type: {provider_type}"
+
+    except Exception as e:
+        logger.exception("[ChannelMessage] Error")
+        return f"❌ Channel message error: {str(e)[:200]}"
+
+
+async def _send_dingtalk_message(
+    agent_id: uuid.UUID,
+    member_name: str,
+    message_text: str,
+    target_member: "OrgMember",
+) -> str:
+    """Send message via DingTalk channel using Open API."""
+    import json as _j
+
+    from app.models.channel_config import ChannelConfig
+    from app.services.dingtalk_service import send_dingtalk_message
+
+    try:
+        async with async_session() as db:
+            # 1. Get DingTalk channel config
+            config_result = await db.execute(
+                select(ChannelConfig).where(
+                    ChannelConfig.agent_id == agent_id,
+                    ChannelConfig.channel_type == "dingtalk",
+                    ChannelConfig.is_configured == True,
+                )
+            )
+            config = config_result.scalar_one_or_none()
+            if not config:
+                return "❌ This agent has no DingTalk channel configured"
+
+            # 2. Get recipient's user_id (external_id)
+            user_id = target_member.external_id
+            if not user_id:
+                # Try to use unionid or openid as fallback
+                user_id = target_member.unionid or target_member.open_id
+                if not user_id:
+                    return f"❌ {member_name} has no DingTalk user_id"
+
+            logger.info(f"[DingTalk] Sending to user_id: {user_id}")
+
+            # Get agent_id from extra_config (required for DingTalk API)
+            agent_id_dingtalk = config.extra_config.get("agent_id") if config.extra_config else None
+
+            # 3. Send message via DingTalk service
+            result = await send_dingtalk_message(
+                app_id=config.app_id,
+                app_secret=config.app_secret,
+                user_id=user_id,
+                message=message_text,
+                agent_id=agent_id_dingtalk,
+            )
+
+            if result.get("errcode") == 0:
+                # Save proactive message to session so it appears in UI
+                try:
+                    from app.services.channel_session import find_or_create_channel_session
+                    from app.models.audit import ChatMessage
+                    from datetime import datetime, timezone
+                    
+                    # 1. Find the platform user for this DingTalk ID
+                    from app.models.user import User as UserModel
+                    dt_username = f"dingtalk_{user_id}"
+                    u_r = await db.execute(select(UserModel).where(UserModel.username == dt_username))
+                    platform_user = u_r.scalar_one_or_none()
+                    
+                    if platform_user:
+                        conv_id = f"dingtalk_p2p_{user_id}"
+                        # 2. Get/Create session
+                        sess = await find_or_create_channel_session(
+                            db=db,
+                            agent_id=agent_id,
+                            user_id=platform_user.id,
+                            external_conv_id=conv_id,
+                            source_channel="dingtalk",
+                            first_message_title=message_text[:30],
+                        )
+                        # 3. Save assistant message
+                        db.add(ChatMessage(
+                            agent_id=agent_id,
+                            user_id=platform_user.id,
+                            role="assistant",
+                            content=message_text,
+                            conversation_id=str(sess.id),
+                        ))
+                        sess.last_message_at = datetime.now(timezone.utc)
+                        await db.commit()
+                        logger.info(f"[DingTalk] Proactive message saved to session {sess.id}")
+                except Exception as ex:
+                    logger.error(f"[DingTalk] Failed to save proactive message to session: {ex}")
+
+                return f"✅ Message sent to {member_name} via DingTalk"
+            else:
+                errmsg = result.get("errmsg", "Unknown error")
+                logger.error(f"[DingTalk] Send failed: {result}")
+                return f"❌ DingTalk send failed: {errmsg}"
+
+    except Exception as e:
+        logger.exception("[DingTalk] Error")
+        return f"❌ DingTalk message error: {str(e)[:200]}"
+
+
+async def _send_wecom_message(
+    agent_id: uuid.UUID,
+    member_name: str,
+    message_text: str,
+    target_member: "OrgMember",
+) -> str:
+    """Send message via WeCom channel using Open API."""
+    import json as _j
+
+    from app.models.channel_config import ChannelConfig
+    from app.services.wecom_service import send_wecom_message
+
+    try:
+        async with async_session() as db:
+            # 1. Get WeCom channel config
+            config_result = await db.execute(
+                select(ChannelConfig).where(
+                    ChannelConfig.agent_id == agent_id,
+                    ChannelConfig.channel_type == "wecom",
+                    ChannelConfig.is_configured == True,
+                )
+            )
+            config = config_result.scalar_one_or_none()
+            if not config:
+                return "❌ This agent has no WeCom channel configured"
+
+            # 2. Get recipient's user_id
+            user_id = target_member.external_id
+            if not user_id:
+                user_id = target_member.open_id
+                if not user_id:
+                    return f"❌ {member_name} has no WeCom user_id"
+
+            logger.info(f"[WeCom] Sending to user_id: {user_id}")
+
+            # 3. Send message via WeCom service
+            result = await send_wecom_message(
+                config.app_id,
+                config.app_secret,
+                user_id,
+                message_text,
+            )
+
+            if result.get("errcode") == 0:
+                return f"✅ Message sent to {member_name} via WeCom"
+            else:
+                errmsg = result.get("errmsg", "Unknown error")
+                logger.error(f"[WeCom] Send failed: {result}")
+                return f"❌ WeCom send failed: {errmsg}"
+
+    except Exception as e:
+        logger.exception("[WeCom] Error")
+        return f"❌ WeCom message error: {str(e)[:200]}"
 
 
 async def _send_web_message(agent_id: uuid.UUID, args: dict) -> str:

@@ -145,6 +145,20 @@ class BaseAuthProvider(ABC):
                     tenant_id=tenant_id,
                 )
 
+        # 4. Also try matching by mobile if available (critical to prevent duplicate users)
+        if not user and user_info.mobile:
+            user = await sso_service.match_user_by_mobile(db, user_info.mobile, tenant_id)
+            if user:
+                # Link identity (OrgMember) to existing user
+                await sso_service.link_identity(
+                    db,
+                    str(user.id),
+                    self.provider_type,
+                    provider_user_id,
+                    user_info.raw_data,
+                    tenant_id=tenant_id,
+                )
+
         if user:
             # Update user info
             await self._update_existing_user(db, user, user_info)

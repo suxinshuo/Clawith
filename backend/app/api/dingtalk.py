@@ -29,7 +29,7 @@ async def configure_dingtalk_channel(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Configure DingTalk bot for an agent. Fields: app_key, app_secret."""
+    """Configure DingTalk bot for an agent. Fields: app_key, app_secret, agent_id (optional)."""
     agent, _ = await check_agent_access(db, current_user, agent_id)
     if not is_agent_creator(current_user, agent):
         raise HTTPException(status_code=403, detail="Only creator can configure channel")
@@ -38,6 +38,11 @@ async def configure_dingtalk_channel(
     app_secret = data.get("app_secret", "").strip()
     if not app_key or not app_secret:
         raise HTTPException(status_code=422, detail="app_key and app_secret are required")
+
+    # Handle connection mode (Stream/WebSocket vs Webhook) and agent_id
+    extra_config = data.get("extra_config", {})
+    conn_mode = extra_config.get("connection_mode", "websocket")
+    dingtalk_agent_id = extra_config.get("agent_id", "")  # DingTalk AgentId for API messaging
 
     result = await db.execute(
         select(ChannelConfig).where(
@@ -50,11 +55,20 @@ async def configure_dingtalk_channel(
         existing.app_id = app_key
         existing.app_secret = app_secret
         existing.is_configured = True
+        existing.extra_config = {**existing.extra_config, "connection_mode": conn_mode, "agent_id": dingtalk_agent_id}
         await db.flush()
-        # Restart Stream client
-        from app.services.dingtalk_stream import dingtalk_stream_manager
-        import asyncio
-        asyncio.create_task(dingtalk_stream_manager.start_client(agent_id, app_key, app_secret))
+        
+        # Restart Stream client if in websocket mode
+        if conn_mode == "websocket":
+            from app.services.dingtalk_stream import dingtalk_stream_manager
+            import asyncio
+            asyncio.create_task(dingtalk_stream_manager.start_client(agent_id, app_key, app_secret))
+        else:
+            # Stop existing Stream client if switched to webhook
+            from app.services.dingtalk_stream import dingtalk_stream_manager
+            import asyncio
+            asyncio.create_task(dingtalk_stream_manager.stop_client(agent_id))
+            
         return ChannelConfigOut.model_validate(existing)
 
     config = ChannelConfig(
@@ -63,14 +77,16 @@ async def configure_dingtalk_channel(
         app_id=app_key,
         app_secret=app_secret,
         is_configured=True,
+        extra_config={"connection_mode": conn_mode},
     )
     db.add(config)
     await db.flush()
 
-    # Start Stream client
-    from app.services.dingtalk_stream import dingtalk_stream_manager
-    import asyncio
-    asyncio.create_task(dingtalk_stream_manager.start_client(agent_id, app_key, app_secret))
+    # Start Stream client if in websocket mode
+    if conn_mode == "websocket":
+        from app.services.dingtalk_stream import dingtalk_stream_manager
+        import asyncio
+        asyncio.create_task(dingtalk_stream_manager.start_client(agent_id, app_key, app_secret))
 
     return ChannelConfigOut.model_validate(config)
 

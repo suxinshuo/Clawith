@@ -96,7 +96,7 @@ function DeptTree({ departments, parentId, selectedDept, onSelect, level }: {
 function OrgTab({ tenant }: { tenant: any }) {
     const { t } = useTranslation();
     const qc = useQueryClient();
-    
+
     const SsoStatus = () => {
         const [editing, setEditing] = useState(false);
         const [ssoEnabled, setSsoEnabled] = useState(!!tenant?.sso_enabled);
@@ -137,7 +137,7 @@ function OrgTab({ tenant }: { tenant: any }) {
                     <h3 style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px' }}>
                         {t('enterprise.identity.editSsoTitle', 'Edit SSO Configuration')}
                     </h3>
-                    
+
                     <div style={{ marginBottom: '12px' }}>
                         <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', fontWeight: 500 }}>
                             <input
@@ -181,14 +181,14 @@ function OrgTab({ tenant }: { tenant: any }) {
         }
 
         return (
-            <div style={{ 
-                marginBottom: '24px', padding: '16px', borderRadius: '12px', 
+            <div style={{
+                marginBottom: '24px', padding: '16px', borderRadius: '12px',
                 background: tenant?.sso_enabled ? 'rgba(59,130,246,0.08)' : 'var(--bg-secondary)',
                 border: tenant?.sso_enabled ? '1px solid rgba(59,130,246,0.15)' : '1px solid var(--border-subtle)',
                 display: 'flex', alignItems: 'center', gap: '16px'
             }}>
-                <div style={{ 
-                    width: '40px', height: '40px', borderRadius: '8px', 
+                <div style={{
+                    width: '40px', height: '40px', borderRadius: '8px',
                     background: tenant?.sso_enabled ? 'var(--accent-primary)' : 'var(--bg-tertiary)',
                     display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '20px'
                 }}>
@@ -204,7 +204,7 @@ function OrgTab({ tenant }: { tenant: any }) {
                         )}
                     </div>
                     <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                        {tenant?.sso_enabled 
+                        {tenant?.sso_enabled
                             ? t('enterprise.identity.ssoDomainHint', 'SSO is configured for: {{domain}}', { domain: tenant.sso_domain || window.location.hostname })
                             : t('enterprise.identity.ssoDisabledHint', 'Seamless enterprise login is currently disabled for this organization.')
                         }
@@ -344,9 +344,9 @@ function OrgTab({ tenant }: { tenant: any }) {
         const isOAuth2 = type === 'oauth2';
         setUseOAuth2Form(isOAuth2);
         const defaults: any = {
-            feishu: { app_id: '', app_secret: '' },
-            dingtalk: { app_key: '', app_secret: '' },
-            wecom: { corp_id: '', secret: '', agent_id: '' },
+            feishu: { app_id: '', app_secret: '', corp_id: '' },
+            dingtalk: { app_key: '', app_secret: '', corp_id: '' },
+            wecom: { corp_id: '', secret: '', agent_id: '', bot_id: '', bot_secret: '' },
         };
         const nameMap: Record<string, string> = { feishu: 'Feishu', wecom: 'WeCom', dingtalk: 'DingTalk', oauth2: 'OAuth2' };
         setForm({
@@ -402,7 +402,7 @@ function OrgTab({ tenant }: { tenant: any }) {
                                     const newType = e.target.value;
                                     const isOAuth2 = newType === 'oauth2';
                                     setUseOAuth2Form(isOAuth2);
-                                    const defaults: any = { feishu: { app_id: '', app_secret: '' }, dingtalk: { app_key: '', app_secret: '' }, wecom: { corp_id: '', secret: '', agent_id: '' } };
+                                    const defaults: any = { feishu: { app_id: '', app_secret: '' }, dingtalk: { app_key: '', app_secret: '' }, wecom: { corp_id: '', secret: '', agent_id: '', bot_id: '', bot_secret: '' } };
                                     setForm({ ...form, provider_type: newType, config: defaults[newType] || {} });
                                 }}>
                                     <option value="feishu">Feishu</option>
@@ -430,6 +430,63 @@ function OrgTab({ tenant }: { tenant: any }) {
                                 <div className="form-group" style={{ gridColumn: '1 / -1' }}>
                                     <label className="form-label">Authorize URL</label>
                                     <input className="form-input" value={form.authorize_url} onChange={e => setForm({ ...form, authorize_url: e.target.value })} />
+                                </div>
+                            </div>
+                        ) : form.provider_type === 'wecom' ? (
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                                <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '8px' }}>
+                                        {t('identity.providerHints.wecom')}
+                                    </div>
+                                </div>
+                                <div className="form-group">
+                                    <label className="form-label">Corp ID</label>
+                                    <input className="form-input" value={form.config.corp_id || ''} onChange={e => setForm({ ...form, config: { ...form.config, corp_id: e.target.value } })} placeholder="wwxxxxxxxxxxxx" />
+                                </div>
+                                <div className="form-group">
+                                    <label className="form-label">Secret</label>
+                                    <input className="form-input" type="password" value={form.config.secret || ''} onChange={e => setForm({ ...form, config: { ...form.config, secret: e.target.value } })} />
+                                </div>
+                                <div className="form-group">
+                                    <label className="form-label">Agent ID (Optional)</label>
+                                    <input className="form-input" value={form.config.agent_id || ''} onChange={e => setForm({ ...form, config: { ...form.config, agent_id: e.target.value } })} />
+                                </div>
+                                <div style={{ gridColumn: '1 / -1', height: '1px', background: 'var(--border-subtle)', margin: '8px 0' }} />
+                                <div className="form-group">
+                                    <label className="form-label">Bot ID (Intelligent Robot)</label>
+                                    <input className="form-input" value={form.config.bot_id || ''} onChange={e => setForm({ ...form, config: { ...form.config, bot_id: e.target.value } })} placeholder="aibXXXXXXXXXXXX" />
+                                </div>
+                                <div className="form-group">
+                                    <label className="form-label">Bot Secret</label>
+                                    <input className="form-input" type="password" value={form.config.bot_secret || ''} onChange={e => setForm({ ...form, config: { ...form.config, bot_secret: e.target.value } })} />
+                                </div>
+                            </div>
+                        ) : form.provider_type === 'feishu' ? (
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                                <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{t('identity.providerHints.feishu')}</div>
+                                </div>
+                                <div className="form-group">
+                                    <label className="form-label">App ID</label>
+                                    <input className="form-input" value={form.config.app_id || ''} onChange={e => setForm({ ...form, config: { ...form.config, app_id: e.target.value } })} placeholder="cli_xxxxxxxxxxxx" />
+                                </div>
+                                <div className="form-group">
+                                    <label className="form-label">App Secret</label>
+                                    <input className="form-input" type="password" value={form.config.app_secret || ''} onChange={e => setForm({ ...form, config: { ...form.config, app_secret: e.target.value } })} />
+                                </div>
+                            </div>
+                        ) : form.provider_type === 'dingtalk' ? (
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                                <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{t('identity.providerHints.dingtalk')}</div>
+                                </div>
+                                <div className="form-group">
+                                    <label className="form-label">App Key</label>
+                                    <input className="form-input" value={form.config.app_key || ''} onChange={e => setForm({ ...form, config: { ...form.config, app_key: e.target.value } })} placeholder="dingxxxxxxxxxxxx" />
+                                </div>
+                                <div className="form-group">
+                                    <label className="form-label">App Secret</label>
+                                    <input className="form-input" type="password" value={form.config.app_secret || ''} onChange={e => setForm({ ...form, config: { ...form.config, app_secret: e.target.value } })} />
                                 </div>
                             </div>
                         ) : (
@@ -766,8 +823,8 @@ function SkillsTab() {
                         title="Settings"
                     >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <circle cx="12" cy="12" r="3"/>
-                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                            <circle cx="12" cy="12" r="3" />
+                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
                         </svg>
                     </button>
                     <button
@@ -800,11 +857,11 @@ function SkillsTab() {
                             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="6.5" /><path d="M8 7v4M8 5.5v0" /></svg>
                             <span className="metric-tooltip" style={{ width: '300px', bottom: 'auto', top: 'calc(100% + 6px)', left: '-8px', fontWeight: 400 }}>
                                 <div style={{ marginBottom: '6px', fontWeight: 500 }}>{t('enterprise.tools.howToGenerateGithubToken')}</div>
-                                {t('enterprise.tools.githubTokenStep1')}<br/>
-                                {t('enterprise.tools.githubTokenStep2')}<br/>
-                                {t('enterprise.tools.githubTokenStep3')}<br/>
-                                {t('enterprise.tools.githubTokenStep4')}<br/>
-                                {t('enterprise.tools.githubTokenStep5')}<br/>
+                                {t('enterprise.tools.githubTokenStep1')}<br />
+                                {t('enterprise.tools.githubTokenStep2')}<br />
+                                {t('enterprise.tools.githubTokenStep3')}<br />
+                                {t('enterprise.tools.githubTokenStep4')}<br />
+                                {t('enterprise.tools.githubTokenStep5')}<br />
                                 <div style={{ marginTop: '6px', fontSize: '11px', color: 'var(--text-tertiary)' }}>
                                     {t('enterprise.tools.orVisit')}
                                 </div>
@@ -1652,11 +1709,11 @@ export default function EnterpriseSettings() {
                                     </div>
                                     <div className="form-group">
                                         <label className="form-label">{t('enterprise.llm.model')}</label>
-                                        <input 
-                                            className="form-input" 
+                                        <input
+                                            className="form-input"
                                             placeholder={t('enterprise.llm.modelPlaceholder', 'e.g. claude-sonnet-4-20250514')}
-                                            value={modelForm.model} 
-                                            onChange={e => setModelForm({ ...modelForm, model: e.target.value })} 
+                                            value={modelForm.model}
+                                            onChange={e => setModelForm({ ...modelForm, model: e.target.value })}
                                         />
                                     </div>
                                     <div className="form-group">
@@ -1718,8 +1775,8 @@ export default function EnterpriseSettings() {
                                         }
                                     }}>{t('enterprise.llm.test')}</button>
                                     <button className="btn btn-primary" onClick={() => {
-                                        const data = { 
-                                            ...modelForm, 
+                                        const data = {
+                                            ...modelForm,
                                             max_output_tokens: modelForm.max_output_tokens ? Number(modelForm.max_output_tokens) : null,
                                             temperature: modelForm.temperature !== '' ? Number(modelForm.temperature) : null
                                         };
@@ -1755,11 +1812,11 @@ export default function EnterpriseSettings() {
                                                 </div>
                                                 <div className="form-group">
                                                     <label className="form-label">{t('enterprise.llm.model')}</label>
-                                                    <input 
-                                                        className="form-input" 
+                                                    <input
+                                                        className="form-input"
                                                         placeholder={t('enterprise.llm.modelPlaceholder', 'e.g. claude-sonnet-4-20250514')}
-                                                        value={modelForm.model} 
-                                                        onChange={e => setModelForm({ ...modelForm, model: e.target.value })} 
+                                                        value={modelForm.model}
+                                                        onChange={e => setModelForm({ ...modelForm, model: e.target.value })}
                                                     />
                                                 </div>
                                                 <div className="form-group">
@@ -1822,8 +1879,8 @@ export default function EnterpriseSettings() {
                                                     }
                                                 }}>{t('enterprise.llm.test')}</button>
                                                 <button className="btn btn-primary" onClick={() => {
-                                                    const data = { 
-                                                        ...modelForm, 
+                                                    const data = {
+                                                        ...modelForm,
                                                         max_output_tokens: modelForm.max_output_tokens ? Number(modelForm.max_output_tokens) : null,
                                                         temperature: modelForm.temperature !== '' ? Number(modelForm.temperature) : null
                                                     };

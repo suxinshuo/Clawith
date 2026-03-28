@@ -662,27 +662,11 @@ def normalize_oauth2_config(config: dict) -> dict:
     return config
 
 def validate_provider_config(provider_type: str, config: dict):
-    """Validate required keys for each identity provider type."""
-    # Normalize OAuth2 config first
-    if provider_type == "oauth2":
-        config = normalize_oauth2_config(config)
+    """Validate identity provider config. Specific field checks are handled by the frontend."""
+    if not isinstance(config, dict):
+        raise HTTPException(status_code=422, detail="Configuration must be a JSON object")
+    return
 
-    required_keys = {
-        "feishu": ["app_id", "app_secret"],
-        "dingtalk": ["app_key", "app_secret"],
-        "wecom": ["corp_id", "secret", "agent_id"],
-        "microsoft_teams": ["client_id", "client_secret", "tenant_id"],
-        "oauth2": ["app_id", "app_secret", "authorize_url", "token_url", "user_info_url"],
-        "saml": ["entry_point", "issuer", "cert"],
-    }
-    
-    if provider_type in required_keys:
-        missing = [k for k in required_keys[provider_type] if k not in config or not str(config[k]).strip()]
-        if missing:
-            raise HTTPException(
-                status_code=422, 
-                detail=f"Missing required configuration keys for {provider_type}: {', '.join(missing)}"
-            )
 
 @router.post("/identity-providers", response_model=IdentityProviderOut)
 async def create_identity_provider(
