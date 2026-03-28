@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.identity import IdentityProvider
 from app.models.org import OrgDepartment, OrgMember
 from app.models.user import User
+from pypinyin import pinyin, Style
+
 from app.core.security import hash_password
 
 
@@ -236,22 +238,6 @@ class BaseOrgSyncAdapter(ABC):
             .values(member_count=direct_subquery)
         )
 
-        # 2. Update the Root department(s) (parent_id is NULL) to show the TOTAL provider headcount
-        total_subquery = (
-            select(func.count(OrgMember.id))
-            .where(OrgMember.provider_id == provider_id)
-            .where(OrgMember.status == "active")
-            .scalar_subquery()
-        )
-
-        await db.execute(
-            update(OrgDepartment)
-            .where(OrgDepartment.provider_id == provider_id)
-            .where(OrgDepartment.parent_id.is_(None))
-            .where(OrgDepartment.status == "active")
-            .values(member_count=total_subquery)
-        )
-
     async def _ensure_provider(self, db: AsyncSession) -> IdentityProvider:
         """Ensure IdentityProvider record exists."""
         if self.provider:
@@ -418,6 +404,10 @@ class BaseOrgSyncAdapter(ABC):
         # Update/Create OrgMember
         if existing_member:
             existing_member.name = user.name
+            # Generate transliteration
+            existing_member.name_translit_full = "".join([i[0] for i in pinyin(user.name, style=Style.NORMAL)])
+            existing_member.name_translit_initial = "".join([i[0] for i in pinyin(user.name, style=Style.FIRST_LETTER)])
+            
             if email is not None:
                 existing_member.email = email
             existing_member.avatar_url = user.avatar_url
@@ -437,6 +427,9 @@ class BaseOrgSyncAdapter(ABC):
             if user_id and not existing_member.user_id:
                 existing_member.user_id = user_id
         else:
+            translit_full = "".join([i[0] for i in pinyin(user.name, style=Style.NORMAL)])
+            translit_initial = "".join([i[0] for i in pinyin(user.name, style=Style.FIRST_LETTER)])
+            
             new_member = OrgMember(
                 external_id=user.external_id,
                 open_id=user.open_id,
@@ -444,6 +437,8 @@ class BaseOrgSyncAdapter(ABC):
                 provider_id=provider.id,
                 user_id=user_id,
                 name=user.name,
+                name_translit_full=translit_full,
+                name_translit_initial=translit_initial,
                 email=email,
                 avatar_url=user.avatar_url,
                 title=user.title,
@@ -845,7 +840,9 @@ class WeComOrgSyncAdapter(BaseOrgSyncAdapter):
         super().__init__(provider, config, tenant_id)
         # Handle various config key naming conventions
         self.corp_id = self.config.get("corp_id") or self.config.get("app_id") or self.config.get("corpid")
-        self.secret = self.config.get("secret") or self.config.get("app_secret") or self.config.get("corpsecret")
+        self.secret = self.config.get("secret") or self.config.get("app_secret") or self.config.get("corpsecret") or self.config.get("bot_secret")
+        self.bot_id = self.config.get("bot_id")
+        self.bot_secret = self.config.get("bot_secret") or self.secret
         self._access_token: str | None = None
         self._token_expires_at: datetime | None = None
 
@@ -858,24 +855,39 @@ class WeComOrgSyncAdapter(BaseOrgSyncAdapter):
         if self._access_token and self._token_expires_at and datetime.now() < self._token_expires_at:
             return self._access_token
 
-        if not self.corp_id or not self.secret:
-            raise ValueError("WeCom corp_id/secret missing in provider config")
+        # Priority 1: Standard CorpID + Secret
+        if self.corp_id and self.secret:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    self.WECOM_TOKEN_URL,
+                    params={"corpid": self.corp_id, "corpsecret": self.secret},
+                )
+                data = resp.json()
+                if data.get("errcode") == 0:
+                    token = data.get("access_token") or ""
+                    expires_in = int(data.get("expires_in") or 7200)
+                    self._access_token = token
+                    self._token_expires_at = datetime.now() + timedelta(seconds=max(expires_in - 300, 300))
+                    return token
+                else:
+                    logger.error(f"[WeCom Sync] Token error with corp_id: {data}")
 
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                self.WECOM_TOKEN_URL,
-                params={"corpid": self.corp_id, "corpsecret": self.secret},
-            )
-            data = resp.json()
-            if data.get("errcode") != 0:
-                raise RuntimeError(f"WeCom token error: {data.get('errmsg') or data}")
-            
-            token = data.get("access_token") or ""
-            expires_in = int(data.get("expires_in") or 7200)
-            self._access_token = token
-            # Refresh a bit earlier (5 mins)
-            self._token_expires_at = datetime.now() + timedelta(seconds=max(expires_in - 300, 300))
-            return token
+        # Priority 2: Try bot_id as corp_id if no corp_id provided (fallback)
+        if not self.corp_id and self.bot_id and self.bot_secret:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    self.WECOM_TOKEN_URL,
+                    params={"corpid": self.bot_id, "corpsecret": self.bot_secret},
+                )
+                data = resp.json()
+                if data.get("errcode") == 0:
+                    token = data.get("access_token") or ""
+                    expires_in = int(data.get("expires_in") or 7200)
+                    self._access_token = token
+                    self._token_expires_at = datetime.now() + timedelta(seconds=max(expires_in - 300, 300))
+                    return token
+
+        raise ValueError("WeCom credentials (corp_id/secret or bot_id/secret) missing or invalid")
 
     async def fetch_departments(self) -> list[ExternalDepartment]:
         """Fetch all departments from WeCom."""

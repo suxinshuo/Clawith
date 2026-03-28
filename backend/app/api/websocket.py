@@ -610,6 +610,13 @@ async def websocket_chat(
         while True:
             logger.info(f"[WS] Waiting for message from {agent_name}...")
             data = await websocket.receive_json()
+
+            # Set a unique trace ID for this specific message processing
+            from app.core.logging_config import set_trace_id
+            import uuid as _trace_uuid
+            trace_id = str(_trace_uuid.uuid4())[:12]
+            set_trace_id(trace_id)
+
             content = data.get("content", "")
             display_content = data.get("display_content", "")  # User-facing display text
             file_name = data.get("file_name", "")  # Original file name for attachment display

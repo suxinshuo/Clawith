@@ -48,7 +48,6 @@ async def feishu_oauth_callback(
         # Use FeishuAuthProvider instead of legacy feishu_service
         from app.services.auth_provider import FeishuAuthProvider
         from app.models.identity import IdentityProvider
-        from sqlalchemy import select
         from app.config import get_settings
 
         # Get Feishu credentials from settings
@@ -516,7 +515,8 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
             if sender_user_id_feishu or sender_open_id:
                 member_query = select(OrgMember).where(
                     OrgMember.provider_id == provider.id,
-                    OrgMember.tenant_id == tenant_uuid,
+                    OrgMember.tenant_id == agent_obj.tenant_id if agent_obj else None,
+                    OrgMember.status == "active",
                     or_(
                         OrgMember.external_id == sender_user_id_feishu if sender_user_id_feishu else False,
                         OrgMember.open_id == sender_open_id if sender_open_id else False,
@@ -547,12 +547,12 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                 await db.flush()
                 platform_user_id = new_user.id
                 logger.info(f"[Feishu] Auto-created user: {sender_name} -> {new_username}")
-                
             # Ensure OrgMember exists and is linked
             member_check = await db.execute(
                 select(OrgMember).where(
                     OrgMember.provider_id == provider.id,
-                    OrgMember.tenant_id == tenant_uuid,
+                    OrgMember.tenant_id == agent_obj.tenant_id if agent_obj else None,
+                    OrgMember.status == "active",
                     or_(
                         OrgMember.external_id == sender_user_id_feishu if sender_user_id_feishu else False,
                         OrgMember.open_id == sender_open_id if sender_open_id else False
@@ -965,6 +965,7 @@ async def _handle_feishu_file(db, agent_id, config, message, sender_open_id, cha
                     _select(OrgMemberModel).where(
                         OrgMemberModel.provider_id == _provider.id,
                         OrgMemberModel.tenant_id == agent_obj.tenant_id,
+                        OrgMemberModel.status == "active",
                         or_(
                             OrgMemberModel.external_id == sender_user_id_feishu if sender_user_id_feishu else False,
                             OrgMemberModel.open_id == sender_open_id if sender_open_id else False,

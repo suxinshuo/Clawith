@@ -106,6 +106,7 @@ class FeishuService:
                 select(OrgMember).where(
                     OrgMember.open_id == open_id,
                     OrgMember.provider_id == provider.id,
+                    OrgMember.status == "active",
                 )
             )
             member = member_r.scalar_one_or_none()
@@ -114,6 +115,7 @@ class FeishuService:
                 select(OrgMember).where(
                     OrgMember.external_id == user_id,
                     OrgMember.provider_id == provider.id,
+                    OrgMember.status == "active",
                 )
             )
             member = member_r.scalar_one_or_none()
