@@ -16,15 +16,7 @@ depends_on = None
 def upgrade() -> None:
     # Add sso_login_enabled column to identity_providers table
     # Default is False: existing providers only do directory sync, not SSO login
-    op.execute("ALTER TABLE identity_providers ADD COLUMN IF NOT EXISTS sso_login_enabled BOOLEAN NOT NULL DEFAULT false") #
-        "identity_providers",
-        sa.Column(
-            "sso_login_enabled",
-            sa.Boolean(),
-            nullable=False,
-            server_default=sa.text("false"),
-        ),
-    )
+    op.execute("ALTER TABLE identity_providers ADD COLUMN IF NOT EXISTS sso_login_enabled BOOLEAN NOT NULL DEFAULT false")
 
 
 def downgrade() -> None:
