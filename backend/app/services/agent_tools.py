@@ -6485,8 +6485,8 @@ async def _agentbay_browser_navigate(agent_id: Optional[uuid.UUID], ws: Path, ar
                     screenshot_path.write_bytes(raw_bytes)
                     parts.append(
                         f"截图已保存至 `{rel_path}`。\n"
-                        f"Include this Markdown in your reply to show it to the user:\n"
-                        f"![Browser Screenshot](/api/agents/{agent_id}/files/download?path={rel_path})"
+                        f"![Browser Navigation Screenshot](/api/agents/{agent_id}/files/download?path={rel_path})\n"
+                        f"CRITICAL: Do NOT call 'send_channel_file' or 'upload_image'. Just print the Markdown above exactly as shown."
                     )
                     logger.info(f"[AgentBay] Browser navigate screenshot saved to {rel_path}")
                 else:
@@ -6556,8 +6556,8 @@ async def _agentbay_browser_screenshot(agent_id: Optional[uuid.UUID], ws: Path, 
             logger.info(f"[AgentBay] Browser screenshot saved to workspace: {rel_path}")
             return (
                 f"✅ 截图已保存至 `{rel_path}`。\n"
-                f"Include this Markdown in your reply to show it to the user:\n"
-                f"![Browser Screenshot](/api/agents/{agent_id}/files/download?path={rel_path})"
+                f"![Browser Screenshot](/api/agents/{agent_id}/files/download?path={rel_path})\n"
+                f"CRITICAL: Do NOT call 'send_channel_file' or 'upload_image'. Just print the Markdown above exactly as shown."
             )
         else:
             # Store in memory only — vision_inject.py will consume it for LLM vision
@@ -7003,8 +7003,8 @@ def _save_screenshot_to_workspace(agent_id: uuid.UUID, ws: Path, data) -> str:
     screenshot_path.write_bytes(raw_bytes)
     return (
         f"Screenshot saved to `{rel_path}`.\n\n"
-        f"To display the screenshot in chat, include this markdown in your reply:\n"
-        f"![Desktop Screenshot](/api/agents/{agent_id}/files/download?path={rel_path})"
+        f"![Desktop Screenshot](/api/agents/{agent_id}/files/download?path={rel_path})\n"
+        f"CRITICAL: Do NOT call 'send_channel_file' or 'upload_image'. Just print the Markdown above exactly as shown."
     )
 
 
@@ -7053,8 +7053,8 @@ async def _agentbay_computer_screenshot(agent_id: Optional[uuid.UUID], ws: Path,
             logger.info(f"[AgentBay] Desktop screenshot saved to workspace: {rel_path}")
             return (
                 f"Desktop screenshot saved to `{rel_path}`.\n"
-                f"Include this Markdown in your reply to show it to the user:\n"
-                f"![Desktop Screenshot](/api/agents/{agent_id}/files/download?path={rel_path})"
+                f"![Desktop Screenshot](/api/agents/{agent_id}/files/download?path={rel_path})\n"
+                f"CRITICAL: Do NOT call 'send_channel_file' or 'upload_image'. Just print the Markdown above exactly as shown."
             )
         else:
             # Store in memory only — vision_inject.py will consume it for LLM vision
