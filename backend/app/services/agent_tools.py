@@ -86,13 +86,16 @@ def _set_cached_tool_config(agent_id: Optional[uuid.UUID], tool_name: str, confi
 
 
 async def _get_tool_config(agent_id: Optional[uuid.UUID], tool_name: str) -> Optional[dict]:
-    """获取工具配置（带缓存）。
+    """Get merged tool config (with caching).
 
-    优先级：
-    1. agent_tools.config (per-agent 配置)
-    2. tools.config (全局配置)
+    Priority:
+    1. agent_tools.config (per-agent override)
+    2. tools.config (company/global config)
+
+    Both configs are decrypted using the tool's config_schema for
+    schema-aware field detection (e.g. smithery_api_key with type=password).
     """
-    # 先检查缓存
+    # Check cache first
     cached = _get_cached_tool_config(agent_id, tool_name)
     if cached is not None:
         logger.debug(f"[ToolConfig] Cache hit for {tool_name}, agent_id={agent_id}: {cached}")
@@ -101,32 +104,32 @@ async def _get_tool_config(agent_id: Optional[uuid.UUID], tool_name: str) -> Opt
     from app.models.tool import Tool, AgentTool
 
     async with async_session() as db:
-        # 1. 先查 per-agent 配置
+        # 1. Try per-agent + global config together
         if agent_id:
             result = await db.execute(
-                select(AgentTool.config, Tool.config)
+                select(AgentTool.config, Tool.config, Tool.config_schema)
                 .join(Tool, AgentTool.tool_id == Tool.id)
                 .where(AgentTool.agent_id == agent_id, Tool.name == tool_name)
             )
             row = result.first()
             if row:
-                agent_config, global_config = row
-                # 合并配置：agent_config 覆盖 global_config
+                agent_config, global_config, config_schema = row
+                # Merge: agent overrides global
                 merged = {**(global_config or {}), **(agent_config or {})}
                 if merged:
-                    # Decrypt before returning
-                    merged = _decrypt_sensitive_fields(merged)
-                    logger.info(f"[ToolConfig] DB merged config for {tool_name}, agent_id={agent_id}: {merged}")
+                    # Decrypt with schema awareness
+                    merged = _decrypt_sensitive_fields(merged, config_schema)
+                    logger.info(f"[ToolConfig] DB merged config for {tool_name}, agent_id={agent_id}")
                     _set_cached_tool_config(agent_id, tool_name, merged)
                     return merged
 
-        # 2. 回退到全局配置
+        # 2. Fallback to global config only
         result = await db.execute(select(Tool).where(Tool.name == tool_name))
         tool = result.scalar_one_or_none()
         if tool and tool.config:
-            # Decrypt before returning
-            decrypted = _decrypt_sensitive_fields(tool.config)
-            logger.info(f"[ToolConfig] DB global config for {tool_name}: {decrypted}")
+            # Decrypt with schema awareness
+            decrypted = _decrypt_sensitive_fields(tool.config, tool.config_schema)
+            logger.info(f"[ToolConfig] DB global config for {tool_name}")
             _set_cached_tool_config(agent_id, tool_name, decrypted)
             return decrypted
 
@@ -1849,35 +1852,8 @@ async def _web_search(arguments: dict, agent_id: uuid.UUID | None = None) -> str
     if not query:
         return "❌ Please provide search keywords"
 
-    # Load config with priority: Agent > Company > Default
-    config = {}
-    try:
-        from app.models.tool import Tool
-        from app.models.agent_tool import AgentTool
-        from app.api.tools import _decrypt_sensitive_fields
-        async with async_session() as db:
-            r = await db.execute(select(Tool).where(Tool.name == "web_search"))
-            tool = r.scalar_one_or_none()
-            schema = tool.config_schema if tool else None
-            # Company-level config (from Tool.config)
-            if tool and tool.config:
-                config = _decrypt_sensitive_fields(tool.config, schema)
-
-            # Agent-level override (from AgentTool.config) — takes precedence
-            if agent_id and tool:
-                at_r = await db.execute(
-                    select(AgentTool).where(
-                        AgentTool.agent_id == agent_id,
-                        AgentTool.tool_id == tool.id,
-                    )
-                )
-                at = at_r.scalar_one_or_none()
-                if at and at.config:
-                    agent_cfg = _decrypt_sensitive_fields(at.config, schema)
-                    # Merge: agent values override company values
-                    config = {**config, **{k: v for k, v in agent_cfg.items() if v}}
-    except Exception:
-        pass
+    # Use the standard _get_tool_config helper (Agent > Company, cached, decrypted)
+    config = await _get_tool_config(agent_id, "web_search") or {}
 
     engine = config.get("search_engine", "duckduckgo")
     api_key = config.get("api_key", "")
@@ -4814,31 +4790,14 @@ async def _upload_image(agent_id: uuid.UUID, ws: Path, arguments: dict) -> str:
     if not file_path and not url:
         return "❌ Please provide either 'file_path' (workspace path) or 'url' (public image URL)"
 
-    # ── Load ImageKit credentials (global → per-agent fallback) ──
+    # ── Load ImageKit credentials (Agent > Company priority) ──
     private_key = ""
     url_endpoint = ""
     try:
-        from app.models.tool import Tool, AgentTool
-        async with async_session() as db:
-            # Global config
-            r = await db.execute(select(Tool).where(Tool.name == "upload_image"))
-            tool = r.scalar_one_or_none()
-            if tool and tool.config:
-                private_key = tool.config.get("private_key", "")
-                url_endpoint = tool.config.get("url_endpoint", "")
-
-            # Per-agent override (if global key is empty)
-            if not private_key and tool:
-                r2 = await db.execute(
-                    select(AgentTool).where(
-                        AgentTool.agent_id == agent_id,
-                        AgentTool.tool_id == tool.id,
-                    )
-                )
-                agent_tool = r2.scalar_one_or_none()
-                if agent_tool and agent_tool.config:
-                    private_key = agent_tool.config.get("private_key", "") or private_key
-                    url_endpoint = agent_tool.config.get("url_endpoint", "") or url_endpoint
+        # Use standard _get_tool_config (Agent > Company, cached, schema-aware decryption)
+        config = await _get_tool_config(agent_id, "upload_image") or {}
+        private_key = config.get("private_key", "")
+        url_endpoint = config.get("url_endpoint", "")
     except Exception as e:
         logger.error(f"[UploadImage] Config load error: {e}")
 
