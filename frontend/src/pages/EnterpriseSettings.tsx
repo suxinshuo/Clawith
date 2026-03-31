@@ -2905,6 +2905,10 @@ export default function EnterpriseSettings() {
                                                     {field.type === 'password' ? (
                                                         <input type="password" autoComplete="new-password" className="form-input" value={editingConfig[field.key] ?? ''} placeholder={field.placeholder || ''}
                                                             onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.value }))} />
+                                                    ) : field.type === 'select' ? (
+                                                        <select className="form-input" value={editingConfig[field.key] ?? field.default ?? ''} onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.value }))}>
+                                                            {(field.options || []).map((o: any) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                                                        </select>
                                                     ) : (
                                                         <input type="text" className="form-input" value={editingConfig[field.key] ?? ''} placeholder={field.placeholder || ''}
                                                             onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.value }))} />

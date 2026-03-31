@@ -513,6 +513,10 @@ async def get_agent_tools_with_config(
     Both global_config and agent_config are decrypted before returning.
     For global_config, sensitive fields are masked (e.g. "sk-****abcd") so the
     frontend can show that a company key is configured without exposing it.
+
+    Special handling: some tools (Jina) store their API key in system_settings
+    rather than Tool.config. We resolve those as part of the global config so
+    the agent-level UI can show the inherited key hint.
     """
     from app.services.agent_tools import _agent_has_feishu
     has_feishu = await _agent_has_feishu(agent_id)
@@ -521,6 +525,15 @@ async def get_agent_tools_with_config(
     all_tools = all_tools_r.scalars().all()
     agent_tools_r = await db.execute(select(AgentTool).where(AgentTool.agent_id == agent_id))
     assignments = {str(at.tool_id): at for at in agent_tools_r.scalars().all()}
+
+    # Pre-fetch system_settings keys that some tools use as an alternative
+    # config storage (e.g. Jina stores its API key in system_settings.jina_api_key)
+    system_keys_cache: dict[str, str] = {}
+    SYSTEM_SETTINGS_TOOL_MAP = {
+        # tool_name -> system_settings key + value path
+        "jina_search": ("jina_api_key", "api_key"),
+        "jina_read": ("jina_api_key", "api_key"),
+    }
 
     result = []
     for t in all_tools:
@@ -537,6 +550,26 @@ async def get_agent_tools_with_config(
 
         # Decrypt configs for the frontend
         raw_global = _decrypt_sensitive_fields(t.config or {})
+
+        # Fallback: resolve api_key from system_settings for tools that store
+        # their key there (e.g. Jina). Only if Tool.config doesn't have it.
+        if t.name in SYSTEM_SETTINGS_TOOL_MAP and not raw_global.get("api_key"):
+            ss_key, ss_field = SYSTEM_SETTINGS_TOOL_MAP[t.name]
+            if ss_key not in system_keys_cache:
+                try:
+                    from app.models.system_settings import SystemSetting
+                    ss_r = await db.execute(
+                        select(SystemSetting).where(SystemSetting.key == ss_key)
+                    )
+                    ss = ss_r.scalar_one_or_none()
+                    system_keys_cache[ss_key] = (
+                        ss.value.get(ss_field, "") if ss and ss.value else ""
+                    )
+                except Exception:
+                    system_keys_cache[ss_key] = ""
+            if system_keys_cache[ss_key]:
+                raw_global["api_key"] = system_keys_cache[ss_key]
+
         raw_agent = _decrypt_sensitive_fields((at.config if at else {}) or {})
 
         # Mask sensitive fields in global_config so users can see that a key
