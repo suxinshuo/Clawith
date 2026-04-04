@@ -934,7 +934,10 @@ class WeComOrgSyncAdapter(BaseOrgSyncAdapter):
 
     WECOM_API_URL = "https://qyapi.weixin.qq.com"
     WECOM_TOKEN_URL = "https://qyapi.weixin.qq.com/cgi-bin/gettoken"
-    WECOM_DEPT_LIST_URL = "https://qyapi.weixin.qq.com/cgi-bin/department/list"
+    # Use simplelist (newer API) instead of the deprecated department/list.
+    # The simplelist endpoint is accessible to the contact assistant token
+    # (obtained via the 通讯录同步 Secret) without requiring app-level IP whitelist.
+    WECOM_DEPT_LIST_URL = "https://qyapi.weixin.qq.com/cgi-bin/department/simplelist"
     WECOM_USER_LIST_URL = "https://qyapi.weixin.qq.com/cgi-bin/user/list"
 
     def __init__(self, provider: IdentityProvider | None = None, config: dict | None = None, tenant_id: uuid.UUID | None = None):
@@ -991,30 +994,38 @@ class WeComOrgSyncAdapter(BaseOrgSyncAdapter):
         raise ValueError("WeCom credentials (corp_id/secret or bot_id/secret) missing or invalid")
 
     async def fetch_departments(self) -> list[ExternalDepartment]:
-        """Fetch all departments from WeCom."""
+        """Fetch all departments from WeCom using the simplelist endpoint.
+
+        department/simplelist is accessible to the 通讯录助手 (contact assistant)
+        token obtained from the 通讯录同步 Secret, unlike the deprecated
+        department/list which requires strict app-level IP whitelist.
+        """
         token = await self.get_access_token()
         all_depts: list[ExternalDepartment] = []
 
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
                 self.WECOM_DEPT_LIST_URL,
+                # id omitted → returns all departments
                 params={"access_token": token},
             )
             data = resp.json()
             if data.get("errcode") != 0:
                 raise RuntimeError(f"WeCom department list error: {data.get('errmsg') or data}")
 
-            items = data.get("department", [])
+            # simplelist response: {"department_id": [{"id":x, "parentid":x, "name":…, "order":…}]}
+            items = data.get("department_id", []) or data.get("department", [])
             for item in items:
                 dept_id = str(item.get("id"))
-                parent_id = str(item.get("parentid")) if item.get("parentid") and item.get("parentid") != 0 else None
-                
+                parentid = item.get("parentid", 0)
+                parent_id = str(parentid) if parentid and parentid != 0 else None
+
                 all_depts.append(
                     ExternalDepartment(
                         external_id=dept_id,
                         name=item.get("name", ""),
                         parent_external_id=parent_id,
-                        member_count=0,  # WeCom doesn't return member count in this API
+                        member_count=0,  # simplelist does not return member count
                         raw_data=item,
                     )
                 )
