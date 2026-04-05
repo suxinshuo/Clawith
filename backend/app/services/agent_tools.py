@@ -4081,7 +4081,7 @@ async def _send_file_to_agent(from_agent_id: uuid.UUID, ws: Path, args: dict) ->
 
             if not target_agent:
                 # Only show agents from relationships, not all agents
-                from app.models.org import AgentAgentRelationship
+                # (AgentAgentRelationship is imported at module level — no local import needed)
                 rel_r = await db.execute(
                     select(AgentModel.name).join(
                         AgentAgentRelationship,
@@ -4251,7 +4251,7 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                 return f"⚠️ {target.name} is currently unavailable — their service period has ended. Please contact the platform administrator."
 
             # Enforce relationship: only allow communication with agents in relationships
-            from app.models.org import AgentAgentRelationship
+            # (AgentAgentRelationship is imported at module level — no local import needed)
             rel_check = await db.execute(
                 select(AgentAgentRelationship.id).where(
                     ((AgentAgentRelationship.agent_id == from_agent_id) & (AgentAgentRelationship.target_agent_id == target.id))
