@@ -367,12 +367,18 @@ class DingTalkAuthProvider(BaseAuthProvider):
         app_id = self.app_key or ""
         base_url = "https://login.dingtalk.com/oauth2/auth"
         from urllib.parse import quote
-        # contact.user.email and contact.user.mobile require specific permissions in DingTalk console
-        scope = "openid corpid fieldEmail contact.user.mobile"
+        # Contact.User.Read is required for GET /v1.0/contact/users/me (user info on callback)
+        # contact.user.mobile requires the fieldMobile permission in DingTalk console
+        # fieldEmail requires the fieldEmail permission in DingTalk console
+        scope = "openid corpid Contact.User.Read fieldEmail contact.user.mobile"
         params = (
-            f"corpId={self.corp_id}&client_id={app_id}&redirect_uri={quote(redirect_uri)}&"
+            f"client_id={app_id}&redirect_uri={quote(redirect_uri)}&"
             f"state={state}&response_type=code&scope={quote(scope)}&prompt=consent"
         )
+        # corp_id is optional: restricts the login page to a specific enterprise.
+        # If not configured, DingTalk shows a company picker (still works for SSO).
+        if self.corp_id:
+            params = f"corpId={self.corp_id}&" + params
         return f"{base_url}?{params}"
 
     async def exchange_code_for_token(self, code: str) -> dict:
@@ -404,8 +410,16 @@ class DingTalkAuthProvider(BaseAuthProvider):
             info_resp = await client.get(self.DINGTALK_USER_INFO_URL, headers=headers)
             info_data = info_resp.json()
             if info_resp.status_code != 200:
-                logger.error(f"DingTalk user info fetch failed (HTTP {info_resp.status_code}): {info_data}")
-                raise Exception(f"Failed to fetch user info: {info_data.get('message', 'Unknown error')}")
+                # Common error: errCode=403 means Contact.User.Read scope not granted.
+                # Ensure 'Contact.User.Read' is included in the OAuth scope AND
+                # that the app has been authorized by the employee in the login flow.
+                err_msg = info_data.get('message') or info_data.get('errmsg') or str(info_data)
+                logger.error(
+                    f"DingTalk user info fetch failed (HTTP {info_resp.status_code}): {info_data}. "
+                    "This usually means the 'Contact.User.Read' OAuth scope is missing from "
+                    "the authorization URL, or the app lacks the corresponding permission."
+                )
+                raise Exception(f"Failed to fetch user info: {err_msg}")
 
             # DingTalk new OAuth2 returns openId, unionId, nick, avatarUrl, mobile, email
             logger.info(f"DingTalk user info: {info_data}")
