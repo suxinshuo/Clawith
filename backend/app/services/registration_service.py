@@ -106,28 +106,35 @@ class RegistrationService:
     ) -> Identity:
         """Find an existing identity or create a new one.
 
-        Security note: only email and phone are authoritative identity claims.
-        Username is NOT used as a lookup key — it is just a display name and
-        cannot prove ownership. Using it as a fallback would allow account
-        takeover when two users share the same email prefix (e.g. alice@gmail.com
-        and alice@yahoo.com both produce username 'alice').
+        SECURITY FIX for Issue #300:
+        Only email and phone are used as authoritative identity claims.
+        Username is intentionally NOT used as a lookup key to prevent
+        account takeover via username collision attacks.
+        
+        Attack scenario that this fixes:
+        - Victim registers with john@gmail.com → username 'john'
+        - Attacker registers with john@yahoo.com → would match username 'john'
+        - Without this fix: attacker gets victim's identity (ACCOUNT TAKEOVER)
+        - With this fix: attacker gets a new identity with username 'john_abc123'
         """
         identity = None
 
-        # Match by email (primary ownership claim)
+        # Match by email (PRIMARY ownership claim)
         if email:
             res = await db.execute(select(Identity).where(Identity.email == email))
             identity = res.scalar_one_or_none()
 
-        # Match by phone (secondary ownership claim)
+        # Match by phone (SECONDARY ownership claim)
         if not identity and phone:
             normalized_phone = re.sub(r"[\s\-\+]", "", phone)
             res = await db.execute(select(Identity).where(Identity.phone == normalized_phone))
             identity = res.scalar_one_or_none()
 
-        # Username is intentionally NOT used as a lookup key.
+        # SECURITY: Username is intentionally NOT used as a lookup key.
         # If we cannot establish ownership via email or phone, treat this as a
         # new identity to avoid returning another user's record.
+        # This prevents account takeover when two users share the same email prefix
+        # (e.g., alice@gmail.com and alice@yahoo.com both produce username 'alice').
 
         if identity:
             # Auto-verify if SMTP is not configured anywhere (env or DB)
