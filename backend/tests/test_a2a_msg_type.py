@@ -502,3 +502,120 @@ async def test_openclaw_target_still_queues():
 
     assert "OpenClaw agent" in result
     assert "queued" in result
+
+
+@pytest.mark.asyncio
+async def test_feature_flag_off_falls_back_to_consult():
+    """When a2a_async_enabled=False, notify and task_delegate fall back to consult."""
+    from app.services.agent_tools import _send_message_to_agent
+
+    from_agent_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    model_id = uuid.uuid4()
+    rel_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    src_participant = _make_participant(ref_id=from_agent_id)
+    tgt_participant = _make_participant(ref_id=target_id)
+    source_agent = _make_agent(from_agent_id, name="Alice")
+    source_agent.a2a_async_enabled = False
+    target_agent = _make_agent(target_id, name="Bob", primary_model_id=model_id)
+
+    session = MagicMock()
+    session.id = session_id
+    session.last_message_at = None
+
+    model = MagicMock()
+    model.provider = "openai"
+    model.model = "gpt-4"
+    model.api_key_encrypted = "sk-test"
+    model.base_url = None
+    model.temperature = 0.7
+    model.request_timeout = 60
+
+    response = MagicMock()
+    response.content = "Got it"
+    response.tool_calls = None
+    response.usage = None
+
+    mock_llm_client = AsyncMock()
+    mock_llm_client.complete = AsyncMock(return_value=response)
+    mock_llm_client.close = AsyncMock()
+
+    db = RecordingDB(responses=[
+        DummyResult(scalar_value=source_agent),
+        DummyResult(scalars_list=[target_agent]),
+        DummyResult(scalar_value=rel_id),
+        DummyResult(scalar_value=src_participant),
+        DummyResult(scalar_value=tgt_participant),
+        DummyResult(scalar_value=session),
+        DummyResult(scalar_value=model),
+        DummyResult(scalars_list=[]),
+    ])
+
+    db2 = RecordingDB(responses=[
+        DummyResult(scalar_value=tgt_participant),
+    ])
+
+    with patch("app.services.agent_tools.async_session") as mock_session_ctx, \
+         patch("app.services.agent_context.build_agent_context", new_callable=AsyncMock, return_value=("s", "d")), \
+         patch("app.services.llm_utils.create_llm_client", return_value=mock_llm_client), \
+         patch("app.services.agent_tools.get_agent_tools_for_llm", new_callable=AsyncMock, return_value=[]), \
+         patch("app.services.llm_utils.get_provider_base_url", return_value="https://api.openai.com/v1"), \
+         patch("app.services.token_tracker.record_token_usage", new_callable=AsyncMock), \
+         patch("app.services.activity_logger.log_activity", new_callable=AsyncMock):
+
+        mock_session_ctx.return_value.__aenter__ = AsyncMock(side_effect=[db, db2])
+        mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await _send_message_to_agent(from_agent_id, {
+            "agent_name": "Bob",
+            "message": "Hello",
+            "msg_type": "notify",
+        })
+
+    assert "Bob replied" in result
+    assert "Got it" in result
+
+
+@pytest.mark.asyncio
+async def test_feature_flag_on_uses_notify():
+    """When a2a_async_enabled=True, notify works normally."""
+    from app.services.agent_tools import _send_message_to_agent
+
+    from_agent_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    rel_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    src_participant = _make_participant(ref_id=from_agent_id)
+    tgt_participant = _make_participant(ref_id=target_id)
+    source_agent = _make_agent(from_agent_id, name="Alice")
+    source_agent.a2a_async_enabled = True
+    target_agent = _make_agent(target_id, name="Bob")
+
+    session = MagicMock()
+    session.id = session_id
+    session.last_message_at = None
+
+    db = RecordingDB(responses=[
+        DummyResult(scalar_value=source_agent),
+        DummyResult(scalars_list=[target_agent]),
+        DummyResult(scalar_value=rel_id),
+        DummyResult(scalar_value=src_participant),
+        DummyResult(scalar_value=tgt_participant),
+        DummyResult(scalar_value=session),
+    ])
+
+    with patch("app.services.agent_tools.async_session") as mock_session_ctx, \
+         patch("app.services.agent_tools._wake_agent_async", new_callable=AsyncMock) as mock_wake:
+
+        mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=db)
+        mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await _send_message_to_agent(from_agent_id, {
+            "agent_name": "Bob",
+            "message": "Hello",
+            "msg_type": "notify",
+        })
+
+    assert "Notification sent" in result
+    mock_wake.assert_awaited_once()

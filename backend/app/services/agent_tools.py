@@ -4710,6 +4710,11 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
             chat_session.last_message_at = datetime.now(timezone.utc)
             await db.commit()
 
+            # ── Feature flag: async A2A ──
+            if not getattr(source_agent, "a2a_async_enabled", False):
+                if msg_type in ("notify", "task_delegate"):
+                    msg_type = "consult"
+
             # ── notify: fire-and-forget ──
             if msg_type == "notify":
                 try:

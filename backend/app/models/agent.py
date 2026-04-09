@@ -106,6 +106,10 @@ class Agent(Base):
     heartbeat_active_hours: Mapped[str] = mapped_column(String(20), default="09:00-18:00")
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # A2A async communication (notify / task_delegate)
+    # When False, send_message_to_agent always uses synchronous consult mode
+    a2a_async_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+
     # Timezone (IANA format, e.g. "Asia/Shanghai"). None = inherit from tenant.
     timezone: Mapped[str | None] = mapped_column(String(50), default=None, nullable=True)
 

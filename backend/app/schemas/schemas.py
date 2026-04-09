@@ -259,6 +259,7 @@ class AgentOut(BaseModel):
     heartbeat_interval_minutes: int = 240
     heartbeat_active_hours: str = "09:00-18:00"
     last_heartbeat_at: datetime | None = None
+    a2a_async_enabled: bool = False
     timezone: str | None = None
     expires_at: datetime | None = None
     is_expired: bool = False
@@ -293,6 +294,7 @@ class AgentUpdate(BaseModel):
     heartbeat_enabled: bool | None = None
     heartbeat_interval_minutes: int | None = None
     heartbeat_active_hours: str | None = None
+    a2a_async_enabled: bool | None = None
     timezone: str | None = None
     expires_at: datetime | None = None  # Admin only — extend agent expiry
 
