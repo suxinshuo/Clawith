@@ -748,7 +748,13 @@ async def wake_agent_with_context(agent_id: uuid.UUID, message_context: str, *, 
         name="a2a_wake",
         type="on_message",
         config={"from_agent_name": "", "_matched_message": message_context[:2000], "_matched_from": "agent"},
-        reason="Received an A2A message. Process it and act accordingly.",
+        reason=(
+            "You received a notification from another agent. "
+            "Read the message content above, update your focus and memory if needed, "
+            "and take any action you deem necessary. "
+            "Do NOT reply back to the sender unless you have a genuine question — "
+            "this was a notification, not a request for response."
+        ),
         is_enabled=True,
         last_fired_at=now,
         fire_count=0,
