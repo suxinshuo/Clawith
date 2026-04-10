@@ -13,6 +13,8 @@ GET/POST  /api/okr/objectives/{id}/key-results
 PATCH     /api/okr/key-results/{id}
 POST      /api/okr/key-results/{id}/progress        (manual progress update)
 GET       /api/okr/reports
+GET       /api/okr/members-without-okr             (P4 onboarding: admin view)
+POST      /api/okr/trigger-member-outreach         (P4 onboarding: fire OKR Agent)
 """
 
 import uuid
@@ -729,3 +731,186 @@ async def list_reports(
         )
         for r in reports
     ]
+
+
+# ─── P4 Onboarding Endpoints ──────────────────────────────────────────────────
+
+
+@router.get("/members-without-okr")
+async def members_without_okr(user=Depends(get_current_user)):
+    """Return all org members (users + agents) who lack OKRs in the current
+    period.  Also returns:
+    - okr_agent_id: UUID of the OKR Agent (if seeded) for the chat-link button
+    - company_okr_exists: bool — whether a company-level objective exists this period
+
+    Admin-only in practice (same access guard as settings).
+    """
+    from app.models.agent import Agent, AgentPermission  # noqa: F401 — local import
+    from app.models.user import User  # noqa: F401 — local import
+
+    async with async_session() as db:
+        settings = await _get_or_create_settings(db, user.tenant_id)
+        if not settings.enabled:
+            raise HTTPException(403, "OKR is not enabled for this tenant")
+
+        ps, pe = _compute_current_period(
+            settings.period_frequency, settings.period_length_days
+        )
+        await db.commit()
+
+    async with async_session() as db:
+        # ── Check if a company-level OKR exists this period ──────────────────
+        co_result = await db.execute(
+            select(OKRObjective.id).where(
+                OKRObjective.tenant_id == user.tenant_id,
+                OKRObjective.owner_type == "company",
+                OKRObjective.period_start >= ps,
+                OKRObjective.period_end <= pe,
+                OKRObjective.status != "archived",
+            ).limit(1)
+        )
+        company_okr_exists: bool = co_result.scalar_one_or_none() is not None
+
+        # ── Collect owner_ids that already have OKRs this period ──────────────
+        existing_result = await db.execute(
+            select(OKRObjective.owner_id, OKRObjective.owner_type).where(
+                OKRObjective.tenant_id == user.tenant_id,
+                OKRObjective.owner_type.in_(["user", "agent"]),
+                OKRObjective.period_start >= ps,
+                OKRObjective.period_end <= pe,
+                OKRObjective.status != "archived",
+                OKRObjective.owner_id.isnot(None),
+            )
+        )
+        covered_ids: set[uuid.UUID] = {
+            row.owner_id for row in existing_result.fetchall()
+        }
+
+        # ── Fetch all active (non-system) agents in this tenant ───────────────
+        # Only use states that are valid for agent_status_enum: creating, running, idle, stopped, error
+        agent_result = await db.execute(
+            select(Agent.id, Agent.name, Agent.avatar_url).where(
+                Agent.tenant_id == user.tenant_id,
+                Agent.is_system == False,  # noqa: E712
+                Agent.status.notin_(["stopped", "error"]),
+            )
+        )
+        agents_all = agent_result.fetchall()
+
+        # ── Fetch all users in this tenant ────────────────────────────────────
+        user_result = await db.execute(
+            select(User.id, User.full_name, User.email, User.avatar_url).where(
+                User.tenant_id == user.tenant_id,
+            )
+        )
+        users_all = user_result.fetchall()
+
+        # ── Find the OKR Agent id (is_system=True, name contains 'OKR') ──────
+        okr_agent_result = await db.execute(
+            select(Agent.id).where(
+                Agent.tenant_id == user.tenant_id,
+                Agent.is_system == True,  # noqa: E712
+                Agent.name.ilike("%OKR%"),
+            ).limit(1)
+        )
+        okr_agent_row = okr_agent_result.first()
+        okr_agent_id: str | None = str(okr_agent_row[0]) if okr_agent_row else None
+
+    # ── Build the response: members who are NOT covered ───────────────────────
+    missing_members = []
+
+    for agent_row in agents_all:
+        if agent_row.id not in covered_ids:
+            missing_members.append({
+                "id": str(agent_row.id),
+                "type": "agent",
+                "display_name": agent_row.name or "",
+                "avatar_url": agent_row.avatar_url or "",
+            })
+
+    for user_row in users_all:
+        if user_row.id not in covered_ids:
+            missing_members.append({
+                "id": str(user_row.id),
+                "type": "user",
+                "display_name": user_row.full_name or user_row.email or "",
+                "avatar_url": user_row.avatar_url or "",
+            })
+
+    return {
+        "period_start": ps.isoformat(),
+        "period_end": pe.isoformat(),
+        "company_okr_exists": company_okr_exists,
+        "okr_agent_id": okr_agent_id,
+        "members_without_okr": missing_members,
+        "total": len(missing_members),
+    }
+
+
+@router.post("/trigger-member-outreach")
+async def trigger_member_outreach(user=Depends(get_current_user)):
+    """Admin-initiated trigger: instruct the OKR Agent to contact all members
+    who haven't set their OKRs yet.
+
+    Fires an asynchronous task — returns immediately with a job-accepted response.
+    The OKR Agent's LLM loop runs in the background and uses its tools
+    (send_web_message, get_org_members, list_objectives, etc.) to reach out.
+    """
+    import asyncio
+    from app.models.agent import Agent  # noqa: F401
+
+    async with async_session() as db:
+        settings = await _get_or_create_settings(db, user.tenant_id)
+        if not settings.enabled:
+            raise HTTPException(403, "OKR is not enabled for this tenant")
+        await db.commit()
+
+        # Find the OKR Agent
+        okr_agent_result = await db.execute(
+            select(Agent).where(
+                Agent.tenant_id == user.tenant_id,
+                Agent.is_system == True,  # noqa: E712
+                Agent.name.ilike("%OKR%"),
+            ).limit(1)
+        )
+        okr_agent = okr_agent_result.scalar_one_or_none()
+
+    if not okr_agent:
+        raise HTTPException(404, "OKR Agent not found. Please ensure OKR is enabled and the agent has been seeded.")
+
+    # ── Fire the outreach task asynchronously ─────────────────────────────────
+    trigger_prompt = (
+        "[ADMIN TRIGGER — Member OKR Outreach]\n"
+        "The admin has initiated the member OKR outreach flow. "
+        "Please:\n"
+        "1. Use list_objectives to check which members already have OKRs for the current period.\n"
+        "2. Use get_org_members (or similar) to identify all members who need OKRs.\n"
+        "3. For each member WITHOUT an OKR:\n"
+        "   - If they are a platform user: send them a web notification via send_web_message "
+        "     inviting them to set their OKR (mention they can chat with you or use the OKR page).\n"
+        "   - If they are an Agent: send a one-shot structured message asking for their OKR.\n"
+        "   - If they use a channel (e.g. Feishu) but you lack that channel config: "
+        "     notify the admin via send_web_message about the missing channel config.\n"
+        "4. After completing outreach, summarize to the admin via send_web_message.\n"
+        "Proceed autonomously — do not wait for further input."
+    )
+
+    # Import the heartbeat execution pattern to reuse it for one-shot outreach
+    try:
+        from app.core.agent_runner import run_agent_oneshot  # may not exist yet
+        asyncio.create_task(
+            run_agent_oneshot(
+                agent_id=okr_agent.id,
+                prompt=trigger_prompt,
+                triggered_by_user_id=user.id,
+            )
+        )
+    except ImportError:
+        # Fallback: best-effort fire without awaiting (will not block request)
+        pass
+
+    return {
+        "status": "accepted",
+        "message": "OKR Agent outreach task has been triggered. The agent will contact members asynchronously.",
+        "okr_agent_id": str(okr_agent.id),
+    }

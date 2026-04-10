@@ -469,8 +469,10 @@ async def seed_okr_agent():
         ))
         await db.flush()
 
-        # ── Permission: company-wide manage (OKR Agent needs access to all org data) ──
-        db.add(AgentPermission(agent_id=okr_agent.id, scope_type="company", access_level="manage"))
+        # ── Permission: company-wide 'use' access.
+        # Admins have implicit manage access via their role; regular users only
+        # need chat/task/skill/workspace access (not Settings/Mind/Relationships).
+        db.add(AgentPermission(agent_id=okr_agent.id, scope_type="company", access_level="use"))
 
         # ── Workspace setup ──
         template_dir = Path(settings.AGENT_TEMPLATE_DIR)
