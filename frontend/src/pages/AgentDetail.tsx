@@ -1546,10 +1546,14 @@ function AgentDetailInner() {
 
     const isViewingOtherUsersSessions = canViewAllAgentChatSessions && chatScope === 'all';
 
-    /** Sessions in scope=all that are not the current viewer's own P2P rows (for admin「其他用户」tab). */
+    /** Sessions in scope=all that are not the current viewer's own P2P rows (for admin「其他用户」tab).
+     *  Agent-to-agent sessions (source_channel === 'agent') store the creator's user_id, so we must
+     *  exempt them from the user_id check — otherwise they'd always be hidden. */
     const otherUsersSessions = useMemo(() => {
         const vu = viewerUserIdStr();
         return allSessions.filter((s: any) => {
+            // Always show agent-to-agent sessions in the "Other users" tab
+            if (String(s.source_channel || '').toLowerCase() === 'agent') return true;
             const su = sessionUserIdStr(s);
             if (vu && su === vu) return false;
             return true;
