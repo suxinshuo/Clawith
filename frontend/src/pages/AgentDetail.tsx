@@ -2196,15 +2196,19 @@ function AgentDetailInner() {
 
         // Parse [image_data:data:image/...;base64,...] markers from user message content.
         // The backend persists these markers in the DB to preserve multimodal context
-        // across turns. They must be stripped from the display text and rendered as
-        // image thumbnails instead, so users never see raw base64 strings.
+        // across turns. They must ALWAYS be stripped from displayContent so users never
+        // see raw base64 strings in the chat bubble.
+        // Guard: only collect extracted images for thumbnail rendering when msg.imageUrl
+        // is NOT already set — otherwise the image is already shown via the isImage path
+        // and rendering again from the marker would display it twice.
         const IMAGE_DATA_RE = /\[image_data:(data:image\/[^;]+;base64,[^\]]+)\]/g;
         const inlineImages: string[] = [];
         let displayContent = msg.content || '';
         if (displayContent.includes('[image_data:')) {
             displayContent = displayContent.replace(IMAGE_DATA_RE, (_: string, dataUrl: string) => {
-                inlineImages.push(dataUrl);
-                return '';
+                // Only collect for thumbnail rendering if not already shown via imageUrl
+                if (!msg.imageUrl) inlineImages.push(dataUrl);
+                return ''; // always strip the marker from displayed text
             }).trim();
         }
 
