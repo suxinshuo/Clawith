@@ -967,11 +967,13 @@ async def members_without_okr(user=Depends(get_current_user)):
                 .where(
                     AgentRelationship.agent_id == okr_agent_id_val,
                     OrgMember.status == "active",
+                    # Only include members that are linked to a real platform User;
+                    # shell OrgMembers with user_id=NULL have no OKR owner to check.
+                    OrgMember.user_id.isnot(None),
                 )
             )
             for row in human_rel_result.fetchall():
-                if row.user_id:
-                    tracked_user_ids.append(str(row.user_id))
+                tracked_user_ids.append(str(row.user_id))
                 if row.user_id not in covered_ids:
                     members_without_okr.append({
                         "id": str(row.id),
