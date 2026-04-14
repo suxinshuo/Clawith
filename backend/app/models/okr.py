@@ -276,3 +276,6 @@ class OKRSettings(Base):
     period_length_days: Mapped[int | None] = mapped_column(
         Integer
     )  # used only when period_frequency == "custom"
+
+    # The canonical OKR Agent for this company (linked during seeder)
+    okr_agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))

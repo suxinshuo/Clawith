@@ -268,14 +268,7 @@ async def get_okr_settings(user=Depends(get_current_user)):
         settings = await _get_or_create_settings(db, user.tenant_id)
 
         # Also resolve the OKR Agent ID so the UI can show the chat button
-        okr_agent_result = await db.execute(
-            select(Agent.id).where(
-                Agent.tenant_id == user.tenant_id,
-                Agent.name.ilike("%OKR%"),
-            ).order_by(Agent.is_system.desc()).limit(1)
-        )
-        okr_agent_row = okr_agent_result.first()
-        okr_agent_id_str = str(okr_agent_row[0]) if okr_agent_row else None
+        okr_agent_id_str = str(settings.okr_agent_id) if settings.okr_agent_id else None
 
         await db.commit()
         return OKRSettingsOut(
@@ -347,17 +340,11 @@ async def sync_okr_relationships(user=Depends(get_current_user)):
     from app.models.agent import Agent
 
     async with async_session() as db:
-        # Locate the OKR Agent (lenient lookup — no is_system requirement)
-        result = await db.execute(
-            select(Agent.id).where(
-                Agent.tenant_id == user.tenant_id,
-                Agent.name.ilike("%OKR%"),
-            ).order_by(Agent.is_system.desc()).limit(1)
-        )
-        row = result.first()
-        if not row:
+        # Locate the OKR Agent from settings
+        settings = await _get_or_create_settings(db, user.tenant_id)
+        if not settings.okr_agent_id:
             raise HTTPException(404, "OKR Agent not found for this tenant. Enable OKR in Company Settings first.")
-        okr_agent_id = row[0]
+        okr_agent_id = settings.okr_agent_id
 
         await _sync_okr_agent_relationships(db, user.tenant_id, okr_agent_id)
         await db.commit()
@@ -943,15 +930,9 @@ async def members_without_okr(user=Depends(get_current_user)):
         )
         covered_ids: set[uuid.UUID] = {row[0] for row in existing_result.fetchall()}
 
-        # ── Locate the OKR Agent (lenient: prefer is_system, fallback to any) ─
-        okr_agent_result = await db.execute(
-            select(Agent.id).where(
-                Agent.tenant_id == user.tenant_id,
-                Agent.name.ilike("%OKR%"),
-            ).order_by(Agent.is_system.desc()).limit(1)
-        )
-        okr_agent_row = okr_agent_result.first()
-        okr_agent_id_val: uuid.UUID | None = okr_agent_row[0] if okr_agent_row else None
+        # ── Get the OKR Agent from Settings ──────────────────────────────────
+        settings = await _get_or_create_settings(db, user.tenant_id)
+        okr_agent_id_val: uuid.UUID | None = settings.okr_agent_id
         okr_agent_id_str: str | None = str(okr_agent_id_val) if okr_agent_id_val else None
 
         # ── Fetch tracked members from OKR Agent's relationship list ──────────
@@ -1082,13 +1063,13 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
 
         ps, pe = _compute_current_period(settings.period_frequency, settings.period_length_days)
 
-        # ── Find the OKR Agent (lenient — no is_system requirement) ──────────
-        okr_agent_result = await db.execute(
-            select(Agent).where(
-                Agent.tenant_id == user.tenant_id,
-                Agent.name.ilike("%OKR%"),
-            ).order_by(Agent.is_system.desc()).limit(1)
-        )
+        # ── Find the OKR Agent from Settings ─────────────────────────────────
+        if not settings.okr_agent_id:
+            raise HTTPException(
+                404,
+                "OKR Agent not found. Please ensure OKR is enabled and the agent has been seeded.",
+            )
+        okr_agent_result = await db.execute(select(Agent).where(Agent.id == settings.okr_agent_id))
         okr_agent = okr_agent_result.scalar_one_or_none()
         if not okr_agent:
             raise HTTPException(

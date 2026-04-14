@@ -10,6 +10,7 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.exc import IntegrityError
 
 from app.database import async_session
 from app.models.agent import Agent, AgentPermission
@@ -18,6 +19,7 @@ from app.models.skill import Skill, SkillFile
 from app.models.tool import Tool, AgentTool
 from app.models.trigger import AgentTrigger
 from app.models.user import User
+from app.models.okr import OKRSettings
 from app.config import get_settings
 
 settings = get_settings()
@@ -466,8 +468,25 @@ async def seed_okr_agent():
             heartbeat_interval_minutes=240,  # Check every 4 hours
             heartbeat_active_hours="08:00-22:00",
         )
-        db.add(okr_agent)
-        await db.flush()
+        
+        try:
+            db.add(okr_agent)
+            await db.flush()
+        except IntegrityError:
+            await db.rollback()
+            logger.info("[AgentSeeder] OKR Agent was created concurrently (or exists with same name), skipping")
+            _append_seed_marker(seed_marker, "okr_agent=existing")
+            return
+
+        # ── Link OKR Agent ID to OKRSettings ──
+        if admin.tenant_id:
+            settings_res = await db.execute(select(OKRSettings).where(OKRSettings.tenant_id == admin.tenant_id))
+            okr_settings = settings_res.scalar_one_or_none()
+            if not okr_settings:
+                okr_settings = OKRSettings(tenant_id=admin.tenant_id)
+                db.add(okr_settings)
+            okr_settings.okr_agent_id = okr_agent.id
+            await db.flush()
 
         # ── Participant identity ──
         from app.models.participant import Participant
@@ -671,33 +690,9 @@ async def patch_existing_okr_agent() -> None:
       - Setting is_system=True on existing OKR Agent
       - Creating missing system cron triggers
       - Assigning any newly-added OKR tools
-      - De-duplicating extra OKR Agents (stops all but the newest active one)
+      - Writing its ID to okr_settings.okr_agent_id
     """
     async with async_session() as db:
-        # ── Dedup: if multiple OKR Agents exist, keep only the newest active one ──
-        # This corrects the historical bug where restarts created extra agents.
-        all_okr_result = await db.execute(
-            select(Agent)
-            .where(Agent.name == "OKR Agent", Agent.is_system == True)  # noqa: E712
-            .order_by(Agent.created_at.desc())
-        )
-        all_okr_agents = all_okr_result.scalars().all()
-        active_okr_agents = [a for a in all_okr_agents if a.status != "stopped"]
-
-        if len(active_okr_agents) > 1:
-            # Keep the newest (index 0 after DESC sort), stop the rest
-            for extra in active_okr_agents[1:]:
-                extra.status = "stopped"
-                logger.warning(
-                    f"[AgentSeeder] Dedup: stopped extra OKR Agent {extra.id} "
-                    f"(created {extra.created_at})"
-                )
-            await db.commit()
-            logger.info(
-                f"[AgentSeeder] Dedup complete: {len(active_okr_agents) - 1} extra agent(s) stopped, "
-                f"keeping {active_okr_agents[0].id}"
-            )
-
         result = await db.execute(
             select(Agent)
             .where(Agent.name == "OKR Agent", Agent.is_system == True, Agent.status != "stopped")  # noqa: E712
@@ -706,9 +701,30 @@ async def patch_existing_okr_agent() -> None:
         )
         agent = result.scalar_one_or_none()
         if not agent:
-            return  # OKR Agent not seeded yet, nothing to patch
+            # Fallback for deployments that don't have is_system=True yet (before the migration)
+            result = await db.execute(
+                select(Agent)
+                .where(Agent.name == "OKR Agent", Agent.status != "stopped")
+                .order_by(Agent.created_at.desc())
+                .limit(1)
+            )
+            agent = result.scalar_one_or_none()
+            if not agent:
+                return  # OKR Agent not seeded yet, nothing to patch
 
         changed = False
+
+        # Ensure OKRSettings has this agent's ID
+        if agent.tenant_id:
+            settings_res = await db.execute(select(OKRSettings).where(OKRSettings.tenant_id == agent.tenant_id))
+            okr_settings = settings_res.scalar_one_or_none()
+            if not okr_settings:
+                okr_settings = OKRSettings(tenant_id=agent.tenant_id)
+                db.add(okr_settings)
+            if okr_settings.okr_agent_id != agent.id:
+                okr_settings.okr_agent_id = agent.id
+                changed = True
+                logger.info(f"[AgentSeeder] Patched OKR Agent: set okr_agent_id in settings to {agent.id}")
 
         # Ensure is_system=True
         if not agent.is_system:
