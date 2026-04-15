@@ -555,7 +555,7 @@ async def run_agent_oneshot(
         # DB session is now closed — connection returned to pool
 
         # ── Phase 2: LLM tool-call loop (no DB connection held) ────────────────
-        from app.services.llm_utils import (
+        from app.services.llm import (
             create_llm_client,
             get_max_tokens,
             LLMMessage,
