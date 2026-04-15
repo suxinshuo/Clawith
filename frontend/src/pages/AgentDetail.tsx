@@ -97,7 +97,7 @@ function parseWorkspaceDraftArgs(tool: string, raw: string): Pick<WorkspaceLiveD
 }
 
 function workspaceFileName(path: string): string {
-    return path.split('/').pop() || path;
+    return path.replace(/^workspace\//, '') || path;
 }
 
 // Format large token numbers with K/M suffixes
@@ -4790,7 +4790,11 @@ function AgentDetailInner() {
                                                         </div>
                                                     ))}
                                                     {attachedFiles.map((file, idx) => (
-                                                        <div key={`a-${idx}-${file.name}`} className="chat-file-pill">
+                                                        <div
+                                                            key={`a-${idx}-${file.name}`}
+                                                            className={`chat-file-pill ${file.source === 'workspace_auto' ? 'chat-file-pill--workspace' : ''}`}
+                                                            title={file.path || file.name}
+                                                        >
                                                             <div className="chat-file-pill__row">
                                                                 {file.imageUrl ? (
                                                                     <img className="chat-file-pill__thumb" src={file.imageUrl} alt="" />

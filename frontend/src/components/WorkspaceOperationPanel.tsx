@@ -415,8 +415,7 @@ export default function WorkspaceOperationPanel({
             return <HtmlPreviewFrame content={content || ''} title={fileName(activePath)} />;
         }
         if (previewType === 'pdf') {
-            const token = localStorage.getItem('token');
-            return <iframe className="workspace-op-pdf" src={`${preview.url}&token=${token}`} title={fileName(activePath)} />;
+            return <iframe className="workspace-op-pdf" src={fileApi.downloadUrl(agentId, activePath, { inline: true })} title={fileName(activePath)} />;
         }
         if (previewType === 'docx') {
             return <pre className="workspace-op-text-preview">{preview.content || preview.text}</pre>;

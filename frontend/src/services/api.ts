@@ -339,9 +339,11 @@ export const fileApi = {
             body: JSON.stringify({ skill_id: skillId }),
         }),
 
-    downloadUrl: (agentId: string, path: string) => {
+    downloadUrl: (agentId: string, path: string, options?: { inline?: boolean }) => {
         const token = localStorage.getItem('token');
-        return `${API_BASE}/agents/${agentId}/files/download?path=${encodeURIComponent(path)}&token=${token}`;
+        const params = new URLSearchParams({ path, token: token || '' });
+        if (options?.inline) params.set('inline', '1');
+        return `${API_BASE}/agents/${agentId}/files/download?${params.toString()}`;
     },
 };
 

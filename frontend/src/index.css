@@ -2591,12 +2591,12 @@ select:focus {
   opacity: 0.45;
 }
 
-/* File chip: width follows content, capped at 160px */
+/* File chip: width follows content, capped so referenced workspace files stay readable */
 .chat-file-pill {
   position: relative;
   display: inline-flex;
   width: fit-content;
-  max-width: 160px;
+  max-width: min(320px, 100%);
   min-width: 0;
   vertical-align: middle;
   border-radius: 9999px;
@@ -2605,6 +2605,10 @@ select:focus {
   overflow: hidden;
   box-sizing: border-box;
   min-height: 26px;
+}
+
+.chat-file-pill--workspace {
+  max-width: min(460px, 100%);
 }
 
 .chat-file-pill__fill {
