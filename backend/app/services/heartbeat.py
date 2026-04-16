@@ -463,20 +463,11 @@ async def _heartbeat_tick():
                 if agent.last_heartbeat_at and (now - agent.last_heartbeat_at) < interval:
                     continue
 
-                # Update last_heartbeat_at BEFORE launching async task to
-                # prevent the next tick from re-triggering while the LLM
-                # call is still running (which can take > 60s).
-                # agent.last_heartbeat_at = now
-
                 # Fire heartbeat
                 logger.info(f"💓 Triggering heartbeat for {agent.name}")
                 await write_audit_log("heartbeat_fire", {"agent_name": agent.name}, agent_id=agent.id)
                 asyncio.create_task(_execute_heartbeat(agent.id))
                 triggered += 1
-
-                # Commit last_heartbeat_at (and expired agent) changes so the
-                # next tick sees them even if _execute_heartbeat is still running.
-                # await db.commit()
 
             if triggered:
                 await write_audit_log("heartbeat_tick", {"eligible_agents": len(agents), "triggered": triggered})
