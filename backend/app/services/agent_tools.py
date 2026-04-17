@@ -2034,6 +2034,7 @@ async def _sync_tasks_to_file(agent_id: uuid.UUID, ws: Path):
 # Mapping from tool_name to autonomy action_type
 _TOOL_AUTONOMY_MAP = {
     "write_file": "write_workspace_files",
+    "edit_file": "write_workspace_files",
     "delete_file": "delete_files",
     "send_feishu_message": "send_feishu_message",
     "send_message_to_agent": "send_feishu_message",
