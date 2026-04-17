@@ -3251,6 +3251,22 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None, user
                 user_id=user_id,
             ))
 
+            # ── Scope validation (provider-level) ──
+            # Normalize separators: OAuth providers may use space or comma-separated scopes
+            def _parse_scopes(s: str) -> set[str]:
+                return {p.strip() for p in s.replace(",", " ").split() if p.strip()}
+
+            required_scopes_str = (tool.config or {}).get("required_scopes", "")
+            if required_scopes_str and cred.scopes:
+                required_scopes = _parse_scopes(required_scopes_str)
+                granted_scopes = set(cred.scopes)  # already a list[str] from ResolvedCredential
+                missing = required_scopes - granted_scopes
+                if missing:
+                    return (
+                        f"❌ 凭据权限不足：{tool.required_credential_provider} 需要以下权限 "
+                        f"{', '.join(missing)}，但当前授权未包含。请重新授权并勾选所需权限。"
+                    )
+
         # Direct MCP call for non-Smithery servers
         direct_api_key = merged_config.get("api_key") or merged_config.get("atlassian_api_key")
         if not direct_api_key and tool.mcp_server_name == "Atlassian Rovo":
