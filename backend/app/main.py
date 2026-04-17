@@ -118,6 +118,7 @@ async def lifespan(app: FastAPI):
         import app.models.agent_credential  # noqa
 
         import app.models.identity       # noqa
+        import app.models.user_external_credential  # noqa
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         logger.info("[startup] Database tables ready")
