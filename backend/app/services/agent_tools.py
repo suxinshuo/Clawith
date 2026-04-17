@@ -3204,6 +3204,9 @@ async def _build_feishu_oauth_url(agent_id: uuid.UUID, user_id: uuid.UUID, scope
     )
 
     base_url = settings.PUBLIC_BASE_URL.rstrip("/") if settings.PUBLIC_BASE_URL else ""
+    if not base_url:
+        logger.warning("[FeishuOAuth] PUBLIC_BASE_URL not configured, cannot generate OAuth URL")
+        return None
     redirect_uri = f"{base_url}/api/oauth/feishu/credential-callback"
 
     params = {
@@ -3293,8 +3296,8 @@ async def _feishu_with_user_fallback(
                 if row:
                     _source_channel = row[0]
                     _external_conv_id = row[1]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[FeishuUserFallback] Failed to lookup session channel for session_id={session_id}: {e}")
 
     if _source_channel == "feishu" and _external_conv_id:
         sent = await _send_feishu_credential_card(
@@ -7815,7 +7818,6 @@ async def _feishu_doc_create(agent_id: uuid.UUID, user_id: uuid.UUID, arguments:
                 wiki_space_id = node_info["space_id"]
 
         if wiki_space_id:
-            # Wiki branch uses tenant_token directly (usually sufficient for same-org wikis)
             body: dict = {
                 "obj_type": "docx",
                 "node_type": "origin",  # Required by Feishu Wiki API: "origin" = new entity
@@ -7824,23 +7826,31 @@ async def _feishu_doc_create(agent_id: uuid.UUID, user_id: uuid.UUID, arguments:
             if parent_node_token:
                 body["parent_node_token"] = parent_node_token
 
-            import logging
-            _wiki_log = logging.getLogger("feishu_wiki_create")
-            _wiki_log.info(f"Creating wiki node in space={wiki_space_id}, body={body}")
+            async def _do_wiki_create(token_override: str | None = None):
+                use_token = token_override or tenant_token
+                async with httpx.AsyncClient(timeout=15) as client:
+                    resp = await client.post(
+                        f"https://open.feishu.cn/open-apis/wiki/v2/spaces/{wiki_space_id}/nodes",
+                        json=body,
+                        headers={"Authorization": f"Bearer {use_token}"},
+                    )
+                return resp.json()
 
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(
-                    f"https://open.feishu.cn/open-apis/wiki/v2/spaces/{wiki_space_id}/nodes",
-                    json=body,
-                    headers={"Authorization": f"Bearer {tenant_token}"},
-                )
-            result = resp.json()
-            _wiki_log.info(f"Wiki create response: code={result.get('code')}, msg={result.get('msg')}")
-            err = _check_feishu_err(result)
+            wiki_resp = await _feishu_with_user_fallback(
+                agent_id, user_id,
+                scopes=["wiki:wiki"],
+                app_call_fn=lambda: _do_wiki_create(),
+                user_call_fn=lambda token: _do_wiki_create(token),
+                session_id=session_id,
+            )
+            if isinstance(wiki_resp, str):
+                return wiki_resp
+
+            err = _check_feishu_err(wiki_resp)
             if err:
                 return err
 
-            node = result.get("data", {}).get("node", {})
+            node = wiki_resp.get("data", {}).get("node", {})
             # obj_token is the underlying docx token used by feishu_doc_append
             doc_token = node.get("obj_token", "")
             node_token = node.get("node_token", "")
@@ -8153,6 +8163,7 @@ async def _feishu_drive_share(agent_id: uuid.UUID, user_id: uuid.UUID, arguments
     """Manage Feishu drive file collaborators.
     Automatically handles both regular docs/files (Drive permissions API)
     and Wiki node documents (Wiki space members API).
+    Uses app-first, user-fallback strategy for permission-sensitive operations.
     """
     import httpx
     import re as _re
@@ -8169,11 +8180,10 @@ async def _feishu_drive_share(agent_id: uuid.UUID, user_id: uuid.UUID, arguments
     if not app_id or not app_secret:
         return "❌ Agent has no Feishu channel configured."
     from app.services.feishu_service import feishu_service
-    token = await feishu_service.get_tenant_access_token(app_id, app_secret)
-    headers = {"Authorization": f"Bearer {token}"}
+    tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
 
     # ── Detect if this is a Wiki node token ─────────────────────────────────
-    node_info = await _feishu_wiki_get_node(document_token, token)
+    node_info = await _feishu_wiki_get_node(document_token, tenant_token)
     is_wiki = node_info is not None
     space_id = node_info.get("space_id", "") if node_info else ""
     obj_token = node_info.get("obj_token", "") if node_info else ""
@@ -8183,16 +8193,30 @@ async def _feishu_drive_share(agent_id: uuid.UUID, user_id: uuid.UUID, arguments
     # Wiki space role mapping: only "admin" / "member" are valid roles
     wiki_role = "admin" if api_perm in ("edit", "full_access") else "member"
 
-    # ── LIST collaborators ────────────────────────────────────────────────────
+    # ── LIST collaborators (with user fallback) ──────────────────────────────
     if action == "list":
-        use_token = obj_token if (is_wiki and obj_token) else document_token
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                f"https://open.feishu.cn/open-apis/drive/v1/permissions/{use_token}/members",
-                params={"type": doc_type},
-                headers=headers,
-            )
-        data = resp.json()
+        use_doc_token = obj_token if (is_wiki and obj_token) else document_token
+
+        async def _do_list(token_override: str | None = None):
+            use_token = token_override or tenant_token
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(
+                    f"https://open.feishu.cn/open-apis/drive/v1/permissions/{use_doc_token}/members",
+                    params={"type": doc_type},
+                    headers={"Authorization": f"Bearer {use_token}"},
+                )
+            return resp.json()
+
+        data = await _feishu_with_user_fallback(
+            agent_id, user_id,
+            scopes=["drive:drive"],
+            app_call_fn=lambda: _do_list(),
+            user_call_fn=lambda token: _do_list(token),
+            session_id=session_id,
+        )
+        if isinstance(data, str):
+            return data
+
         if data.get("code") != 0:
             _c = data.get("code")
             if _c == 1063003 and is_wiki:
@@ -8200,12 +8224,6 @@ async def _feishu_drive_share(agent_id: uuid.UUID, user_id: uuid.UUID, arguments
                     f"ℹ️ 文档 `{document_token}` 是知识库页面，其权限由知识库空间统一管理。\n"
                     "知识库空间 ID：`" + space_id + "`\n"
                     "请直接在飞书知识库中管理成员权限。"
-                )
-            if _c in (99991672, 99991668):
-                return (
-                    f"❌ 权限不足（code {_c}）\n"
-                    "需要在飞书开放平台开通：\n"
-                    "• drive:drive（云文档权限管理）"
                 )
             return f"❌ 获取协作者列表失败：{data.get('msg')} (code {_c})"
 
@@ -8228,6 +8246,22 @@ async def _feishu_drive_share(agent_id: uuid.UUID, user_id: uuid.UUID, arguments
 
     if not member_names and not member_open_ids:
         return "❌ 请提供 member_names（姓名列表）或 member_open_ids（open_id 列表）"
+
+    # Resolve user credential upfront for add/remove fallback
+    user_token = None
+    try:
+        from app.services.credential_resolver import CredentialResolver
+        resolver = CredentialResolver()
+        tenant_id_str = await _get_agent_tenant_id(agent_id)
+        if tenant_id_str:
+            cred = await resolver.resolve(user_id, uuid.UUID(tenant_id_str), f"feishu:{agent_id}")
+            if cred:
+                user_token = cred.access_token
+    except Exception:
+        pass
+
+    headers = {"Authorization": f"Bearer {tenant_token}"}
+    user_headers = {"Authorization": f"Bearer {user_token}"} if user_token else None
 
     # Resolve names → open_ids
     resolved: list[tuple[str, str]] = []  # (display_name, open_id)
@@ -8259,13 +8293,20 @@ async def _feishu_drive_share(agent_id: uuid.UUID, user_id: uuid.UUID, arguments
                         headers=headers,
                     )
                     d = resp.json()
+                    # Retry with user token on permission error
+                    if _is_feishu_permission_error(d) and user_headers:
+                        resp = await client.post(
+                            f"https://open.feishu.cn/open-apis/wiki/v2/spaces/{space_id}/members",
+                            json={"member_type": "openid", "member_id": oid, "member_role": wiki_role},
+                            headers=user_headers,
+                        )
+                        d = resp.json()
                     _c = d.get("code")
                     if _c == 0:
                         results.append(f"✅ 已将「{display}」加入知识库空间（角色：{wiki_role}）")
                     elif _c == 131008:
                         results.append(f"ℹ️ 「{display}」已经是知识库成员，无需重复添加")
                     elif _c == 131101:
-                        # Public wiki space — everyone already has access
                         results.append(
                             f"ℹ️ 这是一个**公开知识库**，所有人已可访问。\n"
                             f"「{display}」无需单独添加权限。"
@@ -8287,22 +8328,23 @@ async def _feishu_drive_share(agent_id: uuid.UUID, user_id: uuid.UUID, arguments
                     params={"type": doc_type},
                 )
                 d = resp.json()
+                # Retry with user token on permission error
+                if _is_feishu_permission_error(d) and user_headers:
+                    resp = await client.post(
+                        f"https://open.feishu.cn/open-apis/drive/v1/permissions/{document_token}/members",
+                        json=body,
+                        headers=user_headers,
+                        params={"type": doc_type},
+                    )
+                    d = resp.json()
                 if d.get("code") == 0:
                     results.append(f"✅ 已将「{display}」添加为**{permission}**权限协作者")
                 else:
                     _c = d.get("code")
                     if _c == 99992402:
-                        # Feishu platform policy: you cannot add yourself as a collaborator via API.
-                        # Permissions must be granted by others, or set manually in the UI.
                         results.append(
                             f"⚠️ 飞书平台安全限制：无法通过 API 为自己添加协作权限。\n"
                             f"请手动操作：打开文档 → 右上角「分享」→ 添加自己并设置权限。"
-                        )
-                    elif _c in (99991672, 99991668):
-                        return (
-                            f"❌ 权限不足（code {_c}）\n"
-                            "需要在飞书开放平台开通：\n"
-                            "• drive:drive（云文档权限管理）"
                         )
                     else:
                         results.append(f"❌ 添加「{display}」失败：{d.get('msg')} (code {_c})")
@@ -8315,6 +8357,14 @@ async def _feishu_drive_share(agent_id: uuid.UUID, user_id: uuid.UUID, arguments
                         params={"member_type": "openid"},
                     )
                     d = resp.json()
+                    # Retry with user token on permission error
+                    if _is_feishu_permission_error(d) and user_headers:
+                        resp = await client.delete(
+                            f"https://open.feishu.cn/open-apis/wiki/v2/spaces/{space_id}/members/{oid}",
+                            headers=user_headers,
+                            params={"member_type": "openid"},
+                        )
+                        d = resp.json()
                     if d.get("code") == 0:
                         results.append(f"✅ 已将「{display}」从知识库移除")
                     else:
@@ -8327,6 +8377,14 @@ async def _feishu_drive_share(agent_id: uuid.UUID, user_id: uuid.UUID, arguments
                     params={"type": doc_type, "member_type": "openid"},
                 )
                 d = resp.json()
+                # Retry with user token on permission error
+                if _is_feishu_permission_error(d) and user_headers:
+                    resp = await client.delete(
+                        f"https://open.feishu.cn/open-apis/drive/v1/permissions/{document_token}/members/{oid}",
+                        headers=user_headers,
+                        params={"type": doc_type, "member_type": "openid"},
+                    )
+                    d = resp.json()
                 if d.get("code") == 0:
                     results.append(f"✅ 已移除「{display}」的协作权限")
                 else:
