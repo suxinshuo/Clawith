@@ -2397,7 +2397,7 @@ async def execute_tool(
             result = await _install_skill(agent_id, ws, arguments)
         else:
             # Try MCP tool execution
-            result = await _execute_mcp_tool(tool_name, arguments, agent_id=agent_id)
+            result = await _execute_mcp_tool(tool_name, arguments, agent_id=agent_id, user_id=user_id)
 
         # Log tool call activity (skip noisy read operations)
         if tool_name not in ("list_files", "read_file", "read_document"):
@@ -3085,7 +3085,7 @@ async def _send_file_via_slack(agent_id, config, file_path: Path, member_name: s
         return f"Failed to send file via Slack: {e}"
 
 
-async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None) -> str:
+async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None, user_id=None) -> str:
     """Execute a tool via MCP if it exists in the DB as an MCP tool."""
     try:
         from app.models.tool import Tool, AgentTool
@@ -3127,10 +3127,31 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None) -> s
         if ".run.tools" in mcp_url and merged_config:
             return await _execute_via_smithery_connect(mcp_url, mcp_name, arguments, merged_config, agent_id=agent_id)
 
+        # ── Resolve user credential if tool requires one ──
+        user_headers = {}
+        if tool.required_credential_provider and user_id:
+            from app.services.credential_resolver import CredentialResolver, CredentialNotFoundError
+            resolver = CredentialResolver()
+            tenant_id = await _get_agent_tenant_id(agent_id)
+            try:
+                cred = await resolver.resolve(user_id, tenant_id, tool.required_credential_provider)
+            except Exception as e:
+                logger.exception(f"[MCP] Credential resolution error for {tool.required_credential_provider}")
+                return f"❌ 凭据解析失败: {str(e)[:200]}"
+
+            if cred is None:
+                return (
+                    f"❌ 无法访问 {tool.required_credential_provider}：您尚未授权。"
+                    f"请前往「个人设置 → 外部系统连接」完成授权。"
+                )
+
+            user_headers["X-Clawith-User-Token"] = cred.access_token
+            if cred.external_user_id:
+                user_headers["X-Clawith-User-Id"] = cred.external_user_id
+            if cred.scopes:
+                user_headers["X-Clawith-User-Scopes"] = ",".join(cred.scopes)
+
         # Direct MCP call for non-Smithery servers
-        # Priority for API key:
-        # 1. Per-agent tool config (api_key / atlassian_api_key)
-        # 2. Agent's Atlassian channel config (for atlassian_* tools)
         direct_api_key = merged_config.get("api_key") or merged_config.get("atlassian_api_key")
         if not direct_api_key and tool.mcp_server_name == "Atlassian Rovo":
             try:
@@ -3138,7 +3159,7 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None) -> s
                 direct_api_key = await get_atlassian_api_key_for_agent(agent_id)
             except Exception:
                 pass
-        client = MCPClient(mcp_url, api_key=direct_api_key)
+        client = MCPClient(mcp_url, api_key=direct_api_key, user_headers=user_headers)
         return await client.call_tool(mcp_name, arguments)
 
     except Exception as e:
