@@ -3256,7 +3256,7 @@ async def _build_credential_guidance(provider: str, user_id, tenant_id, session_
 
     return (
         f"❌ 无法访问 {provider}：您尚未授权。"
-        f"请前往「个人设置 → 外部系统连接」完成授权。"
+        f"请点击左下角头像，进入「外部系统连接」完成授权。"
     )
 
 

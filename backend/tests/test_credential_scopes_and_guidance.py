@@ -84,7 +84,7 @@ async def test_guidance_web_user():
             session_id="web_session_123",
         )
 
-    assert "个人设置" in msg
+    assert "外部系统连接" in msg
     assert "jira" in msg
 
 
@@ -126,4 +126,4 @@ async def test_guidance_no_session_defaults_to_web():
         session_id="",
     )
 
-    assert "个人设置" in msg
+    assert "外部系统连接" in msg
