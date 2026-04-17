@@ -2305,35 +2305,37 @@ async def execute_tool(
             result = await _import_mcp_server(agent_id, arguments)
         # ── Feishu Bitable Tools ──
         elif tool_name == "bitable_create_app":
-            result = await _bitable_create_app(agent_id, arguments)
+            result = await _bitable_create_app(agent_id, user_id, arguments, session_id=session_id)
         elif tool_name == "bitable_list_tables":
-            result = await _bitable_list_tables(agent_id, arguments)
+            result = await _bitable_list_tables(agent_id, user_id, arguments, session_id=session_id)
         elif tool_name == "bitable_list_fields":
-            result = await _bitable_list_fields(agent_id, arguments)
+            result = await _bitable_list_fields(agent_id, user_id, arguments, session_id=session_id)
         elif tool_name == "bitable_query_records":
-            result = await _bitable_query_records(agent_id, arguments)
+            result = await _bitable_query_records(agent_id, user_id, arguments, session_id=session_id)
         elif tool_name == "bitable_create_record":
-            result = await _bitable_create_record(agent_id, arguments)
+            result = await _bitable_create_record(agent_id, user_id, arguments, session_id=session_id)
         elif tool_name == "bitable_update_record":
-            result = await _bitable_update_record(agent_id, arguments)
+            result = await _bitable_update_record(agent_id, user_id, arguments, session_id=session_id)
         elif tool_name == "bitable_delete_record":
-            result = await _bitable_delete_record(agent_id, arguments)
+            result = await _bitable_delete_record(agent_id, user_id, arguments, session_id=session_id)
         # ── Feishu Document Tools ──
         elif tool_name == "feishu_wiki_list":
-            result = await _feishu_wiki_list(agent_id, arguments)
+            result = await _feishu_wiki_list(agent_id, user_id, arguments, session_id=session_id)
         elif tool_name == "feishu_doc_read":
-            result = await _feishu_doc_read(agent_id, arguments)
+            result = await _feishu_doc_read(agent_id, user_id, arguments, session_id=session_id)
         elif tool_name == "feishu_doc_create":
-            result = await _feishu_doc_create(agent_id, arguments)
+            result = await _feishu_doc_create(agent_id, user_id, arguments, session_id=session_id)
         elif tool_name == "feishu_doc_append":
-            result = await _feishu_doc_append(agent_id, arguments)
-        # ── Feishu Calendar Tools ──
+            result = await _feishu_doc_append(agent_id, user_id, arguments, session_id=session_id)
+        # ── Feishu Drive Tools ──
         elif tool_name == "feishu_drive_share":
-            result = await _feishu_drive_share(agent_id, arguments)
+            result = await _feishu_drive_share(agent_id, user_id, arguments, session_id=session_id)
         elif tool_name == "feishu_drive_delete":
-            result = await _feishu_drive_delete(agent_id, arguments)
+            result = await _feishu_drive_delete(agent_id, user_id, arguments, session_id=session_id)
+        # ── (feishu_user_search stays unchanged — app identity only) ──
         elif tool_name == "feishu_user_search":
             result = await _feishu_user_search(agent_id, arguments)
+        # ── Feishu Calendar Tools (unchanged — app identity only) ──
         elif tool_name == "feishu_calendar_list":
             result = await _feishu_calendar_list(agent_id, arguments)
         elif tool_name == "feishu_calendar_create":
@@ -2342,12 +2344,13 @@ async def execute_tool(
             result = await _feishu_calendar_update(agent_id, arguments)
         elif tool_name == "feishu_calendar_delete":
             result = await _feishu_calendar_delete(agent_id, arguments)
+        # ── Feishu Approval Tools ──
         elif tool_name == "feishu_approval_create":
-            result = await _feishu_approval_create(agent_id, arguments)
+            result = await _feishu_approval_create(agent_id, user_id, arguments, session_id=session_id)
         elif tool_name == "feishu_approval_query":
-            result = await _feishu_approval_query(agent_id, arguments)
+            result = await _feishu_approval_query(agent_id, user_id, arguments, session_id=session_id)
         elif tool_name == "feishu_approval_get":
-            result = await _feishu_approval_get(agent_id, arguments)
+            result = await _feishu_approval_get(agent_id, user_id, arguments, session_id=session_id)
         # ── Email Tools ──
         elif tool_name in ("send_email", "read_emails", "reply_email"):
             result = await _handle_email_tool(tool_name, agent_id, ws, arguments)
@@ -7196,37 +7199,44 @@ def _check_feishu_err(resp: dict) -> str | None:
         return f"Failed: API Error {code} - {msg}"
     return None
 
-async def _bitable_list_tables(agent_id: uuid.UUID, arguments: dict) -> str:
+async def _bitable_list_tables(agent_id: uuid.UUID, user_id: uuid.UUID, arguments: dict, *, session_id: str = "") -> str:
     """List all tables in a Feishu Bitable app."""
     url = arguments.get("url", "")
     parsed = _parse_feishu_url(url)
     app_token = await _resolve_bitable_app_token(agent_id, parsed)
     if not app_token:
         return "Failed: Could not extract Bitable app_token from the URL (also could not resolve wiki_token)."
-        
+
     app_id, app_secret = await _get_feishu_credentials(agent_id)
     if not app_id or not app_secret:
         return "Failed: Feishu app credentials not configured for this agent."
-        
+
     from app.services.feishu_service import feishu_service
-    try:
-        resp = await feishu_service.bitable_list_tables(app_id, app_secret, app_token)
-        err = _check_feishu_err(resp)
-        if err: return err
-        
-        tables = resp.get("data", {}).get("items", [])
-        if not tables:
-            return "OK: No tables found in this Bitable."
-        lines = [f"- {t.get('name')} (ID: {t.get('table_id')})" for t in tables]
-        # Provide a user-accessible link so the user can open the Bitable directly
-        tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
-        bitable_url = await _get_feishu_bitable_url(tenant_token, app_token)
-        return "OK: Tables in this Bitable:\n" + "\n".join(lines) + f"\n\n🔗 多维表格链接: {bitable_url}"
-    except Exception as e:
-        return f"Failed: {str(e)[:300]}"
+
+    resp = await _feishu_with_user_fallback(
+        agent_id, user_id,
+        scopes=["bitable:app:readonly"],
+        app_call_fn=lambda: feishu_service.bitable_list_tables(app_id, app_secret, app_token),
+        user_call_fn=lambda token: feishu_service.bitable_list_tables(app_id, app_secret, app_token, access_token=token),
+        session_id=session_id,
+    )
+    if isinstance(resp, str):
+        return resp
+
+    err = _check_feishu_err(resp)
+    if err: return err
+
+    tables = resp.get("data", {}).get("items", [])
+    if not tables:
+        return "OK: No tables found in this Bitable."
+    lines = [f"- {t.get('name')} (ID: {t.get('table_id')})" for t in tables]
+    # Provide a user-accessible link so the user can open the Bitable directly
+    tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
+    bitable_url = await _get_feishu_bitable_url(tenant_token, app_token)
+    return "OK: Tables in this Bitable:\n" + "\n".join(lines) + f"\n\n🔗 多维表格链接: {bitable_url}"
 
 
-async def _bitable_create_app(agent_id: uuid.UUID, arguments: dict) -> str:
+async def _bitable_create_app(agent_id: uuid.UUID, user_id: uuid.UUID, arguments: dict, *, session_id: str = "") -> str:
     """Create a new Feishu Bitable (多维表格) app.
 
     Calls the Bitable v1 apps API: POST /open-apis/bitable/v1/apps
@@ -7243,212 +7253,254 @@ async def _bitable_create_app(agent_id: uuid.UUID, arguments: dict) -> str:
         return "Failed: Feishu app credentials not configured for this agent."
 
     from app.services.feishu_service import feishu_service
-    try:
-        resp = await feishu_service.bitable_create_app(app_id, app_secret, name, folder_token)
-        err = _check_feishu_err(resp)
-        if err:
-            return err
 
-        # API response structure: data.app.{app_token, name, url, default_table_id, folder_token}
-        app_info = resp.get("data", {}).get("app", {})
-        app_token = app_info.get("app_token", "")
-        bitable_url = app_info.get("url", "")
-        default_table_id = app_info.get("default_table_id", "")
-        if not app_token:
-            return f"Failed: Bitable created but could not extract app_token from response: {resp}"
+    resp = await _feishu_with_user_fallback(
+        agent_id, user_id,
+        scopes=["bitable:app"],
+        app_call_fn=lambda: feishu_service.bitable_create_app(app_id, app_secret, name, folder_token),
+        user_call_fn=lambda token: feishu_service.bitable_create_app(app_id, app_secret, name, folder_token, access_token=token),
+        session_id=session_id,
+    )
+    if isinstance(resp, str):
+        return resp
 
-        # Fallback URL resolution if the API didn't return one
-        if not bitable_url:
-            tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
-            bitable_url = await _get_feishu_bitable_url(tenant_token, app_token)
+    err = _check_feishu_err(resp)
+    if err:
+        return err
 
-        result = (
-            f"OK: Bitable created successfully!\n"
-            f"Name: {name}\n"
-            f"App Token: {app_token}\n"
-            f"URL: {bitable_url}"
-        )
-        if default_table_id:
-            result += f"\nDefault Table ID: {default_table_id}"
-        return result
-    except Exception as e:
-        return f"Failed: {str(e)[:300]}"
+    # API response structure: data.app.{app_token, name, url, default_table_id, folder_token}
+    app_info = resp.get("data", {}).get("app", {})
+    app_token = app_info.get("app_token", "")
+    bitable_url = app_info.get("url", "")
+    default_table_id = app_info.get("default_table_id", "")
+    if not app_token:
+        return f"Failed: Bitable created but could not extract app_token from response: {resp}"
+
+    # Fallback URL resolution if the API didn't return one
+    if not bitable_url:
+        tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
+        bitable_url = await _get_feishu_bitable_url(tenant_token, app_token)
+
+    result = (
+        f"OK: Bitable created successfully!\n"
+        f"Name: {name}\n"
+        f"App Token: {app_token}\n"
+        f"URL: {bitable_url}"
+    )
+    if default_table_id:
+        result += f"\nDefault Table ID: {default_table_id}"
+    return result
 
 
-async def _bitable_list_fields(agent_id: uuid.UUID, arguments: dict) -> str:
+async def _bitable_list_fields(agent_id: uuid.UUID, user_id: uuid.UUID, arguments: dict, *, session_id: str = "") -> str:
     """List all fields (columns) in a specific Bitable table."""
     url = arguments.get("url", "")
     table_id = arguments.get("table_id", "")
-    
+
     parsed = _parse_feishu_url(url)
     app_token = await _resolve_bitable_app_token(agent_id, parsed)
     table_id = table_id or parsed.get("table_id")
-    
+
     if not app_token:
         return "Failed: Could not extract Bitable app_token from the URL."
     if not table_id:
         return "Failed: table_id is required. Provide it as a parameter or include it in the URL."
-        
+
     app_id, app_secret = await _get_feishu_credentials(agent_id)
     from app.services.feishu_service import feishu_service
-    try:
-        resp = await feishu_service.bitable_list_fields(app_id, app_secret, app_token, table_id)
-        err = _check_feishu_err(resp)
-        if err: return err
-        
-        fields = resp.get("data", {}).get("items", [])
-        if not fields:
-            return "OK: No fields found in this table."
-        lines = [f"- {f.get('field_name')} (type: {f.get('type')}, ID: {f.get('field_id')})" for f in fields]
-        return "OK: Fields in this table:\n" + "\n".join(lines)
-    except Exception as e:
-        return f"Failed: {str(e)[:300]}"
 
-async def _bitable_query_records(agent_id: uuid.UUID, arguments: dict) -> str:
+    resp = await _feishu_with_user_fallback(
+        agent_id, user_id,
+        scopes=["bitable:app:readonly"],
+        app_call_fn=lambda: feishu_service.bitable_list_fields(app_id, app_secret, app_token, table_id),
+        user_call_fn=lambda token: feishu_service.bitable_list_fields(app_id, app_secret, app_token, table_id, access_token=token),
+        session_id=session_id,
+    )
+    if isinstance(resp, str):
+        return resp
+
+    err = _check_feishu_err(resp)
+    if err: return err
+
+    fields = resp.get("data", {}).get("items", [])
+    if not fields:
+        return "OK: No fields found in this table."
+    lines = [f"- {f.get('field_name')} (type: {f.get('type')}, ID: {f.get('field_id')})" for f in fields]
+    return "OK: Fields in this table:\n" + "\n".join(lines)
+
+async def _bitable_query_records(agent_id: uuid.UUID, user_id: uuid.UUID, arguments: dict, *, session_id: str = "") -> str:
     """Query records (rows) from a Bitable table, with optional FQL filter."""
     url = arguments.get("url", "")
     table_id = arguments.get("table_id", "")
     filter_info = arguments.get("filter_info", "")
     max_results = arguments.get("max_results", 100)
-    
+
     parsed = _parse_feishu_url(url)
     app_token = await _resolve_bitable_app_token(agent_id, parsed)
     table_id = table_id or parsed.get("table_id")
-    
+
     if not app_token or not table_id:
         return "Failed: Could not resolve app_token or table_id from the provided parameters/URL."
-        
+
     app_id, app_secret = await _get_feishu_credentials(agent_id)
     from app.services.feishu_service import feishu_service
-    try:
-        import json
-        filters_dict = {}
-        if isinstance(filter_info, dict):
-            filters_dict = filter_info
-        elif isinstance(filter_info, str) and filter_info.strip():
-            try:
-                filters_dict = json.loads(filter_info)
-            except:
-                pass 
-                
-        resp = await feishu_service.bitable_query_records(app_id, app_secret, app_token, table_id, filters_dict)
-        err = _check_feishu_err(resp)
-        if err: return err
-        
-        records = resp.get("data", {}).get("items", [])
-        if not records:
-            return "OK: No matching records found."
-        
-        lines = []
-        for r in records[:max_results]:
-            lines.append(f"Record {r.get('record_id')}: {json.dumps(r.get('fields', {}), ensure_ascii=False)}")
-        return "OK: Query results:\n" + "\n".join(lines)
-    except Exception as e:
-        return f"Failed: {str(e)[:300]}"
 
-async def _bitable_create_record(agent_id: uuid.UUID, arguments: dict) -> str:
+    import json
+    filters_dict = {}
+    if isinstance(filter_info, dict):
+        filters_dict = filter_info
+    elif isinstance(filter_info, str) and filter_info.strip():
+        try:
+            filters_dict = json.loads(filter_info)
+        except Exception:
+            pass
+
+    resp = await _feishu_with_user_fallback(
+        agent_id, user_id,
+        scopes=["bitable:app:readonly"],
+        app_call_fn=lambda: feishu_service.bitable_query_records(app_id, app_secret, app_token, table_id, filters_dict),
+        user_call_fn=lambda token: feishu_service.bitable_query_records(app_id, app_secret, app_token, table_id, filters_dict, access_token=token),
+        session_id=session_id,
+    )
+    if isinstance(resp, str):
+        return resp
+
+    err = _check_feishu_err(resp)
+    if err: return err
+
+    records = resp.get("data", {}).get("items", [])
+    if not records:
+        return "OK: No matching records found."
+
+    lines = []
+    for r in records[:max_results]:
+        lines.append(f"Record {r.get('record_id')}: {json.dumps(r.get('fields', {}), ensure_ascii=False)}")
+    return "OK: Query results:\n" + "\n".join(lines)
+
+async def _bitable_create_record(agent_id: uuid.UUID, user_id: uuid.UUID, arguments: dict, *, session_id: str = "") -> str:
     """Create a new record (row) in a Bitable table."""
     url = arguments.get("url", "")
     table_id = arguments.get("table_id", "")
     fields_str = arguments.get("fields", "{}")
-    
+
     parsed = _parse_feishu_url(url)
     app_token = await _resolve_bitable_app_token(agent_id, parsed)
     table_id = table_id or parsed.get("table_id")
-    
+
     if not app_token or not table_id:
         return "Failed: Could not resolve app_token or table_id from the provided parameters/URL."
-        
+
     import json
     try:
         fields = json.loads(fields_str)
     except json.JSONDecodeError:
         return "Failed: The 'fields' parameter is not valid JSON."
-        
+
     app_id, app_secret = await _get_feishu_credentials(agent_id)
     from app.services.feishu_service import feishu_service
-    try:
-        resp = await feishu_service.bitable_create_record(app_id, app_secret, app_token, table_id, fields)
-        err = _check_feishu_err(resp)
-        if err: return err
-        
-        record = resp.get("data", {}).get("record", {})
-        # Provide a user-accessible link so they can verify the new row in the table
-        tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
-        bitable_url = await _get_feishu_bitable_url(tenant_token, app_token, table_id)
-        return (
-            f"OK: Record created. Record ID: {record.get('record_id')}\n"
-            f"Fields: {json.dumps(record.get('fields', {}), ensure_ascii=False)}\n"
-            f"🔗 多维表格链接: {bitable_url}"
-        )
-    except Exception as e:
-        return f"Failed: {str(e)[:300]}"
 
-async def _bitable_update_record(agent_id: uuid.UUID, arguments: dict) -> str:
+    resp = await _feishu_with_user_fallback(
+        agent_id, user_id,
+        scopes=["bitable:app"],
+        app_call_fn=lambda: feishu_service.bitable_create_record(app_id, app_secret, app_token, table_id, fields),
+        user_call_fn=lambda token: feishu_service.bitable_create_record(app_id, app_secret, app_token, table_id, fields, access_token=token),
+        session_id=session_id,
+    )
+    if isinstance(resp, str):
+        return resp
+
+    err = _check_feishu_err(resp)
+    if err: return err
+
+    record = resp.get("data", {}).get("record", {})
+    # Provide a user-accessible link so they can verify the new row in the table
+    tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
+    bitable_url = await _get_feishu_bitable_url(tenant_token, app_token, table_id)
+    return (
+        f"OK: Record created. Record ID: {record.get('record_id')}\n"
+        f"Fields: {json.dumps(record.get('fields', {}), ensure_ascii=False)}\n"
+        f"🔗 多维表格链接: {bitable_url}"
+    )
+
+async def _bitable_update_record(agent_id: uuid.UUID, user_id: uuid.UUID, arguments: dict, *, session_id: str = "") -> str:
     """Update an existing record in a Bitable table by record_id."""
     url = arguments.get("url", "")
     table_id = arguments.get("table_id", "")
     record_id = arguments.get("record_id", "")
     fields_str = arguments.get("fields", "{}")
-    
+
     parsed = _parse_feishu_url(url)
     app_token = await _resolve_bitable_app_token(agent_id, parsed)
     table_id = table_id or parsed.get("table_id")
-    
+
     if not app_token or not table_id or not record_id:
         return "Failed: Missing required parameters. Need app_token (from URL), table_id, and record_id."
-        
+
     import json
     try:
         fields = json.loads(fields_str)
     except json.JSONDecodeError:
         return "Failed: The 'fields' parameter is not valid JSON."
-        
+
     app_id, app_secret = await _get_feishu_credentials(agent_id)
     from app.services.feishu_service import feishu_service
-    try:
-        resp = await feishu_service.bitable_update_record(app_id, app_secret, app_token, table_id, record_id, fields)
-        err = _check_feishu_err(resp)
-        if err: return err
-        
-        record = resp.get("data", {}).get("record", {})
-        # Provide a user-accessible link so they can verify the updated row
-        tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
-        bitable_url = await _get_feishu_bitable_url(tenant_token, app_token, table_id)
-        return (
-            f"OK: Record updated. Record ID: {record.get('record_id')}\n"
-            f"Fields: {json.dumps(record.get('fields', {}), ensure_ascii=False)}\n"
-            f"🔗 多维表格链接: {bitable_url}"
-        )
-    except Exception as e:
-        return f"Failed: {str(e)[:300]}"
 
-async def _bitable_delete_record(agent_id: uuid.UUID, arguments: dict) -> str:
+    resp = await _feishu_with_user_fallback(
+        agent_id, user_id,
+        scopes=["bitable:app"],
+        app_call_fn=lambda: feishu_service.bitable_update_record(app_id, app_secret, app_token, table_id, record_id, fields),
+        user_call_fn=lambda token: feishu_service.bitable_update_record(app_id, app_secret, app_token, table_id, record_id, fields, access_token=token),
+        session_id=session_id,
+    )
+    if isinstance(resp, str):
+        return resp
+
+    err = _check_feishu_err(resp)
+    if err: return err
+
+    record = resp.get("data", {}).get("record", {})
+    # Provide a user-accessible link so they can verify the updated row
+    tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
+    bitable_url = await _get_feishu_bitable_url(tenant_token, app_token, table_id)
+    return (
+        f"OK: Record updated. Record ID: {record.get('record_id')}\n"
+        f"Fields: {json.dumps(record.get('fields', {}), ensure_ascii=False)}\n"
+        f"🔗 多维表格链接: {bitable_url}"
+    )
+
+async def _bitable_delete_record(agent_id: uuid.UUID, user_id: uuid.UUID, arguments: dict, *, session_id: str = "") -> str:
     """Delete a record from a Bitable table by record_id."""
     url = arguments.get("url", "")
     table_id = arguments.get("table_id", "")
     record_id = arguments.get("record_id", "")
-    
+
     parsed = _parse_feishu_url(url)
     app_token = await _resolve_bitable_app_token(agent_id, parsed)
     table_id = table_id or parsed.get("table_id")
-    
+
     if not app_token or not table_id or not record_id:
         return "Failed: Missing required parameters. Need app_token (from URL), table_id, and record_id."
-        
+
     app_id, app_secret = await _get_feishu_credentials(agent_id)
     from app.services.feishu_service import feishu_service
-    try:
-        resp = await feishu_service.bitable_delete_record(app_id, app_secret, app_token, table_id, record_id)
-        err = _check_feishu_err(resp)
-        if err: return err
-        
-        # Provide a user-accessible link so they can verify the deletion
-        tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
-        bitable_url = await _get_feishu_bitable_url(tenant_token, app_token, table_id)
-        return f"OK: Record {record_id} deleted successfully.\n🔗 多维表格链接: {bitable_url}"
-    except Exception as e:
-        return f"Failed: {str(e)[:300]}"
+
+    resp = await _feishu_with_user_fallback(
+        agent_id, user_id,
+        scopes=["bitable:app"],
+        app_call_fn=lambda: feishu_service.bitable_delete_record(app_id, app_secret, app_token, table_id, record_id),
+        user_call_fn=lambda token: feishu_service.bitable_delete_record(app_id, app_secret, app_token, table_id, record_id, access_token=token),
+        session_id=session_id,
+    )
+    if isinstance(resp, str):
+        return resp
+
+    err = _check_feishu_err(resp)
+    if err: return err
+
+    # Provide a user-accessible link so they can verify the deletion
+    tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
+    bitable_url = await _get_feishu_bitable_url(tenant_token, app_token, table_id)
+    return f"OK: Record {record_id} deleted successfully.\n🔗 多维表格链接: {bitable_url}"
 
 
 # ─── Feishu Document Tools ──────────────────────────────────────────
@@ -7569,7 +7621,7 @@ async def _feishu_wiki_get_node(token_str: str, auth_token: str) -> dict | None:
     }
 
 
-async def _feishu_wiki_list(agent_id: uuid.UUID, arguments: dict) -> str:
+async def _feishu_wiki_list(agent_id: uuid.UUID, user_id: uuid.UUID, arguments: dict, *, session_id: str = "") -> str:
     """List sub-pages of a Feishu Wiki node, optionally recursive."""
     import httpx
 
@@ -7583,11 +7635,10 @@ async def _feishu_wiki_list(agent_id: uuid.UUID, arguments: dict) -> str:
     if not app_id or not app_secret:
         return "❌ Agent has no Feishu channel configured."
     from app.services.feishu_service import feishu_service
-    token = await feishu_service.get_tenant_access_token(app_id, app_secret)
-    headers = {"Authorization": f"Bearer {token}"}
+    tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
 
-    # Resolve node → space_id
-    node_info = await _feishu_wiki_get_node(node_token, token)
+    # Resolve node → space_id (always uses tenant_token)
+    node_info = await _feishu_wiki_get_node(node_token, tenant_token)
     if not node_info:
         return (
             f"❌ 无法解析 Wiki 节点 `{node_token}`。\n"
@@ -7599,34 +7650,58 @@ async def _feishu_wiki_list(agent_id: uuid.UUID, arguments: dict) -> str:
     if not space_id:
         return f"❌ 无法获取知识库 space_id，请检查 token 是否正确。"
 
-    async def _list_children(parent_token: str, depth: int) -> list[dict]:
-        """Return flat list of {title, node_token, obj_token, has_child, depth}."""
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                f"https://open.feishu.cn/open-apis/wiki/v2/spaces/{space_id}/nodes",
-                headers=headers,
-                params={"parent_node_token": parent_token, "page_size": 50},
-            )
-        data = resp.json()
-        if data.get("code") != 0:
-            return []
-        items = data.get("data", {}).get("items", [])
-        result = []
-        for item in items:
-            entry = {
-                "title": item.get("title", "(无标题)"),
-                "node_token": item.get("node_token", ""),
-                "obj_token": item.get("obj_token", ""),
-                "has_child": item.get("has_child", False),
-                "depth": depth,
-            }
-            result.append(entry)
-            if recursive and entry["has_child"] and depth < 2:
-                children = await _list_children(entry["node_token"], depth + 1)
-                result.extend(children)
-        return result
+    async def _do_list_children(token_override: str | None = None):
+        """List wiki children. Returns a synthetic dict for fallback compatibility."""
+        use_token = token_override or tenant_token
+        headers_local = {"Authorization": f"Bearer {use_token}"}
 
-    pages = await _list_children(node_token, 0)
+        async def _list_children_inner(parent_token_inner: str, depth: int) -> list | dict:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(
+                    f"https://open.feishu.cn/open-apis/wiki/v2/spaces/{space_id}/nodes",
+                    headers=headers_local,
+                    params={"parent_node_token": parent_token_inner, "page_size": 50},
+                )
+            data = resp.json()
+            if data.get("code") != 0:
+                return data  # Return error dict for fallback check
+            items = data.get("data", {}).get("items", [])
+            result = []
+            for item in items:
+                entry = {
+                    "title": item.get("title", "(无标题)"),
+                    "node_token": item.get("node_token", ""),
+                    "obj_token": item.get("obj_token", ""),
+                    "has_child": item.get("has_child", False),
+                    "depth": depth,
+                }
+                result.append(entry)
+                if recursive and entry["has_child"] and depth < 2:
+                    children = await _list_children_inner(entry["node_token"], depth + 1)
+                    if isinstance(children, dict):  # error dict
+                        return children
+                    result.extend(children)
+            return result
+
+        pages_result = await _list_children_inner(node_token, 0)
+        if isinstance(pages_result, dict):  # error dict
+            return pages_result
+        return {"code": 0, "data": {"pages": pages_result}}
+
+    resp = await _feishu_with_user_fallback(
+        agent_id, user_id,
+        scopes=["wiki:wiki:readonly"],
+        app_call_fn=lambda: _do_list_children(),
+        user_call_fn=lambda token: _do_list_children(token),
+        session_id=session_id,
+    )
+    if isinstance(resp, str):
+        return resp
+
+    if resp.get("code") != 0:
+        return _check_feishu_err(resp) or f"❌ Wiki API error: {resp.get('msg')}"
+
+    pages = resp.get("data", {}).get("pages", [])
     if not pages:
         return f"📂 Wiki 页面 `{node_token}` 下没有子页面。"
 
@@ -7646,13 +7721,13 @@ async def _feishu_wiki_list(agent_id: uuid.UUID, arguments: dict) -> str:
     return "\n".join(lines)
 
 
-async def _feishu_doc_read(agent_id: uuid.UUID, arguments: dict) -> str:
+async def _feishu_doc_read(agent_id: uuid.UUID, user_id: uuid.UUID, arguments: dict, *, session_id: str = "") -> str:
     document_token = arguments.get("document_token", "").strip()
     if not document_token:
         url = arguments.get("url", "")
         parsed = _parse_feishu_url(url)
         document_token = parsed.get("document_token", parsed.get("wiki_token", ""))
-        
+
     if not document_token:
         return "Failed: Missing required argument 'document_token'"
     max_chars = min(int(arguments.get("max_chars", 6000)), 20000)
@@ -7663,7 +7738,8 @@ async def _feishu_doc_read(agent_id: uuid.UUID, arguments: dict) -> str:
 
     from app.services.feishu_service import feishu_service
     tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
-    
+
+    # Wiki node resolution always uses tenant_token
     read_token = document_token
     wiki_hint = ""
     node_info = await _feishu_wiki_get_node(document_token, tenant_token)
@@ -7675,26 +7751,32 @@ async def _feishu_doc_read(agent_id: uuid.UUID, arguments: dict) -> str:
                 "使用 `feishu_wiki_list` 工具（传入相同的 node_token）可以查看所有子页面列表。"
             )
 
-    try:
-        resp = await feishu_service.read_feishu_doc(app_id, app_secret, read_token)
-        err = _check_feishu_err(resp)
-        if err: return err
-        
-        content = resp.get("data", {}).get("content", "")
-        if not content:
-            return f"📄 Document '{document_token}' is empty.{wiki_hint}"
+    resp = await _feishu_with_user_fallback(
+        agent_id, user_id,
+        scopes=["docx:document:readonly"],
+        app_call_fn=lambda: feishu_service.read_feishu_doc(app_id, app_secret, read_token),
+        user_call_fn=lambda token: feishu_service.read_feishu_doc(app_id, app_secret, read_token, access_token=token),
+        session_id=session_id,
+    )
+    if isinstance(resp, str):
+        return resp
 
-        truncated = ""
-        if len(content) > max_chars:
-            content = content[:max_chars]
-            truncated = f"\n\n_(Truncated to {max_chars} chars)_"
+    err = _check_feishu_err(resp)
+    if err: return err
 
-        return f"📄 **Document content** (`{document_token}`):\n\n{content}{truncated}{wiki_hint}"
-    except Exception as e:
-        return f"Failed: {str(e)[:300]}"
+    content = resp.get("data", {}).get("content", "")
+    if not content:
+        return f"📄 Document '{document_token}' is empty.{wiki_hint}"
+
+    truncated = ""
+    if len(content) > max_chars:
+        content = content[:max_chars]
+        truncated = f"\n\n_(Truncated to {max_chars} chars)_"
+
+    return f"📄 **Document content** (`{document_token}`):\n\n{content}{truncated}{wiki_hint}"
 
 
-async def _feishu_doc_create(agent_id: uuid.UUID, arguments: dict) -> str:
+async def _feishu_doc_create(agent_id: uuid.UUID, user_id: uuid.UUID, arguments: dict, *, session_id: str = "") -> str:
     title = arguments.get("title", "").strip()
     if not title:
         return "Failed: Missing required argument 'title'"
@@ -7732,6 +7814,7 @@ async def _feishu_doc_create(agent_id: uuid.UUID, arguments: dict) -> str:
                 wiki_space_id = node_info["space_id"]
 
         if wiki_space_id:
+            # Wiki branch uses tenant_token directly (usually sufficient for same-org wikis)
             body: dict = {
                 "obj_type": "docx",
                 "node_type": "origin",  # Required by Feishu Wiki API: "origin" = new entity
@@ -7772,15 +7855,24 @@ async def _feishu_doc_create(agent_id: uuid.UUID, arguments: dict) -> str:
                 f"下一步：调用 feishu_doc_append(document_token=\"{doc_token}\", content=\"...\") 写入正文内容。"
             )
 
-        # ── Regular Drive branch (original behavior) ─────────────────────
-        resp = await feishu_service.create_feishu_doc(app_id, app_secret, folder_token, title)
+        # ── Regular Drive branch (with user fallback) ────────────────────
+        resp = await _feishu_with_user_fallback(
+            agent_id, user_id,
+            scopes=["docx:document"],
+            app_call_fn=lambda: feishu_service.create_feishu_doc(app_id, app_secret, folder_token, title),
+            user_call_fn=lambda token: feishu_service.create_feishu_doc(app_id, app_secret, folder_token, title, access_token=token),
+            session_id=session_id,
+        )
+        if isinstance(resp, str):
+            return resp
+
         err = _check_feishu_err(resp)
         if err: return err
-        
+
         doc = resp.get("data", {}).get("document", {})
         doc_token = doc.get("document_id", "")
         doc_url = await _get_feishu_tenant_doc_url(tenant_token, doc_token)
-        
+
         # Auto-share with the Feishu sender so they can access the document.
         # channel_feishu_sender_open_id is a module-level ContextVar defined in this file;
         # no import needed — it is already in scope.
@@ -7983,13 +8075,13 @@ def _markdown_to_feishu_blocks(markdown: str) -> list[dict]:
     return blocks
 
 
-async def _feishu_doc_append(agent_id: uuid.UUID, arguments: dict) -> str:
+async def _feishu_doc_append(agent_id: uuid.UUID, user_id: uuid.UUID, arguments: dict, *, session_id: str = "") -> str:
     document_token = arguments.get("document_token", "").strip()
     if not document_token:
         url = arguments.get("url", "")
         parsed = _parse_feishu_url(url)
         document_token = parsed.get("document_token", parsed.get("wiki_token", ""))
-        
+
     content = arguments.get("content", "").strip()
     if not document_token:
         return "Failed: Missing required argument 'document_token'"
@@ -8007,47 +8099,56 @@ async def _feishu_doc_append(agent_id: uuid.UUID, arguments: dict) -> str:
     node_info = await _feishu_wiki_get_node(document_token, tenant_token)
     docx_token = node_info["obj_token"] if (node_info and node_info.get("obj_token")) else document_token
 
-    try:
+    children = _markdown_to_feishu_blocks(content)
+
+    async def _do_append(token_override: str | None = None):
+        """Execute the append operation. If token_override is given, use it instead of tenant_token."""
         import httpx
+        use_token = token_override or tenant_token
+        headers = {"Authorization": f"Bearer {use_token}"}
         async with httpx.AsyncClient(timeout=20) as client:
             meta_resp = (await client.get(
                 f"https://open.feishu.cn/open-apis/docx/v1/documents/{docx_token}",
-                headers={"Authorization": f"Bearer {tenant_token}"},
+                headers=headers,
             )).json()
-            err = _check_feishu_err(meta_resp)
-            if err: return err
+            if meta_resp.get("code") != 0:
+                return meta_resp  # Return error dict for fallback check
 
             body_block_id = (
                 meta_resp.get("data", {}).get("document", {}).get("body", {}).get("block_id")
                 or docx_token
             )
 
-            children = _markdown_to_feishu_blocks(content)
-
             result = (await client.post(
                 f"https://open.feishu.cn/open-apis/docx/v1/documents/{docx_token}/blocks/{body_block_id}/children",
-                # Do NOT pass index: -1.  Omitting the field lets Feishu default to
-                # append-at-end, which is always valid.  Passing -1 explicitly can
-                # trigger error 1770001 (invalid param) with certain block type mixes.
                 json={"children": children},
-                headers={"Authorization": f"Bearer {tenant_token}"},
+                headers=headers,
             )).json()
+            return result
 
-            err = _check_feishu_err(result)
-            if err: return err
+    resp = await _feishu_with_user_fallback(
+        agent_id, user_id,
+        scopes=["docx:document"],
+        app_call_fn=lambda: _do_append(),
+        user_call_fn=lambda token: _do_append(token),
+        session_id=session_id,
+    )
+    if isinstance(resp, str):
+        return resp
 
-        doc_url = await _get_feishu_tenant_doc_url(tenant_token, docx_token)
-        return (
-            f"✅ 已写入 {len(children)} 个段落到文档。\n"
-            f"🔗 文档直链（原文发给用户，勿修改）：{doc_url}"
-        )
-    except Exception as e:
-        return f"Failed: {str(e)[:300]}"
+    err = _check_feishu_err(resp)
+    if err: return err
+
+    doc_url = await _get_feishu_tenant_doc_url(tenant_token, docx_token)
+    return (
+        f"✅ 已写入 {len(children)} 个段落到文档。\n"
+        f"🔗 文档直链（原文发给用户，勿修改）：{doc_url}"
+    )
 
 
 # ─── Feishu Drive Share (All File Types) ────────────────────────────────────────
 
-async def _feishu_drive_share(agent_id: uuid.UUID, arguments: dict) -> str:
+async def _feishu_drive_share(agent_id: uuid.UUID, user_id: uuid.UUID, arguments: dict, *, session_id: str = "") -> str:
     """Manage Feishu drive file collaborators.
     Automatically handles both regular docs/files (Drive permissions API)
     and Wiki node documents (Wiki space members API).
@@ -8235,7 +8336,7 @@ async def _feishu_drive_share(agent_id: uuid.UUID, arguments: dict) -> str:
 
 # ─── Feishu Drive Delete ──────────────────────────────────────────────────────
 
-async def _feishu_drive_delete(agent_id: uuid.UUID, arguments: dict) -> str:
+async def _feishu_drive_delete(agent_id: uuid.UUID, user_id: uuid.UUID, arguments: dict, *, session_id: str = "") -> str:
     """Delete a file or folder from Feishu Drive (cloud space).
     The file is moved to the recycle bin, not permanently deleted.
     For folders, the deletion is asynchronous and returns a task_id.
@@ -8258,7 +8359,7 @@ async def _feishu_drive_delete(agent_id: uuid.UUID, arguments: dict) -> str:
     if not app_id or not app_secret:
         return "❌ Agent has no Feishu channel configured."
     from app.services.feishu_service import feishu_service
-    token = await feishu_service.get_tenant_access_token(app_id, app_secret)
+    tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
 
     # Type label mapping for user-friendly output
     type_labels = {
@@ -8268,48 +8369,57 @@ async def _feishu_drive_delete(agent_id: uuid.UUID, arguments: dict) -> str:
     }
     type_label = type_labels.get(file_type, file_type)
 
-    try:
+    async def _do_delete(token_override: str | None = None):
+        use_token = token_override or tenant_token
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.delete(
                 f"https://open.feishu.cn/open-apis/drive/v1/files/{file_token}",
                 params={"type": file_type},
-                headers={"Authorization": f"Bearer {token}"},
+                headers={"Authorization": f"Bearer {use_token}"},
             )
-        data = resp.json()
-        code = data.get("code", -1)
+        return resp.json()
 
-        if code == 0:
-            # Folder deletion returns a task_id for async tracking
-            task_id = data.get("data", {}).get("task_id")
-            if task_id:
-                return (
-                    f"✅ 已提交{type_label}删除任务（异步执行中）。\n"
-                    f"📋 任务 ID: `{task_id}`\n"
-                    f"文件夹删除为异步操作，文件会被移至回收站。"
-                )
-            return f"✅ {type_label} `{file_token}` 已删除（移至回收站）。"
+    resp_data = await _feishu_with_user_fallback(
+        agent_id, user_id,
+        scopes=["drive:drive"],
+        app_call_fn=lambda: _do_delete(),
+        user_call_fn=lambda token: _do_delete(token),
+        session_id=session_id,
+    )
+    if isinstance(resp_data, str):
+        return resp_data
 
-        # Error handling with specific codes
-        msg = data.get("msg", "Unknown error")
-        if code == 1061003:
-            return f"❌ 未找到文件 `{file_token}`。请确认文件 token 和类型是否正确。"
-        elif code == 1061004:
+    code = resp_data.get("code", -1)
+
+    if code == 0:
+        # Folder deletion returns a task_id for async tracking
+        task_id = resp_data.get("data", {}).get("task_id")
+        if task_id:
             return (
-                f"❌ 权限不足（code {code}）\n"
-                "需要满足以下条件之一：\n"
-                "• 文件所有者 + 父文件夹编辑权限\n"
-                "• 父文件夹的所有者或 full_access 权限\n"
-                "同时需要在飞书开放平台开通：drive:drive 或 space:document:delete"
+                f"✅ 已提交{type_label}删除任务（异步执行中）。\n"
+                f"📋 任务 ID: `{task_id}`\n"
+                f"文件夹删除为异步操作，文件会被移至回收站。"
             )
-        elif code == 1061007:
-            return f"❌ 文件 `{file_token}` 已被删除。"
-        elif code == 1061045:
-            return f"⚠️ 接口频率限制，请稍后重试。（每秒最多 5 次）"
-        else:
-            return f"❌ 删除{type_label}失败：{msg} (code {code})"
+        return f"✅ {type_label} `{file_token}` 已删除（移至回收站）。"
 
-    except Exception as e:
-        return f"❌ 删除文件异常: {str(e)[:300]}"
+    # Error handling with specific codes
+    msg = resp_data.get("msg", "Unknown error")
+    if code == 1061003:
+        return f"❌ 未找到文件 `{file_token}`。请确认文件 token 和类型是否正确。"
+    elif code == 1061004:
+        return (
+            f"❌ 权限不足（code {code}）\n"
+            "需要满足以下条件之一：\n"
+            "• 文件所有者 + 父文件夹编辑权限\n"
+            "• 父文件夹的所有者或 full_access 权限\n"
+            "同时需要在飞书开放平台开通：drive:drive 或 space:document:delete"
+        )
+    elif code == 1061007:
+        return f"❌ 文件 `{file_token}` 已被删除。"
+    elif code == 1061045:
+        return f"⚠️ 接口频率限制，请稍后重试。（每秒最多 5 次）"
+    else:
+        return f"❌ 删除{type_label}失败：{msg} (code {code})"
 
 
 # ─── Feishu Calendar Tools ────────────────────────────────────────────────────
@@ -8669,31 +8779,38 @@ async def _feishu_calendar_delete(agent_id: uuid.UUID, arguments: dict) -> str:
 
 # ─── Feishu Approval Tools ───────────────────────────────────────────────────
 
-async def _feishu_approval_create(agent_id: uuid.UUID, arguments: dict) -> str:
+async def _feishu_approval_create(agent_id: uuid.UUID, user_id: uuid.UUID, arguments: dict, *, session_id: str = "") -> str:
     app_id, app_secret = await _get_feishu_credentials(agent_id)
     if not app_id or not app_secret:
         return "❌ Agent has no Feishu channel configured."
 
     approval_code = arguments.get("approval_code", "").strip()
-    user_id = arguments.get("user_id", "").strip()
+    feishu_user_id = arguments.get("user_id", "").strip()  # Feishu open_id for the approval form
     form_data = arguments.get("form_data", "").strip()
 
-    if not approval_code or not user_id or not form_data:
+    if not approval_code or not feishu_user_id or not form_data:
         return "❌ form_data, user_id and approval_code are required."
 
     from app.services.feishu_service import feishu_service
-    try:
-        resp = await feishu_service.create_approval_instance(app_id, app_secret, approval_code, user_id, form_data)
-        err = _check_feishu_err(resp)
-        if err: return err
 
-        instance_code = resp.get("data", {}).get("instance_code", "")
-        return f"✅ 审批发起成功！\n审批实例 ID: `{instance_code}`"
-    except Exception as e:
-        return f"Failed: {str(e)[:300]}"
+    resp = await _feishu_with_user_fallback(
+        agent_id, user_id,
+        scopes=["approval:instance"],
+        app_call_fn=lambda: feishu_service.create_approval_instance(app_id, app_secret, approval_code, feishu_user_id, form_data),
+        user_call_fn=lambda token: feishu_service.create_approval_instance(app_id, app_secret, approval_code, feishu_user_id, form_data, access_token=token),
+        session_id=session_id,
+    )
+    if isinstance(resp, str):
+        return resp
+
+    err = _check_feishu_err(resp)
+    if err: return err
+
+    instance_code = resp.get("data", {}).get("instance_code", "")
+    return f"✅ 审批发起成功！\n审批实例 ID: `{instance_code}`"
 
 
-async def _feishu_approval_query(agent_id: uuid.UUID, arguments: dict) -> str:
+async def _feishu_approval_query(agent_id: uuid.UUID, user_id: uuid.UUID, arguments: dict, *, session_id: str = "") -> str:
     app_id, app_secret = await _get_feishu_credentials(agent_id)
     if not app_id or not app_secret:
         return "❌ Agent has no Feishu channel configured."
@@ -8705,20 +8822,27 @@ async def _feishu_approval_query(agent_id: uuid.UUID, arguments: dict) -> str:
         return "❌ approval_code is required."
 
     from app.services.feishu_service import feishu_service
-    try:
-        resp = await feishu_service.query_approval_instances(app_id, app_secret, approval_code, status)
-        err = _check_feishu_err(resp)
-        if err: return err
 
-        data = resp.get("data", {})
-        instance_codes = data.get("instance_code_list", [])
-        
-        return f"✅ 查询完成。共发现 {len(instance_codes)} 个符合条件的审批实例。\n实例列表: {instance_codes}"
-    except Exception as e:
-        return f"Failed: {str(e)[:300]}"
+    resp = await _feishu_with_user_fallback(
+        agent_id, user_id,
+        scopes=["approval:instance:readonly"],
+        app_call_fn=lambda: feishu_service.query_approval_instances(app_id, app_secret, approval_code, status),
+        user_call_fn=lambda token: feishu_service.query_approval_instances(app_id, app_secret, approval_code, status, access_token=token),
+        session_id=session_id,
+    )
+    if isinstance(resp, str):
+        return resp
+
+    err = _check_feishu_err(resp)
+    if err: return err
+
+    data = resp.get("data", {})
+    instance_codes = data.get("instance_code_list", [])
+
+    return f"✅ 查询完成。共发现 {len(instance_codes)} 个符合条件的审批实例。\n实例列表: {instance_codes}"
 
 
-async def _feishu_approval_get(agent_id: uuid.UUID, arguments: dict) -> str:
+async def _feishu_approval_get(agent_id: uuid.UUID, user_id: uuid.UUID, arguments: dict, *, session_id: str = "") -> str:
     app_id, app_secret = await _get_feishu_credentials(agent_id)
     if not app_id or not app_secret:
         return "❌ Agent has no Feishu channel configured."
@@ -8728,16 +8852,23 @@ async def _feishu_approval_get(agent_id: uuid.UUID, arguments: dict) -> str:
         return "❌ instance_id is required."
 
     from app.services.feishu_service import feishu_service
-    try:
-        resp = await feishu_service.get_approval_instance(app_id, app_secret, instance_id)
-        err = _check_feishu_err(resp)
-        if err: return err
 
-        data = resp.get("data", {})
-        import json
-        return f"✅ 审批实例查询结果:\n```json\n{json.dumps(data, ensure_ascii=False, indent=2)}\n```"
-    except Exception as e:
-        return f"Failed: {str(e)[:300]}"
+    resp = await _feishu_with_user_fallback(
+        agent_id, user_id,
+        scopes=["approval:instance:readonly"],
+        app_call_fn=lambda: feishu_service.get_approval_instance(app_id, app_secret, instance_id),
+        user_call_fn=lambda token: feishu_service.get_approval_instance(app_id, app_secret, instance_id, access_token=token),
+        session_id=session_id,
+    )
+    if isinstance(resp, str):
+        return resp
+
+    err = _check_feishu_err(resp)
+    if err: return err
+
+    data = resp.get("data", {})
+    import json
+    return f"✅ 审批实例查询结果:\n```json\n{json.dumps(data, ensure_ascii=False, indent=2)}\n```"
 
 
 # ─── Feishu User Search ───────────────────────────────────────────────────────
