@@ -88,7 +88,13 @@ async def create_credential(
     )
 
     db.add(cred)
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        if "uq_user_external_credential_provider" in str(e):
+            raise HTTPException(status_code=409, detail=f"Credential for provider '{data.provider}' already exists")
+        raise
     await db.refresh(cred)
 
     return _to_response(cred)

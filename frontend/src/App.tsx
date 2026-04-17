@@ -133,7 +133,7 @@ export default function App() {
         const urlParams = new URLSearchParams(window.location.search);
         const urlToken = urlParams.get('token');
         const currentPath = window.location.pathname;
-        const pathsWithOwnToken = ['/reset-password', '/verify-email'];
+        const pathsWithOwnToken = ['/reset-password', '/verify-email', '/credentials/connect'];
         let effectiveToken = token;
 
         if (urlToken && !pathsWithOwnToken.includes(currentPath)) {

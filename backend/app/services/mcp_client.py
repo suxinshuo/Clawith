@@ -193,6 +193,9 @@ class MCPClient:
         if self.api_key:
             headers_sse["Authorization"] = f"Bearer {self.api_key}"
             headers_post["Authorization"] = f"Bearer {self.api_key}"
+        if self._user_headers:
+            headers_sse.update(self._user_headers)
+            headers_post.update(self._user_headers)
 
         body: dict = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
 

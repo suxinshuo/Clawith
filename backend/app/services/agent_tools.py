@@ -3132,9 +3132,13 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None, user
         if tool.required_credential_provider and user_id:
             from app.services.credential_resolver import CredentialResolver, CredentialNotFoundError
             resolver = CredentialResolver()
-            tenant_id = await _get_agent_tenant_id(agent_id)
+            tenant_id_str = await _get_agent_tenant_id(agent_id)
+            if not tenant_id_str:
+                logger.warning(f"[MCP] Cannot resolve credential: agent {agent_id} has no tenant")
+                return f"❌ 无法解析凭据：Agent 未关联租户。"
             try:
-                cred = await resolver.resolve(user_id, tenant_id, tool.required_credential_provider)
+                from uuid import UUID as _UUID
+                cred = await resolver.resolve(user_id, _UUID(tenant_id_str), tool.required_credential_provider)
             except Exception as e:
                 logger.exception(f"[MCP] Credential resolution error for {tool.required_credential_provider}")
                 return f"❌ 凭据解析失败: {str(e)[:200]}"
