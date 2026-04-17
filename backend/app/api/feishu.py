@@ -947,7 +947,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                     llm_user_text,
                     history=history,
                     user_id=platform_user_id,
-                    session_id=conv_id,
+                    session_id=session_conv_id,
                     on_chunk=_ws_on_chunk,
                     on_thinking=_ws_on_thinking,
                     on_tool_call=_ws_on_tool_call,
