@@ -3175,6 +3175,140 @@ async def _send_feishu_credential_card(agent_id, external_conv_id: str, provider
         return False
 
 
+async def _build_feishu_oauth_url(agent_id: uuid.UUID, user_id: uuid.UUID, scopes: list[str]) -> str | None:
+    """Generate a Feishu OAuth authorization URL for the given agent and user.
+
+    Returns the authorize URL string, or None if credentials are missing.
+    """
+    from app.services.oauth_service import generate_oauth_state
+    from urllib.parse import urlencode
+
+    settings = get_settings()
+    app_id, app_secret = await _get_feishu_credentials(agent_id)
+    if not app_id:
+        return None
+
+    tenant_id = await _get_agent_tenant_id(agent_id)
+    if not tenant_id:
+        return None
+
+    state = generate_oauth_state(
+        user_id=user_id,
+        tenant_id=uuid.UUID(tenant_id),
+        provider=f"feishu:{agent_id}",
+        flow="feishu_credential",
+    )
+
+    base_url = settings.PUBLIC_BASE_URL.rstrip("/") if settings.PUBLIC_BASE_URL else ""
+    redirect_uri = f"{base_url}/api/oauth/feishu/credential-callback"
+
+    params = {
+        "app_id": app_id,
+        "redirect_uri": redirect_uri,
+        "scope": " ".join(scopes),
+        "state": state,
+    }
+    return f"https://open.feishu.cn/open-apis/authen/v1/authorize?{urlencode(params)}"
+
+
+async def _feishu_with_user_fallback(
+    agent_id: uuid.UUID,
+    user_id: uuid.UUID,
+    scopes: list[str],
+    app_call_fn,
+    user_call_fn,
+    session_id: str = "",
+) -> dict | str:
+    """Execute a Feishu API call with app-first, user-fallback strategy.
+
+    1. app_call_fn() — call with app token
+    2. If permission error → resolve user credential via CredentialResolver
+    3. If user credential found → user_call_fn(access_token) retry
+    4. If no credential → send OAuth link directly to user (bypass LLM)
+
+    Returns:
+        dict: Feishu API response (success or non-permission error)
+        str:  Error/guidance message for the LLM
+    """
+    # Step 1: Try with app identity
+    try:
+        resp = await app_call_fn()
+    except Exception as e:
+        return f"Failed: {str(e)[:300]}"
+
+    # Step 2: Check for permission error
+    if not _is_feishu_permission_error(resp):
+        return resp
+
+    logger.info(f"[FeishuUserFallback] Permission error with app token for agent={agent_id}, trying user credential")
+
+    # Step 3: Resolve user credential
+    from app.services.credential_resolver import CredentialResolver
+    resolver = CredentialResolver()
+    tenant_id_str = await _get_agent_tenant_id(agent_id)
+    if not tenant_id_str:
+        return f"Failed: Could not resolve tenant for agent {agent_id}"
+
+    provider = f"feishu:{agent_id}"
+    credential = await resolver.resolve(user_id, uuid.UUID(tenant_id_str), provider)
+
+    if credential:
+        # Step 3a: Retry with user token
+        try:
+            user_resp = await user_call_fn(credential.access_token)
+        except Exception as e:
+            return f"Failed: {str(e)[:300]}"
+
+        if _is_feishu_permission_error(user_resp):
+            # User token also lacks permission — it's a resource-level issue
+            code = user_resp.get("code", "")
+            msg = user_resp.get("msg", "")
+            return (
+                f"❌ 您的飞书账号也没有该资源的访问权限 (code: {code}, msg: {msg})。\n"
+                "请联系文档所有者授予您访问权限后重试。"
+            )
+        return user_resp
+
+    # Step 4: No credential — send OAuth link to user (bypass LLM)
+    oauth_url = await _build_feishu_oauth_url(agent_id, user_id, scopes)
+    if not oauth_url:
+        return "❌ 无法生成飞书授权链接，请检查 Agent 的飞书配置。"
+
+    # Determine channel and send directly
+    _external_conv_id = None
+    _source_channel = "web"
+    if session_id:
+        try:
+            from app.models.chat_session import ChatSession
+            async with async_session() as db:
+                r = await db.execute(
+                    select(ChatSession.source_channel, ChatSession.external_conv_id)
+                    .where(ChatSession.id == session_id)
+                )
+                row = r.one_or_none()
+                if row:
+                    _source_channel = row[0]
+                    _external_conv_id = row[1]
+        except Exception:
+            pass
+
+    if _source_channel == "feishu" and _external_conv_id:
+        sent = await _send_feishu_credential_card(
+            agent_id=agent_id,
+            external_conv_id=_external_conv_id,
+            provider="feishu",
+            link=oauth_url,
+        )
+        if sent:
+            return "⏳ 需要用户飞书授权才能执行此操作。已向用户发送授权请求，请等待用户完成授权后重试。"
+
+    # Web users or fallback: return guidance (WebSocket push can be added later)
+    return (
+        "⏳ 需要用户飞书授权才能执行此操作。已向用户发送授权请求，请等待用户完成授权后重试。\n"
+        f"授权链接: {oauth_url}"
+    )
+
+
 async def _build_credential_guidance(provider: str, user_id, tenant_id, session_id: str, agent_id=None) -> str:
     """Build channel-appropriate credential guidance message.
 
@@ -7005,6 +7139,20 @@ async def _resolve_bitable_app_token(agent_id: uuid.UUID, parsed_url: dict) -> s
                 return node_info["obj_token"]
     return None
 
+# Feishu permission error codes — shared between _check_feishu_err and _feishu_with_user_fallback
+_FEISHU_PERM_CODES = {99991663, 10006, 99991661, 99991668, 91403, 1063001, 1063004}
+_FEISHU_PERM_KEYWORDS = ("permission", "forbidden", "no access", "access denied", "403")
+
+
+def _is_feishu_permission_error(resp: dict) -> bool:
+    """Check if a Feishu API response indicates a permission error."""
+    code = resp.get("code")
+    if code is None or code == 0:
+        return False
+    msg_lower = str(resp.get("msg", "")).lower()
+    return code in _FEISHU_PERM_CODES or any(kw in msg_lower for kw in _FEISHU_PERM_KEYWORDS)
+
+
 def _check_feishu_err(resp: dict) -> str | None:
     """Check Feishu API response for errors and return a user-friendly message.
 
@@ -7025,9 +7173,7 @@ def _check_feishu_err(resp: dict) -> str | None:
         #   91404    - bitable record not found (sometimes permission)
         #   1063001  - doc permission denied
         #   1063004  - doc operation forbidden
-        _perm_codes = {99991663, 10006, 99991661, 99991668, 91403, 1063001, 1063004}
-        _perm_keywords = ("permission", "forbidden", "no access", "access denied", "403")
-        is_perm_error = code in _perm_codes or any(kw in msg_lower for kw in _perm_keywords)
+        is_perm_error = _is_feishu_permission_error(resp)
         if is_perm_error:
             return (
                 f"Failed: Permission denied (code: {code}, msg: {msg}). "
