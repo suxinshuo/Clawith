@@ -225,3 +225,18 @@ async def submit_credential_via_token(
         db.add(cred)
         await db.commit()
         return {"status": "created", "provider": provider}
+
+
+@router.get("/providers")
+async def list_providers(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List OAuth providers configured for this tenant."""
+    from app.models.oauth_provider_config import OAuthProviderConfig
+    result = await db.execute(
+        select(OAuthProviderConfig.provider, OAuthProviderConfig.scopes, OAuthProviderConfig.authorize_url)
+        .where(OAuthProviderConfig.tenant_id == current_user.tenant_id)
+    )
+    providers = [{"provider": r[0], "scopes": r[1], "has_oauth": True} for r in result.all()]
+    return providers

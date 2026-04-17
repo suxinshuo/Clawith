@@ -13,18 +13,33 @@ export default function CredentialConnect() {
   const [status, setStatus] = useState<'idle' | 'submitting' | 'success' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState('');
   const [provider, setProvider] = useState('');
+  const [oauthSuccess] = useState(() => new URLSearchParams(window.location.search).get('oauth_success') === '1');
+  const [oauthProvider] = useState(() => new URLSearchParams(window.location.search).get('provider') || '');
 
   useEffect(() => {
-    // Decode token to show provider name (JWT payload is base64, not secret)
     if (token) {
       try {
         const payload = JSON.parse(atob(token.split('.')[1]));
         setProvider(payload.provider || '');
+
+        // OAuth mode: auto-redirect to OAuth start endpoint
+        if (payload.credential_mode === 'oauth') {
+          window.location.href = `${API_BASE}/api/credentials/oauth/start?token=${token}`;
+        }
       } catch {
         // ignore decode errors
       }
     }
   }, [token]);
+
+  if (oauthSuccess) {
+    return (
+      <div style={{ maxWidth: 400, margin: '80px auto', padding: 24, textAlign: 'center' }}>
+        <h2>授权成功</h2>
+        <p>{oauthProvider ? `${oauthProvider} 已连接成功。` : '授权已完成。'}请回到对话继续。</p>
+      </div>
+    );
+  }
 
   if (!token) {
     return (

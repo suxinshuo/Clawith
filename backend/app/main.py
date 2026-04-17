@@ -307,6 +307,7 @@ from app.api.agent_credentials import router as credentials_router
 from app.api.agentbay_control import router as agentbay_control_router
 from app.api.user_credentials import router as user_credentials_router
 from app.api.admin_credentials import router as admin_credentials_router
+from app.api.oauth_credentials import router as oauth_credentials_router
 
 app.include_router(auth_router, prefix=settings.API_PREFIX)
 app.include_router(agents_router, prefix=settings.API_PREFIX)
@@ -349,6 +350,7 @@ app.include_router(pages_public_router)  # Public endpoint for /p/{short_id}, no
 app.include_router(credentials_router, prefix=settings.API_PREFIX)
 app.include_router(user_credentials_router, prefix=settings.API_PREFIX)
 app.include_router(admin_credentials_router, prefix=settings.API_PREFIX)
+app.include_router(oauth_credentials_router, prefix=settings.API_PREFIX)
 app.include_router(agentbay_control_router, prefix=settings.API_PREFIX)
 
 
