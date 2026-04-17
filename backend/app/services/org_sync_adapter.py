@@ -651,12 +651,19 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
         Returns a list of open_department_id strings the app is authorized to access.
         Returns empty list on API error (caller should fall back to root "0").
         """
-        resp = await client.get(
-            self.FEISHU_SCOPES_URL,
-            params={"department_id_type": "open_department_id"},
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        data = resp.json()
+        try:
+            resp = await client.get(
+                self.FEISHU_SCOPES_URL,
+                params={"department_id_type": "open_department_id"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            data = resp.json()
+        except Exception as exc:
+            logger.warning(
+                f"Feishu scopes API request failed ({exc!r}), "
+                f"falling back to root department."
+            )
+            return []
 
         if data.get("code") != 0:
             logger.warning(

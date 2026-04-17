@@ -39,6 +39,7 @@ async def test_fetch_auth_scopes_returns_department_ids():
     call_args = mock_client.get.call_args
     assert "contact/v3/scopes" in call_args[0][0]
     assert call_args[1]["params"]["department_id_type"] == "open_department_id"
+    assert call_args[1]["headers"]["Authorization"] == "Bearer fake_token"
 
 
 @pytest.mark.asyncio
