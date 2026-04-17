@@ -625,6 +625,7 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
     FEISHU_APP_TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"
     FEISHU_DEPT_URL = "https://open.feishu.cn/open-apis/contact/v3/departments"
     FEISHU_USERS_URL = "https://open.feishu.cn/open-apis/contact/v3/users/find_by_department"
+    FEISHU_SCOPES_URL = "https://open.feishu.cn/open-apis/contact/v3/scopes"
 
     def __init__(self, provider: IdentityProvider | None = None, config: dict | None = None, tenant_id: uuid.UUID | None = None):
         super().__init__(provider, config, tenant_id)
@@ -643,6 +644,31 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
             )
             data = resp.json()
             return data.get("tenant_access_token") or data.get("app_access_token") or ""
+
+    async def fetch_auth_scopes(self, token: str, client: httpx.AsyncClient) -> list[str]:
+        """Fetch authorized department IDs from Feishu scopes API.
+
+        Returns a list of open_department_id strings the app is authorized to access.
+        Returns empty list on API error (caller should fall back to root "0").
+        """
+        resp = await client.get(
+            self.FEISHU_SCOPES_URL,
+            params={"department_id_type": "open_department_id"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        data = resp.json()
+
+        if data.get("code") != 0:
+            logger.warning(
+                f"Feishu scopes API failed (code={data.get('code')}), "
+                f"falling back to root department. "
+                f"Ensure 'contact:department.base:readonly' permission is enabled."
+            )
+            return []
+
+        dept_ids = data.get("data", {}).get("department_ids", []) or []
+        logger.info(f"Feishu auth scopes: {len(dept_ids)} authorized departments")
+        return dept_ids
 
     async def fetch_departments(self) -> list[ExternalDepartment]:
         """Fetch all departments from Feishu using concurrent recursive calls to get parent-child relationships."""

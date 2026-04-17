@@ -1,10 +1,58 @@
 import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.services.org_sync_adapter import BaseOrgSyncAdapter, ExternalUser
+from app.services.org_sync_adapter import BaseOrgSyncAdapter, ExternalUser, FeishuOrgSyncAdapter
+
+
+def _make_feishu_adapter():
+    return FeishuOrgSyncAdapter(
+        config={"app_id": "test_id", "app_secret": "test_secret"}
+    )
+
+
+def _mock_response(json_data):
+    resp = MagicMock()
+    resp.json.return_value = json_data
+    return resp
+
+
+@pytest.mark.asyncio
+async def test_fetch_auth_scopes_returns_department_ids():
+    adapter = _make_feishu_adapter()
+    mock_client = AsyncMock()
+    mock_client.get.return_value = _mock_response({
+        "code": 0,
+        "data": {
+            "department_ids": ["od-aaa", "od-bbb"],
+            "user_ids": ["uid1"],
+        },
+    })
+
+    result = await adapter.fetch_auth_scopes("fake_token", mock_client)
+
+    assert result == ["od-aaa", "od-bbb"]
+    mock_client.get.assert_called_once()
+    call_args = mock_client.get.call_args
+    assert "contact/v3/scopes" in call_args[0][0]
+    assert call_args[1]["params"]["department_id_type"] == "open_department_id"
+
+
+@pytest.mark.asyncio
+async def test_fetch_auth_scopes_returns_empty_on_api_error():
+    adapter = _make_feishu_adapter()
+    mock_client = AsyncMock()
+    mock_client.get.return_value = _mock_response({
+        "code": 99999,
+        "msg": "no permission",
+    })
+
+    result = await adapter.fetch_auth_scopes("fake_token", mock_client)
+
+    assert result == []
 
 
 class _DummyAdapter(BaseOrgSyncAdapter):
