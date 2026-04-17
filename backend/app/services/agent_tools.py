@@ -3200,6 +3200,7 @@ async def _build_feishu_oauth_url(agent_id: uuid.UUID, user_id: uuid.UUID, scope
         tenant_id=uuid.UUID(tenant_id),
         provider=f"feishu:{agent_id}",
         flow="feishu_credential",
+        agent_id=agent_id,
     )
 
     base_url = settings.PUBLIC_BASE_URL.rstrip("/") if settings.PUBLIC_BASE_URL else ""
