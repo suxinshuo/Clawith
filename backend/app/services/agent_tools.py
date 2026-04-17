@@ -2397,7 +2397,7 @@ async def execute_tool(
             result = await _install_skill(agent_id, ws, arguments)
         else:
             # Try MCP tool execution
-            result = await _execute_mcp_tool(tool_name, arguments, agent_id=agent_id, user_id=user_id)
+            result = await _execute_mcp_tool(tool_name, arguments, agent_id=agent_id, user_id=user_id, session_id=session_id)
 
         # Log tool call activity (skip noisy read operations)
         if tool_name not in ("list_files", "read_file", "read_document"):
@@ -3085,7 +3085,73 @@ async def _send_file_via_slack(agent_id, config, file_path: Path, member_name: s
         return f"Failed to send file via Slack: {e}"
 
 
-async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None, user_id=None) -> str:
+async def _build_credential_guidance(provider: str, user_id, tenant_id, session_id: str) -> str:
+    """Build channel-appropriate credential guidance message.
+
+    Web users are directed to settings. Channel users (feishu/dingtalk/wecom)
+    get a one-time token link to configure credentials without Clawith login.
+    """
+    source_channel = "web"
+    credential_mode = "manual"
+
+    if session_id:
+        try:
+            from app.models.chat_session import ChatSession
+            # Single DB session for both channel lookup and OAuth config check
+            async with async_session() as db:
+                r = await db.execute(
+                    select(ChatSession.source_channel).where(ChatSession.id == session_id)
+                )
+                ch = r.scalar_one_or_none()
+                if ch:
+                    source_channel = ch
+
+                # Also check if OAuth is configured for this provider (used by channel flow)
+                if source_channel in ("feishu", "dingtalk", "wecom"):
+                    try:
+                        from app.models.oauth_provider_config import OAuthProviderConfig
+                        _r = await db.execute(
+                            select(OAuthProviderConfig).where(
+                                OAuthProviderConfig.tenant_id == tenant_id,
+                                OAuthProviderConfig.provider == provider,
+                            )
+                        )
+                        if _r.scalar_one_or_none():
+                            credential_mode = "oauth"
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    if source_channel in ("feishu", "dingtalk", "wecom"):
+        try:
+            from app.services.one_time_token import generate_one_time_token
+            from app.config import get_settings
+            settings = get_settings()
+
+            token = generate_one_time_token(
+                user_id=user_id,
+                tenant_id=tenant_id,
+                provider=provider,
+                credential_mode=credential_mode,
+            )
+            base_url = settings.PUBLIC_BASE_URL.rstrip("/") if settings.PUBLIC_BASE_URL else ""
+            link = f"{base_url}/credentials/connect?token={token}"
+            return (
+                f"❌ 无法访问 {provider}：您尚未授权。\n"
+                f"请点击下方链接完成授权（10 分钟内有效）：\n"
+                f"👉 {link}"
+            )
+        except Exception as e:
+            logger.warning(f"[MCP] Failed to generate one-time token link: {e}")
+
+    return (
+        f"❌ 无法访问 {provider}：您尚未授权。"
+        f"请前往「个人设置 → 外部系统连接」完成授权。"
+    )
+
+
+async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None, user_id=None, session_id: str = "") -> str:
     """Execute a tool via MCP if it exists in the DB as an MCP tool."""
     try:
         from app.models.tool import Tool, AgentTool
@@ -3144,9 +3210,11 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None, user
                 return f"❌ 凭据解析失败: {str(e)[:200]}"
 
             if cred is None:
-                return (
-                    f"❌ 无法访问 {tool.required_credential_provider}：您尚未授权。"
-                    f"请前往「个人设置 → 外部系统连接」完成授权。"
+                return await _build_credential_guidance(
+                    provider=tool.required_credential_provider,
+                    user_id=user_id,
+                    tenant_id=_UUID(tenant_id_str),
+                    session_id=session_id,
                 )
 
             user_headers["X-Clawith-User-Token"] = cred.access_token
