@@ -17,6 +17,8 @@ import EnterpriseSettings from './pages/EnterpriseSettings';
 import InvitationCodes from './pages/InvitationCodes';
 import AdminCompanies from './pages/AdminCompanies';
 import SSOEntry from './pages/SSOEntry';
+import CredentialConnect from './pages/CredentialConnect';
+import ExternalConnections from './pages/ExternalConnections';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
     const token = useAuthStore((s) => s.token);
@@ -132,7 +134,7 @@ export default function App() {
         const urlParams = new URLSearchParams(window.location.search);
         const urlToken = urlParams.get('token');
         const currentPath = window.location.pathname;
-        const pathsWithOwnToken = ['/reset-password', '/verify-email'];
+        const pathsWithOwnToken = ['/reset-password', '/verify-email', '/credentials/connect'];
         let effectiveToken = token;
 
         if (urlToken && !pathsWithOwnToken.includes(currentPath)) {
@@ -181,6 +183,7 @@ export default function App() {
                 <Route path="/verify-email" element={<VerifyEmail />} />
                 <Route path="/sso/entry" element={<SSOEntry />} />
                 <Route path="/setup-company" element={<CompanySetup />} />
+                <Route path="/credentials/connect" element={<CredentialConnect />} />
                 <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
                     <Route index element={<Navigate to="/plaza" replace />} />
                     <Route path="dashboard" element={<Dashboard />} />
@@ -191,6 +194,7 @@ export default function App() {
                         The deprecated /agents/:id/chat path is intentionally removed. */}
                     <Route path="messages" element={<Messages />} />
                     <Route path="enterprise" element={<EnterpriseSettings />} />
+                    <Route path="external-connections" element={<ExternalConnections />} />
                     <Route path="invitations" element={<InvitationCodes />} />
                     <Route path="admin/platform-settings" element={<AdminCompanies />} />
                 </Route>

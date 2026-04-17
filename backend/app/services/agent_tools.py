@@ -2397,7 +2397,7 @@ async def execute_tool(
             result = await _install_skill(agent_id, ws, arguments)
         else:
             # Try MCP tool execution
-            result = await _execute_mcp_tool(tool_name, arguments, agent_id=agent_id)
+            result = await _execute_mcp_tool(tool_name, arguments, agent_id=agent_id, user_id=user_id, session_id=session_id)
 
         # Log tool call activity (skip noisy read operations)
         if tool_name not in ("list_files", "read_file", "read_document"):
@@ -3085,7 +3085,83 @@ async def _send_file_via_slack(agent_id, config, file_path: Path, member_name: s
         return f"Failed to send file via Slack: {e}"
 
 
-async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None) -> str:
+def _parse_credential_scopes(s: str) -> set[str]:
+    """Normalize space or comma-separated scope strings into a set."""
+    from app.services.credential_resolver import parse_credential_scopes
+    return set(parse_credential_scopes(s))
+
+
+async def _build_credential_guidance(provider: str, user_id, tenant_id, session_id: str) -> str:
+    """Build channel-appropriate credential guidance message.
+
+    Web users are directed to settings. Channel users (feishu/dingtalk/wecom)
+    get a one-time token link to configure credentials without Clawith login.
+
+    Note: messages are in Chinese because they are returned to the LLM as tool
+    output, which the Agent then relays to end users. Developer-facing errors
+    (HTTP exceptions, log lines) remain in English.
+    """
+    source_channel = "web"
+    credential_mode = "manual"
+
+    if session_id:
+        try:
+            from app.models.chat_session import ChatSession
+            # Single DB session for both channel lookup and OAuth config check
+            async with async_session() as db:
+                r = await db.execute(
+                    select(ChatSession.source_channel).where(ChatSession.id == session_id)
+                )
+                ch = r.scalar_one_or_none()
+                if ch:
+                    source_channel = ch
+
+                # Also check if OAuth is configured for this provider (used by channel flow)
+                if source_channel in ("feishu", "dingtalk", "wecom"):
+                    try:
+                        from app.models.oauth_provider_config import OAuthProviderConfig
+                        _r = await db.execute(
+                            select(OAuthProviderConfig).where(
+                                OAuthProviderConfig.tenant_id == tenant_id,
+                                OAuthProviderConfig.provider == provider,
+                            )
+                        )
+                        if _r.scalar_one_or_none():
+                            credential_mode = "oauth"
+                    except Exception as e:
+                        logger.warning(f"[MCP] Failed to check OAuth config for {provider}. Exception: {e}")
+        except Exception as e:
+            logger.warning(f"[MCP] Failed to look up chat session: {e}")
+
+    if source_channel in ("feishu", "dingtalk", "wecom"):
+        try:
+            from app.services.one_time_token import generate_one_time_token
+            from app.config import get_settings
+            settings = get_settings()
+
+            token = generate_one_time_token(
+                user_id=user_id,
+                tenant_id=tenant_id,
+                provider=provider,
+                credential_mode=credential_mode,
+            )
+            base_url = settings.PUBLIC_BASE_URL.rstrip("/") if settings.PUBLIC_BASE_URL else ""
+            link = f"{base_url}/credentials/connect?token={token}"
+            return (
+                f"❌ 无法访问 {provider}：您尚未授权。\n"
+                f"请点击下方链接完成授权（10 分钟内有效）：\n"
+                f"👉 {link}"
+            )
+        except Exception as e:
+            logger.warning(f"[MCP] Failed to generate one-time token link: {e}")
+
+    return (
+        f"❌ 无法访问 {provider}：您尚未授权。"
+        f"请前往「个人设置 → 外部系统连接」完成授权。"
+    )
+
+
+async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None, user_id=None, session_id: str = "") -> str:
     """Execute a tool via MCP if it exists in the DB as an MCP tool."""
     try:
         from app.models.tool import Tool, AgentTool
@@ -3127,10 +3203,77 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None) -> s
         if ".run.tools" in mcp_url and merged_config:
             return await _execute_via_smithery_connect(mcp_url, mcp_name, arguments, merged_config, agent_id=agent_id)
 
+        # ── Resolve user credential if tool requires one ──
+        user_headers = {}
+        if tool.required_credential_provider and user_id:
+            from app.services.credential_resolver import CredentialResolver, CredentialNotFoundError
+            resolver = CredentialResolver()
+            tenant_id_str = await _get_agent_tenant_id(agent_id)
+            if not tenant_id_str:
+                logger.warning(f"[MCP] Cannot resolve credential: agent {agent_id} has no tenant")
+                return f"❌ 无法解析凭据：Agent 未关联租户。"
+            try:
+                from uuid import UUID as _UUID
+                cred = await resolver.resolve(user_id, _UUID(tenant_id_str), tool.required_credential_provider)
+            except Exception as e:
+                logger.exception(f"[MCP] Credential resolution error for {tool.required_credential_provider}")
+                return f"❌ 凭据解析失败: {str(e)[:200]}"
+
+            if cred is None:
+                # Audit: credential not found
+                import asyncio
+                from app.services.audit_logger import write_audit_log
+                asyncio.create_task(write_audit_log(
+                    action="credential_resolve_fail",
+                    details={
+                        "provider": tool.required_credential_provider,
+                        "tool_name": tool_name,
+                        "reason": "not_found",
+                    },
+                    agent_id=agent_id,
+                    user_id=user_id,
+                ))
+                return await _build_credential_guidance(
+                    provider=tool.required_credential_provider,
+                    user_id=user_id,
+                    tenant_id=_UUID(tenant_id_str),
+                    session_id=session_id,
+                )
+
+            user_headers["X-Clawith-User-Token"] = cred.access_token
+            if cred.external_user_id:
+                user_headers["X-Clawith-User-Id"] = cred.external_user_id
+            if cred.scopes:
+                user_headers["X-Clawith-User-Scopes"] = ",".join(cred.scopes)
+
+            # Audit: credential resolved successfully
+            from app.services.audit_logger import write_audit_log
+            import asyncio
+            asyncio.create_task(write_audit_log(
+                action="credential_resolve",
+                details={
+                    "provider": tool.required_credential_provider,
+                    "tool_name": tool_name,
+                    "credential_source": cred.source,
+                    "credential_id": str(cred.credential_id),
+                },
+                agent_id=agent_id,
+                user_id=user_id,
+            ))
+
+            # ── Scope validation (provider-level) ──
+            required_scopes_str = (tool.config or {}).get("required_scopes", "")
+            if required_scopes_str and cred.scopes:
+                required_scopes = _parse_credential_scopes(required_scopes_str)
+                granted_scopes = set(cred.scopes)  # already a list[str] from ResolvedCredential
+                missing = required_scopes - granted_scopes
+                if missing:
+                    return (
+                        f"❌ 凭据权限不足：{tool.required_credential_provider} 需要以下权限 "
+                        f"{', '.join(missing)}，但当前授权未包含。请重新授权并勾选所需权限。"
+                    )
+
         # Direct MCP call for non-Smithery servers
-        # Priority for API key:
-        # 1. Per-agent tool config (api_key / atlassian_api_key)
-        # 2. Agent's Atlassian channel config (for atlassian_* tools)
         direct_api_key = merged_config.get("api_key") or merged_config.get("atlassian_api_key")
         if not direct_api_key and tool.mcp_server_name == "Atlassian Rovo":
             try:
@@ -3138,7 +3281,7 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None) -> s
                 direct_api_key = await get_atlassian_api_key_for_agent(agent_id)
             except Exception:
                 pass
-        client = MCPClient(mcp_url, api_key=direct_api_key)
+        client = MCPClient(mcp_url, api_key=direct_api_key, user_headers=user_headers)
         return await client.call_tool(mcp_name, arguments)
 
     except Exception as e:

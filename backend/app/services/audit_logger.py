@@ -64,6 +64,18 @@ class AuditAction(str, Enum):
     AGENT_START = "agent_start"
     AGENT_STOP = "agent_stop"
 
+    # External Credentials
+    CREDENTIAL_CREATE = "credential_create"
+    CREDENTIAL_DELETE = "credential_delete"
+    CREDENTIAL_UPDATE = "credential_update"
+    CREDENTIAL_RESOLVE = "credential_resolve"
+    CREDENTIAL_RESOLVE_FAIL = "credential_resolve_fail"
+    CREDENTIAL_OAUTH_START = "credential_oauth_start"
+    CREDENTIAL_OAUTH_COMPLETE = "credential_oauth_complete"
+    CREDENTIAL_TOKEN_REFRESH = "credential_token_refresh"
+    CREDENTIAL_TOKEN_REFRESH_FAIL = "credential_token_refresh_fail"
+    CREDENTIAL_EXPIRED = "credential_expired"
+
 
 async def write_audit_log(
     action: str,

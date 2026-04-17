@@ -40,6 +40,12 @@ class AgentTrigger(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # When this trigger fires, execute with this user's credentials.
+    # NULL falls back to agent.creator_id.
+    acting_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+
     __table_args__ = (
         UniqueConstraint("agent_id", "name", name="uq_agent_trigger_name"),
     )

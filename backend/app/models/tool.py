@@ -39,6 +39,10 @@ class Tool(Base):
     mcp_server_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     mcp_tool_name: Mapped[str | None] = mapped_column(String(200), nullable=True)  # tool name on the MCP server
 
+    # Credential requirement: provider name this tool needs (e.g. "jira", "github")
+    # None means the tool does not require per-user credentials
+    required_credential_provider: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)  # global toggle
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)  # auto-assigned to new agents
     source: Mapped[str] = mapped_column(String(20), default="builtin")  # "builtin" | "admin" | "agent"
