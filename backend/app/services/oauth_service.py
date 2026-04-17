@@ -62,6 +62,7 @@ def generate_oauth_state(
     provider: str,
     one_time_token: str | None = None,
     flow: str = "web",
+    agent_id: uuid.UUID | None = None,
 ) -> str:
     """Generate a signed state parameter for OAuth authorization.
 
@@ -85,6 +86,8 @@ def generate_oauth_state(
     }
     if one_time_token:
         payload["ott"] = one_time_token  # carry the one-time-token for channel flow
+    if agent_id:
+        payload["agent_id"] = str(agent_id)
     return jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
 
 
@@ -115,12 +118,15 @@ async def validate_oauth_state(state: str) -> dict:
     if not await _consume_state(jti):
         raise ValueError("OAuth state has already been used")
 
-    return {
+    result = {
         "user_id": uuid.UUID(payload["user_id"]),
         "tenant_id": uuid.UUID(payload["tenant_id"]),
         "provider": payload["provider"],
         "flow": payload.get("flow", "web"),
     }
+    if payload.get("agent_id"):
+        result["agent_id"] = uuid.UUID(payload["agent_id"])
+    return result
 
 
 async def exchange_code_for_tokens(

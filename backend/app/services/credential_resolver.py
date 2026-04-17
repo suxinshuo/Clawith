@@ -306,6 +306,17 @@ class CredentialResolver:
         now = datetime.now(timezone.utc)
 
         try:
+            # ── Feishu-specific refresh ──────────────────────────────────
+            if provider.startswith("feishu:"):
+                return await self._do_refresh_feishu(
+                    credential_id=credential_id,
+                    provider=provider,
+                    tenant_id=tenant_id,
+                    refresh_token_encrypted=refresh_token_encrypted,
+                    table_class=table_class,
+                )
+
+            # ── Generic OAuth refresh (existing logic) ──────────────────
             from app.models.oauth_provider_config import OAuthProviderConfig
             from sqlalchemy import select as sa_select
 
@@ -379,6 +390,122 @@ class CredentialResolver:
                 details={"provider": provider, "error": str(e)[:200]},
             ))
             # mark credential as needs_reauth instead of returning expired token
+            try:
+                from sqlalchemy import update
+                async with async_session() as db:
+                    await db.execute(
+                        update(table_class)
+                        .where(table_class.id == credential_id)
+                        .values(status="needs_reauth")
+                    )
+                    await db.commit()
+            except Exception:
+                logger.debug(f"[CredentialResolver] Failed to mark needs_reauth for {credential_id}")
+            return None
+
+    async def _do_refresh_feishu(
+        self,
+        *,
+        credential_id: UUID,
+        provider: str,
+        tenant_id: UUID,
+        refresh_token_encrypted: str,
+        table_class: _CredentialTable,
+    ) -> str | None:
+        """Feishu-specific token refresh using OIDC refresh endpoint.
+
+        Feishu requires app_access_token as Bearer auth (not client_id/secret in body).
+        The agent_id is extracted from the provider string "feishu:{agent_id}".
+        """
+        import httpx
+        from datetime import datetime, timedelta, timezone
+
+        settings = get_settings()
+        now = datetime.now(timezone.utc)
+
+        try:
+            # Extract agent_id from provider
+            agent_id_str = provider.split(":", 1)[1]
+            agent_id = UUID(agent_id_str)
+
+            # Get app credentials from ChannelConfig
+            from app.models.channel_config import ChannelConfig
+            async with async_session() as db:
+                result = await db.execute(
+                    select(ChannelConfig).where(
+                        ChannelConfig.agent_id == agent_id,
+                        ChannelConfig.channel_type == "feishu",
+                    )
+                )
+                config = result.scalar_one_or_none()
+                if not config or not config.app_id or not config.app_secret:
+                    logger.warning(f"[CredentialResolver] No Feishu config for agent={agent_id}")
+                    return None
+
+                app_id = config.app_id
+                app_secret = config.app_secret
+
+            # Get app_access_token
+            from app.services.feishu_service import feishu_service
+            app_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
+
+            # Decrypt refresh token
+            refresh_token = decrypt_data(refresh_token_encrypted, settings.SECRET_KEY)
+
+            # Call Feishu OIDC refresh
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    "https://open.feishu.cn/open-apis/authen/v1/oidc/refresh_access_token",
+                    json={"grant_type": "refresh_token", "refresh_token": refresh_token},
+                    headers={"Authorization": f"Bearer {app_token}", "Content-Type": "application/json"},
+                )
+
+            data = resp.json()
+            if data.get("code") != 0:
+                raise ValueError(f"Feishu refresh failed: {data.get('msg', 'unknown')}")
+
+            token_data = data.get("data", {})
+            new_access_token = token_data["access_token"]
+            new_refresh_token = token_data.get("refresh_token", "")
+            expires_in = token_data.get("expires_in", 7200)
+
+            # Update stored tokens
+            from app.core.security import encrypt_data
+            from sqlalchemy import update
+            async with async_session() as db:
+                update_values = {
+                    "access_token_encrypted": encrypt_data(new_access_token, settings.SECRET_KEY),
+                    "token_expires_at": now + timedelta(seconds=expires_in) if expires_in else None,
+                    "status": "active",
+                }
+                if new_refresh_token:
+                    update_values["refresh_token_encrypted"] = encrypt_data(new_refresh_token, settings.SECRET_KEY)
+
+                await db.execute(
+                    update(table_class)
+                    .where(table_class.id == credential_id)
+                    .values(**update_values)
+                )
+                await db.commit()
+
+            # Audit
+            from app.services.audit_logger import write_audit_log
+            asyncio.create_task(write_audit_log(
+                action="credential_token_refresh",
+                details={"provider": provider, "credential_id": str(credential_id), "method": "feishu_oidc"},
+            ))
+
+            logger.info(f"[CredentialResolver] Feishu token refreshed for provider={provider}")
+            return new_access_token
+
+        except Exception as e:
+            logger.exception(f"[CredentialResolver] Feishu token refresh failed for provider={provider}")
+            from app.services.audit_logger import write_audit_log
+            asyncio.create_task(write_audit_log(
+                action="credential_token_refresh_fail",
+                details={"provider": provider, "error": str(e)[:200], "method": "feishu_oidc"},
+            ))
+            # Mark as needs_reauth
             try:
                 from sqlalchemy import update
                 async with async_session() as db:
