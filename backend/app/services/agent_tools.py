@@ -2081,6 +2081,18 @@ async def _execute_tool_direct(
             if not path:
                 return "Missing path"
             return _write_file(ws, path, content, tenant_id=_agent_tenant_id)
+        elif tool_name == "edit_file":
+            path = arguments.get("path")
+            old_string = arguments.get("old_string")
+            new_string = arguments.get("new_string")
+            if not path:
+                return "Missing path"
+            if old_string is None:
+                return "Missing old_string"
+            if new_string is None:
+                return "Missing new_string"
+            replace_all = arguments.get("replace_all", False)
+            return _edit_file(ws, path, old_string, new_string, replace_all=replace_all, tenant_id=_agent_tenant_id)
         elif tool_name in ("execute_code", "execute_code_e2b"):
             logger.info(f"[DirectTool] Executing code ({tool_name}) with arguments: {arguments}")
             return await _execute_code(agent_id, ws, arguments, tool_name=tool_name)
