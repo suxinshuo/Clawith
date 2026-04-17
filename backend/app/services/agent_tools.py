@@ -3087,7 +3087,8 @@ async def _send_file_via_slack(agent_id, config, file_path: Path, member_name: s
 
 def _parse_credential_scopes(s: str) -> set[str]:
     """Normalize space or comma-separated scope strings into a set."""
-    return {p.strip() for p in s.replace(",", " ").split() if p.strip()}
+    from app.services.credential_resolver import parse_credential_scopes
+    return set(parse_credential_scopes(s))
 
 
 async def _build_credential_guidance(provider: str, user_id, tenant_id, session_id: str) -> str:
@@ -3095,6 +3096,10 @@ async def _build_credential_guidance(provider: str, user_id, tenant_id, session_
 
     Web users are directed to settings. Channel users (feishu/dingtalk/wecom)
     get a one-time token link to configure credentials without Clawith login.
+
+    Note: messages are in Chinese because they are returned to the LLM as tool
+    output, which the Agent then relays to end users. Developer-facing errors
+    (HTTP exceptions, log lines) remain in English.
     """
     source_channel = "web"
     credential_mode = "manual"
@@ -3123,10 +3128,10 @@ async def _build_credential_guidance(provider: str, user_id, tenant_id, session_
                         )
                         if _r.scalar_one_or_none():
                             credential_mode = "oauth"
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                    except Exception as e:
+                        logger.warning(f"[MCP] Failed to check OAuth config for {provider}. Exception: {e}")
+        except Exception as e:
+            logger.warning(f"[MCP] Failed to look up chat session: {e}")
 
     if source_channel in ("feishu", "dingtalk", "wecom"):
         try:

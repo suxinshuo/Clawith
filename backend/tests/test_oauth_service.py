@@ -12,30 +12,45 @@ from app.services.oauth_service import (
     exchange_code_for_tokens,
     refresh_access_token,
     OAuthTokens,
+    _consumed_states,
 )
 
 
+@pytest.fixture(autouse=True)
+def clear_consumed_states():
+    """Clear in-memory state store between tests."""
+    _consumed_states.clear()
+    yield
+    _consumed_states.clear()
+
+
 class TestOAuthState:
-    def test_generate_and_validate_state(self):
+    @pytest.mark.asyncio
+    async def test_generate_and_validate_state(self):
         user_id = uuid.uuid4()
         tenant_id = uuid.uuid4()
         state = generate_oauth_state(user_id, tenant_id, "github", flow="web")
-        payload = validate_oauth_state(state)
+
+        payload = await validate_oauth_state(state)
+
         assert payload["user_id"] == user_id
         assert payload["tenant_id"] == tenant_id
         assert payload["provider"] == "github"
         assert payload["flow"] == "web"
 
-    def test_validate_rejects_invalid_state(self):
+    @pytest.mark.asyncio
+    async def test_validate_rejects_invalid_state(self):
         with pytest.raises(ValueError, match="Invalid"):
-            validate_oauth_state("invalid-garbage")
+            await validate_oauth_state("invalid-garbage")
 
-    def test_validate_rejects_consumed_state(self):
+    @pytest.mark.asyncio
+    async def test_validate_rejects_consumed_state(self):
         user_id = uuid.uuid4()
         state = generate_oauth_state(user_id, uuid.uuid4(), "github")
-        validate_oauth_state(state)  # first use
+
+        await validate_oauth_state(state)  # first use
         with pytest.raises(ValueError, match="already been used"):
-            validate_oauth_state(state)  # second use
+            await validate_oauth_state(state)  # second use
 
 
 class TestTokenExchange:

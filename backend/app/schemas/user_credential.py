@@ -3,8 +3,12 @@
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
+
+CredentialType = Literal["api_key", "oauth2", "basic_auth", "custom"]
+CredentialStatus = Literal["active", "expired", "needs_reauth", "revoked"]
 
 
 class UserCredentialCreate(BaseModel):
@@ -12,7 +16,7 @@ class UserCredentialCreate(BaseModel):
 
     provider: str = Field(..., min_length=1, max_length=100, description="Provider identifier, e.g. 'jira', 'github'")
     access_token: str = Field(..., min_length=1, description="API key or access token (will be encrypted)")
-    credential_type: str = Field(default="api_key", description="api_key | oauth2 | basic_auth | custom")
+    credential_type: CredentialType = Field(default="api_key")
     display_name: str | None = Field(default=None, max_length=200)
     external_user_id: str | None = Field(default=None, max_length=200)
     external_username: str | None = Field(default=None, max_length=200)
@@ -45,7 +49,7 @@ class UserCredentialUpdate(BaseModel):
     external_user_id: str | None = None
     external_username: str | None = None
     scopes: str | None = None
-    status: str | None = None
+    status: CredentialStatus | None = None
 
 
 class TenantCredentialCreate(BaseModel):
@@ -53,7 +57,7 @@ class TenantCredentialCreate(BaseModel):
 
     provider: str = Field(..., min_length=1, max_length=100)
     access_token: str = Field(..., min_length=1)
-    credential_type: str = Field(default="api_key")
+    credential_type: CredentialType = Field(default="api_key")
     display_name: str | None = Field(default=None, max_length=200)
     scopes: str | None = Field(default=None, max_length=500)
 

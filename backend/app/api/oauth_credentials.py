@@ -96,7 +96,7 @@ async def oauth_start_via_token(
     Validates the one-time token, then redirects to the external OAuth page.
     """
     try:
-        payload = validate_one_time_token(token)
+        payload = await validate_one_time_token(token)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -135,8 +135,8 @@ async def oauth_start_via_token(
 
 @router.get("/callback")
 async def oauth_callback(
-    code: str = Query(...),
-    state: str = Query(...),
+    code: str = Query(..., min_length=1, max_length=4096),
+    state: str = Query(..., min_length=1),
     db: AsyncSession = Depends(get_db),
 ):
     """OAuth callback — exchange code for tokens and store credential.
@@ -144,7 +144,7 @@ async def oauth_callback(
     Handles both web-user and channel-user flows (distinguished by state payload).
     """
     try:
-        state_payload = validate_oauth_state(state)
+        state_payload = await validate_oauth_state(state)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Invalid OAuth state: {e}")
 

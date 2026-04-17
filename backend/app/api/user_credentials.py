@@ -181,7 +181,7 @@ async def submit_credential_via_token(
     Used by channel users (Feishu/DingTalk/WeCom) who don't have a Clawith Web login.
     """
     try:
-        payload = validate_one_time_token(data.token)
+        payload = await validate_one_time_token(data.token)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

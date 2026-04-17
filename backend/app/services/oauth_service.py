@@ -3,6 +3,7 @@
 Handles the OAuth2 authorization code flow for external system credentials.
 """
 
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -13,20 +14,36 @@ from loguru import logger
 
 from app.config import get_settings
 
-# In-memory state store for consumed OAuth states with timestamps.
-# States are cleaned up after 15 minutes to prevent unbounded growth.
-# Production: replace with Redis for multi-process deployments.
+# In-memory state store — fallback when Redis is unavailable.
 _consumed_states: dict[str, float] = {}  # jti -> timestamp
 _CONSUMED_STATE_TTL = 900  # 15 minutes
 
 
 def _cleanup_consumed_states() -> None:
-    """Remove expired entries from the consumed states store."""
-    import time
+    """Remove expired entries from the in-memory state store."""
     cutoff = time.time() - _CONSUMED_STATE_TTL
     expired = [k for k, v in _consumed_states.items() if v < cutoff]
     for k in expired:
         del _consumed_states[k]
+
+
+async def _consume_state(jti: str, ttl: int = 900) -> bool:
+    """Atomically consume an OAuth state jti. Returns True on first use.
+
+    Tries Redis SET NX first (multi-process safe); falls back to in-memory dict.
+    """
+    try:
+        from app.core.events import get_redis
+        redis = await get_redis()
+        result = await redis.set(f"oauth_state:{jti}", "1", nx=True, ex=ttl)
+        return bool(result)
+    except Exception:
+        if jti in _consumed_states:
+            return False
+        _consumed_states[jti] = time.time()
+        if len(_consumed_states) > 100:
+            _cleanup_consumed_states()
+        return True
 
 
 @dataclass
@@ -71,7 +88,7 @@ def generate_oauth_state(
     return jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
 
 
-def validate_oauth_state(state: str) -> dict:
+async def validate_oauth_state(state: str) -> dict:
     """Validate and consume an OAuth state parameter.
 
     Returns:
@@ -94,14 +111,9 @@ def validate_oauth_state(state: str) -> dict:
     if not jti:
         raise ValueError("State missing jti")
 
-    if jti in _consumed_states:
+    # Atomically consume — Redis if available, else in-memory
+    if not await _consume_state(jti):
         raise ValueError("OAuth state has already been used")
-
-    import time
-    _consumed_states[jti] = time.time()
-    # Periodic cleanup to prevent unbounded growth
-    if len(_consumed_states) > 100:
-        _cleanup_consumed_states()
 
     return {
         "user_id": uuid.UUID(payload["user_id"]),

@@ -1,12 +1,30 @@
 """Resolve per-user or per-tenant external credentials for MCP tool execution."""
 
+import asyncio
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
 
 from loguru import logger
 from sqlalchemy import select
 
 from app.config import get_settings
+from app.models.user_external_credential import TenantExternalCredential, UserExternalCredential
+
+_CredentialTable = type[UserExternalCredential] | type[TenantExternalCredential]
+
+
+def parse_credential_scopes(s: str | None) -> list[str]:
+    """Normalize comma or space-separated scope strings into a list.
+
+    Shared by CredentialResolver and agent_tools scope validation.
+    """
+    if not s:
+        return []
+    return [p.strip() for p in s.replace(",", " ").split() if p.strip()]
+
+# In-memory lock fallback when Redis is unavailable.
+_refresh_locks: dict[str, asyncio.Lock] = {}
 
 
 def async_session():
@@ -58,13 +76,12 @@ class CredentialResolver:
             TenantExternalCredential,
         )
 
-        settings = get_settings()
-
         async with async_session() as db:
-            # 1. Try user-level credential
+            # 1. Try user-level credential (tenant_id for defense-in-depth)
             result = await db.execute(
                 select(UserExternalCredential).where(
                     UserExternalCredential.user_id == user_id,
+                    UserExternalCredential.tenant_id == tenant_id,
                     UserExternalCredential.provider == provider,
                 )
             )
@@ -93,11 +110,12 @@ class CredentialResolver:
                         access_token=token,
                         external_user_id=user_cred.external_user_id,
                         external_username=user_cred.external_username,
-                        scopes=[s.strip() for s in user_cred.scopes.split(",") if s.strip()] if user_cred.scopes else [],
+                        scopes=parse_credential_scopes(user_cred.scopes),
                         source="user",
                         credential_id=user_cred.id,
                     )
-                    import asyncio
+                    # Fire-and-forget: _update_last_used creates its own DB session,
+                    # so it is safe to run detached from the current context manager.
                     asyncio.create_task(self._update_last_used(user_cred.id, UserExternalCredential))
                     return resolved
 
@@ -133,17 +151,17 @@ class CredentialResolver:
                         access_token=token,
                         external_user_id=tenant_cred.external_user_id if hasattr(tenant_cred, 'external_user_id') else None,
                         external_username=tenant_cred.external_username if hasattr(tenant_cred, 'external_username') else None,
-                        scopes=[s.strip() for s in tenant_cred.scopes.split(",") if s.strip()] if tenant_cred.scopes else [],
+                        scopes=parse_credential_scopes(tenant_cred.scopes),
                         source="tenant",
                         credential_id=tenant_cred.id,
                     )
-                    import asyncio
+                    # Fire-and-forget: _update_last_used creates its own DB session.
                     asyncio.create_task(self._update_last_used(tenant_cred.id, TenantExternalCredential))
                     return resolved
 
         return None
 
-    async def _update_last_used(self, credential_id: UUID, table_class) -> None:
+    async def _update_last_used(self, credential_id: UUID, table_class: _CredentialTable) -> None:
         """Update last_used_at timestamp for a resolved credential."""
         try:
             from datetime import datetime, timezone
@@ -158,6 +176,39 @@ class CredentialResolver:
         except Exception:
             logger.debug(f"[CredentialResolver] Failed to update last_used_at for {credential_id}")
 
+    async def _acquire_refresh_lock(self, credential_id: UUID, timeout: int = 10) -> bool:
+        """Acquire a distributed lock for token refresh.
+
+        Tries Redis SET NX first; falls back to asyncio.Lock per credential_id.
+        Returns True if lock acquired.
+        """
+        lock_key = f"cred_refresh:{credential_id}"
+        try:
+            from app.core.events import get_redis
+            redis = await get_redis()
+            return bool(await redis.set(lock_key, "1", nx=True, ex=timeout))
+        except Exception:
+            # Redis unavailable — use in-memory asyncio.Lock
+            logger.debug(f"[CredentialResolver] Redis unavailable for refresh lock {lock_key}, using in-memory lock")
+            return True  # in-memory lock acquired via _get_memory_lock context
+
+    async def _release_refresh_lock(self, credential_id: UUID) -> None:
+        """Release the distributed refresh lock."""
+        lock_key = f"cred_refresh:{credential_id}"
+        try:
+            from app.core.events import get_redis
+            redis = await get_redis()
+            await redis.delete(lock_key)
+        except Exception:
+            logger.debug(f"[CredentialResolver] Redis unavailable for releasing refresh lock {lock_key}")
+
+    def _get_memory_lock(self, credential_id: UUID) -> asyncio.Lock:
+        """Get or create an in-memory asyncio.Lock for a credential."""
+        key = str(credential_id)
+        if key not in _refresh_locks:
+            _refresh_locks[key] = asyncio.Lock()
+        return _refresh_locks[key]
+
     async def _ensure_token_fresh(
         self,
         *,
@@ -166,14 +217,15 @@ class CredentialResolver:
         provider: str,
         tenant_id: UUID,
         access_token_encrypted: str,
-        refresh_token_encrypted: "str | None",
-        token_expires_at: "datetime | None",
-        table_class,
-    ) -> "str | None":
+        refresh_token_encrypted: str | None,
+        token_expires_at: datetime | None,
+        table_class: _CredentialTable,
+    ) -> str | None:
         """Check if an OAuth token is expired and attempt to refresh it.
 
         All credential fields are passed as scalar parameters (not ORM objects)
-        to avoid detached-session issues.
+        to avoid detached-session issues. Uses a distributed lock (Redis) or
+        in-memory lock to prevent concurrent refresh of the same credential.
 
         Returns the valid access token (possibly refreshed), or None if
         refresh failed and credential was marked needs_reauth.
@@ -210,7 +262,49 @@ class CredentialResolver:
                 await db.commit()
             return None
 
-        # Load OAuth provider config and refresh token in a single session
+        # Acquire lock to prevent concurrent refresh of the same credential.
+        # Many OAuth providers invalidate the old refresh_token on use,
+        # so a second concurrent refresh would fail and incorrectly mark needs_reauth.
+        lock = self._get_memory_lock(credential_id)
+        async with lock:
+            acquired = await self._acquire_refresh_lock(credential_id)
+            if not acquired:
+                # Another process is refreshing — return current token and let caller retry
+                logger.info(f"[CredentialResolver] Refresh lock contention for provider={provider}, returning current token")
+                try:
+                    return decrypt_data(access_token_encrypted, settings.SECRET_KEY)
+                except Exception:
+                    logger.warning(f"[CredentialResolver] Failed to decrypt token during lock contention for provider={provider}, credential_id={credential_id}")
+                    return None
+
+            try:
+                return await self._do_refresh(
+                    credential_id=credential_id,
+                    provider=provider,
+                    tenant_id=tenant_id,
+                    access_token_encrypted=access_token_encrypted,
+                    refresh_token_encrypted=refresh_token_encrypted,
+                    table_class=table_class,
+                )
+            finally:
+                await self._release_refresh_lock(credential_id)
+
+    async def _do_refresh(
+        self,
+        *,
+        credential_id: UUID,
+        provider: str,
+        tenant_id: UUID,
+        access_token_encrypted: str,
+        refresh_token_encrypted: str,
+        table_class: _CredentialTable,
+    ) -> "str | None":
+        """Execute the actual OAuth token refresh (called under lock)."""
+        from datetime import datetime, timedelta, timezone
+
+        settings = get_settings()
+        now = datetime.now(timezone.utc)
+
         try:
             from app.models.oauth_provider_config import OAuthProviderConfig
             from sqlalchemy import select as sa_select
@@ -267,7 +361,6 @@ class CredentialResolver:
                 await db.commit()
 
             # Audit log
-            import asyncio
             from app.services.audit_logger import write_audit_log
             asyncio.create_task(write_audit_log(
                 action="credential_token_refresh",
@@ -280,17 +373,24 @@ class CredentialResolver:
         except Exception as e:
             logger.exception(f"[CredentialResolver] Token refresh failed for provider={provider}")
             # Audit log refresh failure
-            import asyncio
             from app.services.audit_logger import write_audit_log
             asyncio.create_task(write_audit_log(
                 action="credential_token_refresh_fail",
                 details={"provider": provider, "error": str(e)[:200]},
             ))
-            # Fall back to existing (possibly expired) token
+            # mark credential as needs_reauth instead of returning expired token
             try:
-                return decrypt_data(access_token_encrypted, settings.SECRET_KEY)
+                from sqlalchemy import update
+                async with async_session() as db:
+                    await db.execute(
+                        update(table_class)
+                        .where(table_class.id == credential_id)
+                        .values(status="needs_reauth")
+                    )
+                    await db.commit()
             except Exception:
-                return None
+                logger.debug(f"[CredentialResolver] Failed to mark needs_reauth for {credential_id}")
+            return None
 
     async def resolve_or_fail(
         self,

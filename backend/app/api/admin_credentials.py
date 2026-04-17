@@ -66,7 +66,13 @@ async def create_oauth_provider(
         created_by=current_user.id,
     )
     db.add(config)
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        if "uq_oauth_provider_config" in str(e):
+            raise HTTPException(status_code=409, detail=f"OAuth provider '{data.provider}' already configured for this tenant")
+        raise
     await db.refresh(config)
     return OAuthProviderResponse.model_validate(config)
 

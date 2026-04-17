@@ -4,6 +4,7 @@ Used by channel users (Feishu/DingTalk/WeCom) who don't have a Clawith Web login
 to configure credentials via a standalone browser page.
 """
 
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -12,9 +13,37 @@ from loguru import logger
 
 from app.config import get_settings
 
-# In-memory jti store for consumed tokens.
-# Production: replace with Redis SET NX or DB table for multi-process deployments.
-_consumed_jtis: set[str] = set()
+# In-memory jti store with timestamps — fallback when Redis is unavailable.
+_consumed_jtis: dict[str, float] = {}  # jti -> consumed timestamp
+_CONSUMED_JTI_TTL = 660  # 11 minutes (slightly longer than JWT TTL of 10 min)
+
+
+def _cleanup_consumed_jtis() -> None:
+    """Remove expired entries from the in-memory jti store."""
+    cutoff = time.time() - _CONSUMED_JTI_TTL
+    expired = [k for k, v in _consumed_jtis.items() if v < cutoff]
+    for k in expired:
+        del _consumed_jtis[k]
+
+
+async def _consume_jti(jti: str, ttl: int = 660) -> bool:
+    """Atomically consume a jti. Returns True if first consumption, False if replay.
+
+    Tries Redis SET NX first (multi-process safe); falls back to in-memory dict.
+    """
+    try:
+        from app.core.events import get_redis
+        redis = await get_redis()
+        result = await redis.set(f"ott_jti:{jti}", "1", nx=True, ex=ttl)
+        return bool(result)
+    except Exception:
+        # Redis unavailable — fall back to in-memory (still safe in single-process)
+        if jti in _consumed_jtis:
+            return False
+        _consumed_jtis[jti] = time.time()
+        if len(_consumed_jtis) > 100:
+            _cleanup_consumed_jtis()
+        return True
 
 
 def generate_one_time_token(
@@ -50,7 +79,7 @@ def generate_one_time_token(
     return jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
 
 
-def validate_one_time_token(token: str) -> dict:
+async def validate_one_time_token(token: str) -> dict:
     """Validate and consume a one-time credential token.
 
     Args:
@@ -76,12 +105,9 @@ def validate_one_time_token(token: str) -> dict:
     if not jti:
         raise ValueError("Token missing jti")
 
-    # Check if already consumed
-    if jti in _consumed_jtis:
+    # Atomically consume — Redis if available, else in-memory
+    if not await _consume_jti(jti):
         raise ValueError("Token has already been used")
-
-    # Mark as consumed
-    _consumed_jtis.add(jti)
 
     return {
         "user_id": uuid.UUID(payload["user_id"]),
