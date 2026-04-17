@@ -29,6 +29,7 @@ import {
     IconSwitchHorizontal,
     IconChevronRight,
     IconCheck,
+    IconLink,
 } from '@tabler/icons-react';
 import { useAppStore } from '../stores';
 
@@ -747,6 +748,10 @@ export default function Layout() {
                                     <button className="account-dropdown-item" onClick={() => { setShowAccountSettings(true); setShowAccountMenu(false); }}>
                                         <IconUser size={15} stroke={1.5} />
                                         <span>{isChinese ? '账户设置' : 'Account Settings'}</span>
+                                    </button>
+                                    <button className="account-dropdown-item" onClick={() => { navigate('/external-connections'); setShowAccountMenu(false); }}>
+                                        <IconLink size={15} stroke={1.5} />
+                                        <span>{isChinese ? '外部系统连接' : 'External Connections'}</span>
                                     </button>
                                     <div style={{ height: '1px', background: 'var(--border-subtle)', margin: '4px 0' }} />
                                     <button className="account-dropdown-item account-dropdown-danger" onClick={() => { handleLogout(); setShowAccountMenu(false); }}>

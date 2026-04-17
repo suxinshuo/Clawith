@@ -110,10 +110,10 @@ export default function CredentialConnect() {
             style={{
               width: '100%',
               padding: '8px 12px',
-              border: '1px solid #333',
+              border: '1px solid #d1d5db',
               borderRadius: 6,
-              background: '#1a1a1a',
-              color: '#fff',
+              background: '#fff',
+              color: '#111',
               fontSize: 14,
             }}
           />
@@ -131,10 +131,10 @@ export default function CredentialConnect() {
             style={{
               width: '100%',
               padding: '8px 12px',
-              border: '1px solid #333',
+              border: '1px solid #d1d5db',
               borderRadius: 6,
-              background: '#1a1a1a',
-              color: '#fff',
+              background: '#fff',
+              color: '#111',
               fontSize: 14,
             }}
           />

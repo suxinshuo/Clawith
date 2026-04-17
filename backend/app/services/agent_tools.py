@@ -2034,6 +2034,7 @@ async def _sync_tasks_to_file(agent_id: uuid.UUID, ws: Path):
 # Mapping from tool_name to autonomy action_type
 _TOOL_AUTONOMY_MAP = {
     "write_file": "write_workspace_files",
+    "edit_file": "write_workspace_files",
     "delete_file": "delete_files",
     "send_feishu_message": "send_feishu_message",
     "send_message_to_agent": "send_feishu_message",
@@ -3256,7 +3257,7 @@ async def _build_credential_guidance(provider: str, user_id, tenant_id, session_
 
     return (
         f"❌ 无法访问 {provider}：您尚未授权。"
-        f"请前往「个人设置 → 外部系统连接」完成授权。"
+        f"请点击左下角头像，进入「外部系统连接」完成授权。"
     )
 
 
