@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from app.services.org_sync_adapter import BaseOrgSyncAdapter, ExternalUser, FeishuOrgSyncAdapter
@@ -77,8 +78,10 @@ async def test_fetch_department_info_returns_detail():
     assert result["name"] == "Data Platform"
     assert result["parent_department_id"] == "od-parent"
     assert result["member_count"] == 5
-    call_url = mock_client.get.call_args[0][0]
-    assert "departments/od-aaa" in call_url
+    call_kwargs = mock_client.get.call_args[1]
+    assert "departments/od-aaa" in mock_client.get.call_args[0][0]
+    assert call_kwargs["headers"]["Authorization"] == "Bearer fake_token"
+    assert call_kwargs["params"]["department_id_type"] == "open_department_id"
 
 
 @pytest.mark.asyncio
@@ -89,6 +92,17 @@ async def test_fetch_department_info_returns_none_on_error():
         "code": 40004,
         "msg": "no dept authority",
     })
+
+    result = await adapter.fetch_department_info("od-aaa", "fake_token", mock_client)
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_department_info_returns_none_on_transport_error():
+    adapter = _make_feishu_adapter()
+    mock_client = AsyncMock()
+    mock_client.get.side_effect = httpx.ConnectError("connection refused")
 
     result = await adapter.fetch_department_info("od-aaa", "fake_token", mock_client)
 
