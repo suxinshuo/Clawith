@@ -131,6 +131,7 @@ class ToolCreate(BaseModel):
     mcp_server_name: str | None = None
     mcp_tool_name: str | None = None
     is_default: bool = False
+    required_credential_provider: str | None = None
     # Optional: platform admins can specify target tenant (e.g. when managing
     # another company's tools via the Enterprise Settings page).
     tenant_id: str | None = None
@@ -146,6 +147,7 @@ class ToolUpdate(BaseModel):
     parameters_schema: dict | None = None
     is_default: bool | None = None
     config: dict | None = None
+    required_credential_provider: str | None = None
 
 
 class AgentToolUpdate(BaseModel):
@@ -195,6 +197,7 @@ async def list_tools(
             # Decrypt config for the admin UI so saved values are readable
             "config": _decrypt_sensitive_fields(t.config or {}, t.config_schema),
             "config_schema": t.config_schema or {},
+            "required_credential_provider": t.required_credential_provider,
             "created_at": t.created_at.isoformat() if t.created_at else None,
         }
         for t in tools
@@ -243,6 +246,7 @@ async def create_tool(
         mcp_server_name=data.mcp_server_name,
         mcp_tool_name=data.mcp_tool_name,
         is_default=data.is_default,
+        required_credential_provider=data.required_credential_provider,
         tenant_id=target_tenant_id,
         source="admin",
     )
@@ -270,13 +274,80 @@ async def update_tools_bulk(
     tool_ids = [uuid.UUID(u.tool_id) for u in updates]
     result = await db.execute(select(Tool).where(Tool.id.in_(tool_ids)))
     tools_map = {str(t.id): t for t in result.scalars().all()}
-    
+
     for update in updates:
         if update.tool_id in tools_map:
             tools_map[update.tool_id].enabled = update.enabled
-            
+
     await db.commit()
     return {"ok": True}
+
+
+# ─── MCP Server-level Credential Management ────────────────
+class MCPServerUpdate(BaseModel):
+    server_name: str            # Identifies which server's tools to update
+    server_url: str             # New MCP server URL (may contain embedded key)
+    api_key: str | None = None  # Optional standalone Bearer key
+    required_credential_provider: str | None = None  # Set for all tools from this server
+    # Target tenant (platform admins may manage another company's tools)
+    tenant_id: str | None = None
+
+
+@router.put("/mcp-server")
+async def update_mcp_server(
+    data: MCPServerUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk-update the Server URL and API Key for all tools from an MCP server.
+
+    All tools sharing the same mcp_server_name under the target tenant are
+    updated atomically. The API Key is stored encrypted in tool.config so
+    the agent runner can resolve it at execution time without re-configuring
+    each tool individually.
+
+    Authentication priority at runtime (handled by MCPClient):
+    1. tool.config['api_key'] — sent as Authorization: Bearer header.
+    2. URL query param (e.g. ?tavilyApiKey=xxx) — extracted from the URL
+       and converted to Bearer by MCPClient automatically.
+    """
+    # Resolve target tenant
+    target_tenant_id: uuid.UUID | None = None
+    if data.tenant_id:
+        try:
+            target_tenant_id = uuid.UUID(data.tenant_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid tenant_id format")
+    else:
+        target_tenant_id = current_user.tenant_id
+
+    # Load all tools from this server under the target tenant
+    result = await db.execute(
+        select(Tool).where(
+            Tool.mcp_server_name == data.server_name,
+            Tool.tenant_id == target_tenant_id,
+        )
+    )
+    tools = result.scalars().all()
+    if not tools:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No tools found for server '{data.server_name}'",
+        )
+
+    for tool in tools:
+        tool.mcp_server_url = data.server_url
+        if data.api_key is not None:
+            # Merge api_key into existing config (other keys preserved) and encrypt
+            current_config = dict(tool.config or {})
+            current_config["api_key"] = data.api_key
+            tool.config = _encrypt_sensitive_fields(current_config, tool.config_schema)
+        # If api_key is None (not provided), preserve the existing encrypted key
+        if data.required_credential_provider is not None:
+            tool.required_credential_provider = data.required_credential_provider or None
+
+    await db.commit()
+    return {"ok": True, "updated": len(tools)}
 
 
 @router.put("/{tool_id}")
@@ -420,71 +491,6 @@ async def test_mcp_connection(
         return {"ok": True, "tools": tools}
     except Exception as e:
         return {"ok": False, "error": str(e)[:300]}
-
-
-# ─── MCP Server-level Credential Management ────────────────
-class MCPServerUpdate(BaseModel):
-    server_name: str            # Identifies which server's tools to update
-    server_url: str             # New MCP server URL (may contain embedded key)
-    api_key: str | None = None  # Optional standalone Bearer key
-    # Target tenant (platform admins may manage another company's tools)
-    tenant_id: str | None = None
-
-
-@router.put("/mcp-server")
-async def update_mcp_server(
-    data: MCPServerUpdate,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Bulk-update the Server URL and API Key for all tools from an MCP server.
-
-    All tools sharing the same mcp_server_name under the target tenant are
-    updated atomically. The API Key is stored encrypted in tool.config so
-    the agent runner can resolve it at execution time without re-configuring
-    each tool individually.
-
-    Authentication priority at runtime (handled by MCPClient):
-    1. tool.config['api_key'] — sent as Authorization: Bearer header.
-    2. URL query param (e.g. ?tavilyApiKey=xxx) — extracted from the URL
-       and converted to Bearer by MCPClient automatically.
-    """
-    # Resolve target tenant
-    target_tenant_id: uuid.UUID | None = None
-    if data.tenant_id:
-        try:
-            target_tenant_id = uuid.UUID(data.tenant_id)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid tenant_id format")
-    else:
-        target_tenant_id = current_user.tenant_id
-
-    # Load all tools from this server under the target tenant
-    result = await db.execute(
-        select(Tool).where(
-            Tool.mcp_server_name == data.server_name,
-            Tool.tenant_id == target_tenant_id,
-        )
-    )
-    tools = result.scalars().all()
-    if not tools:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No tools found for server '{data.server_name}'",
-        )
-
-    for tool in tools:
-        tool.mcp_server_url = data.server_url
-        if data.api_key is not None:
-            # Merge api_key into existing config (other keys preserved) and encrypt
-            current_config = dict(tool.config or {})
-            current_config["api_key"] = data.api_key
-            tool.config = _encrypt_sensitive_fields(current_config, tool.config_schema)
-        # If api_key is None (not provided), preserve the existing encrypted key
-
-    await db.commit()
-    return {"ok": True, "updated": len(tools)}
-
 
 
 

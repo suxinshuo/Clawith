@@ -3091,11 +3091,86 @@ def _parse_credential_scopes(s: str) -> set[str]:
     return set(parse_credential_scopes(s))
 
 
-async def _build_credential_guidance(provider: str, user_id, tenant_id, session_id: str) -> str:
+async def _send_feishu_credential_card(agent_id, external_conv_id: str, provider: str, link: str) -> bool:
+    """Send a credential authorization card directly via Feishu API.
+
+    Returns True if the message was sent successfully, False otherwise.
+    This bypasses the LLM to guarantee the auth link reaches the user.
+    """
+    try:
+        from app.models.channel_config import ChannelConfig
+        from app.services.feishu_service import feishu_service
+
+        # Look up Feishu channel config for this agent
+        async with async_session() as db:
+            r = await db.execute(
+                select(ChannelConfig).where(
+                    ChannelConfig.agent_id == agent_id,
+                    ChannelConfig.channel_type == "feishu",
+                )
+            )
+            config = r.scalar_one_or_none()
+            if not config or not config.app_id or not config.app_secret:
+                logger.warning("[MCP] No Feishu channel config found for direct credential card")
+                return False
+
+        # Resolve receive_id and receive_id_type from external_conv_id
+        if external_conv_id.startswith("feishu_group_"):
+            receive_id = external_conv_id.removeprefix("feishu_group_")
+            receive_id_type = "chat_id"
+        elif external_conv_id.startswith("feishu_p2p_"):
+            identifier = external_conv_id.removeprefix("feishu_p2p_")
+            receive_id = identifier
+            # Feishu open_ids start with "ou_"; tenant user_ids do not
+            receive_id_type = "open_id" if identifier.startswith("ou_") else "user_id"
+        else:
+            logger.warning(f"[MCP] Unrecognized external_conv_id format: {external_conv_id}")
+            return False
+
+        # Build interactive card with clickable hyperlink
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "orange",
+                "title": {"content": "🔑 需要授权", "tag": "plain_text"},
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"当前工具需要 **{provider}** 授权才能使用。\n\n"
+                        f"👉 [点击此处完成授权]({link})\n\n"
+                        f"⏰ 链接 **10 分钟**内有效，完成后请重新发送您的请求。"
+                    ),
+                }
+            ],
+        }
+
+        await feishu_service.send_message(
+            app_id=config.app_id,
+            app_secret=config.app_secret,
+            receive_id=receive_id,
+            msg_type="interactive",
+            content=json.dumps(card),
+            receive_id_type=receive_id_type,
+            stage="credential_auth_card",
+        )
+        logger.info(f"[MCP] Sent credential auth card directly via Feishu for provider={provider}")
+        return True
+    except Exception as e:
+        logger.warning(f"[MCP] Failed to send Feishu credential card: {e}")
+        return False
+
+
+async def _build_credential_guidance(provider: str, user_id, tenant_id, session_id: str, agent_id=None) -> str:
     """Build channel-appropriate credential guidance message.
 
     Web users are directed to settings. Channel users (feishu/dingtalk/wecom)
     get a one-time token link to configure credentials without Clawith login.
+
+    For Feishu channels, the auth link is sent as a separate interactive card
+    message directly via Feishu API (bypassing the LLM) to guarantee the link
+    is delivered to the user without being reformulated or dropped.
 
     Note: messages are in Chinese because they are returned to the LLM as tool
     output, which the Agent then relays to end users. Developer-facing errors
@@ -3103,6 +3178,7 @@ async def _build_credential_guidance(provider: str, user_id, tenant_id, session_
     """
     source_channel = "web"
     credential_mode = "manual"
+    _external_conv_id = None
 
     if session_id:
         try:
@@ -3110,11 +3186,18 @@ async def _build_credential_guidance(provider: str, user_id, tenant_id, session_
             # Single DB session for both channel lookup and OAuth config check
             async with async_session() as db:
                 r = await db.execute(
-                    select(ChatSession.source_channel).where(ChatSession.id == session_id)
+                    select(
+                        ChatSession.source_channel,
+                        ChatSession.agent_id,
+                        ChatSession.external_conv_id,
+                    ).where(ChatSession.id == session_id)
                 )
-                ch = r.scalar_one_or_none()
-                if ch:
-                    source_channel = ch
+                row = r.one_or_none()
+                if row:
+                    source_channel = row[0]
+                    if not agent_id:
+                        agent_id = row[1]
+                    _external_conv_id = row[2]
 
                 # Also check if OAuth is configured for this provider (used by channel flow)
                 if source_channel in ("feishu", "dingtalk", "wecom"):
@@ -3147,10 +3230,26 @@ async def _build_credential_guidance(provider: str, user_id, tenant_id, session_
             )
             base_url = settings.PUBLIC_BASE_URL.rstrip("/") if settings.PUBLIC_BASE_URL else ""
             link = f"{base_url}/credentials/connect?token={token}"
+
+            # --- Send auth link directly via Feishu (bypass LLM) ---
+            if source_channel == "feishu" and agent_id and _external_conv_id:
+                sent = await _send_feishu_credential_card(
+                    agent_id=agent_id,
+                    external_conv_id=_external_conv_id,
+                    provider=provider,
+                    link=link,
+                )
+                if sent:
+                    return (
+                        f"❌ 无法访问 {provider}：您尚未授权。\n"
+                        f"已单独发送授权链接至飞书，请提示用户完成授权后重试。"
+                    )
+
+            # Fallback: return link in tool output (for dingtalk/wecom or if direct send failed)
             return (
                 f"❌ 无法访问 {provider}：您尚未授权。\n"
                 f"请点击下方链接完成授权（10 分钟内有效）：\n"
-                f"👉 {link}"
+                f"👉 [点击此处完成授权]({link})"
             )
         except Exception as e:
             logger.warning(f"[MCP] Failed to generate one-time token link: {e}")
@@ -3238,6 +3337,7 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None, user
                     user_id=user_id,
                     tenant_id=_UUID(tenant_id_str),
                     session_id=session_id,
+                    agent_id=agent_id,
                 )
 
             user_headers["X-Clawith-User-Token"] = cred.access_token
