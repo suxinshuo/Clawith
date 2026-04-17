@@ -9,7 +9,7 @@ from typing import Sequence, Union
 from alembic import op
 
 revision: str = 'add_user_ext_creds'
-down_revision: Union[str, None] = 'user_refactor_v1'
+down_revision: Union[str, None] = 'increase_api_key_length'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
