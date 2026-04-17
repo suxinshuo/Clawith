@@ -1,7 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -202,3 +202,177 @@ def test_sync_org_structure_skips_reconcile_after_member_failure():
     assert adapter.reconcile_called is False
     assert adapter.member_counts_updated is True
     assert "Reconcile skipped due to partial sync failures" in result["errors"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_departments_partial_access_restores_hierarchy():
+    """When scopes returns specific depts, hierarchy is restored among them."""
+    adapter = _make_feishu_adapter()
+
+    scopes_response = _mock_response({
+        "code": 0,
+        "data": {"department_ids": ["od-A", "od-B", "od-C"], "user_ids": []},
+    })
+
+    dept_info_responses = {
+        "od-A": _mock_response({
+            "code": 0,
+            "data": {"department": {
+                "open_department_id": "od-A",
+                "name": "Tech",
+                "parent_department_id": "od-root-unknown",
+                "member_count": 0,
+            }},
+        }),
+        "od-B": _mock_response({
+            "code": 0,
+            "data": {"department": {
+                "open_department_id": "od-B",
+                "name": "Backend",
+                "parent_department_id": "od-A",
+                "member_count": 0,
+            }},
+        }),
+        "od-C": _mock_response({
+            "code": 0,
+            "data": {"department": {
+                "open_department_id": "od-C",
+                "name": "Data Platform",
+                "parent_department_id": "od-B",
+                "member_count": 3,
+            }},
+        }),
+    }
+
+    children_response = _mock_response({
+        "code": 0,
+        "data": {"items": [], "has_more": False, "page_token": ""},
+    })
+
+    async def mock_get(url, **kwargs):
+        if "scopes" in url:
+            return scopes_response
+        if "/children" in url:
+            return children_response
+        for dept_id, resp in dept_info_responses.items():
+            if dept_id in url:
+                return resp
+        return children_response
+
+    with patch.object(adapter, "get_access_token", return_value="fake_token"):
+        with patch("httpx.AsyncClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.get.side_effect = mock_get
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_client
+
+            depts = await adapter.fetch_departments()
+
+    dept_map = {d.external_id: d for d in depts}
+
+    assert "0" in dept_map
+    assert dept_map["0"].parent_external_id is None
+    assert dept_map["od-A"].parent_external_id == "0"
+    assert dept_map["od-A"].name == "Tech"
+    assert dept_map["od-B"].parent_external_id == "od-A"
+    assert dept_map["od-C"].parent_external_id == "od-B"
+
+
+@pytest.mark.asyncio
+async def test_fetch_departments_scopes_failure_falls_back_to_root():
+    """When scopes API fails, fall back to fetching from root '0'."""
+    adapter = _make_feishu_adapter()
+
+    scopes_error = _mock_response({"code": 99999, "msg": "no permission"})
+    children_response = _mock_response({
+        "code": 0,
+        "data": {
+            "items": [{"open_department_id": "od-child", "name": "Child", "member_count": 1}],
+            "has_more": False,
+            "page_token": "",
+        },
+    })
+    no_children = _mock_response({
+        "code": 0,
+        "data": {"items": [], "has_more": False, "page_token": ""},
+    })
+
+    call_count = {"children": 0}
+
+    async def mock_get(url, **kwargs):
+        if "scopes" in url:
+            return scopes_error
+        if "/children" in url:
+            call_count["children"] += 1
+            if call_count["children"] == 1:
+                return children_response
+            return no_children
+        return no_children
+
+    with patch.object(adapter, "get_access_token", return_value="fake_token"):
+        with patch("httpx.AsyncClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.get.side_effect = mock_get
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_client
+
+            depts = await adapter.fetch_departments()
+
+    dept_map = {d.external_id: d for d in depts}
+    assert "0" in dept_map
+    assert "od-child" in dept_map
+    assert dept_map["od-child"].parent_external_id == "0"
+
+
+@pytest.mark.asyncio
+async def test_fetch_departments_dept_detail_failure_degrades_to_root():
+    """When a single dept detail fails, that dept falls back to root parent."""
+    adapter = _make_feishu_adapter()
+
+    scopes_response = _mock_response({
+        "code": 0,
+        "data": {"department_ids": ["od-ok", "od-fail"], "user_ids": []},
+    })
+
+    no_children = _mock_response({
+        "code": 0,
+        "data": {"items": [], "has_more": False, "page_token": ""},
+    })
+
+    async def mock_get(url, **kwargs):
+        if "scopes" in url:
+            return scopes_response
+        if "/children" in url:
+            return no_children
+        if "od-ok" in url:
+            return _mock_response({
+                "code": 0,
+                "data": {"department": {
+                    "open_department_id": "od-ok",
+                    "name": "OK Dept",
+                    "parent_department_id": "od-unknown",
+                    "member_count": 2,
+                }},
+            })
+        if "od-fail" in url:
+            return _mock_response({"code": 40004, "msg": "no dept authority"})
+        return no_children
+
+    with patch.object(adapter, "get_access_token", return_value="fake_token"):
+        with patch("httpx.AsyncClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.get.side_effect = mock_get
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_client
+
+            depts = await adapter.fetch_departments()
+
+    dept_map = {d.external_id: d for d in depts}
+    assert "od-ok" in dept_map
+    assert dept_map["od-ok"].parent_external_id == "0"
+    assert "od-fail" in dept_map
+    assert dept_map["od-fail"].parent_external_id == "0"
+    assert dept_map["od-fail"].name == "od-fail"
