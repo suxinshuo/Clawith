@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -175,6 +175,7 @@ async def oauth_callback(
     result = await db.execute(
         select(UserExternalCredential).where(
             UserExternalCredential.user_id == user_id,
+            UserExternalCredential.tenant_id == tenant_id,
             UserExternalCredential.provider == provider,
         )
     )

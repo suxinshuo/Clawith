@@ -3085,6 +3085,11 @@ async def _send_file_via_slack(agent_id, config, file_path: Path, member_name: s
         return f"Failed to send file via Slack: {e}"
 
 
+def _parse_credential_scopes(s: str) -> set[str]:
+    """Normalize space or comma-separated scope strings into a set."""
+    return {p.strip() for p in s.replace(",", " ").split() if p.strip()}
+
+
 async def _build_credential_guidance(provider: str, user_id, tenant_id, session_id: str) -> str:
     """Build channel-appropriate credential guidance message.
 
@@ -3252,13 +3257,9 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None, user
             ))
 
             # ── Scope validation (provider-level) ──
-            # Normalize separators: OAuth providers may use space or comma-separated scopes
-            def _parse_scopes(s: str) -> set[str]:
-                return {p.strip() for p in s.replace(",", " ").split() if p.strip()}
-
             required_scopes_str = (tool.config or {}).get("required_scopes", "")
             if required_scopes_str and cred.scopes:
-                required_scopes = _parse_scopes(required_scopes_str)
+                required_scopes = _parse_credential_scopes(required_scopes_str)
                 granted_scopes = set(cred.scopes)  # already a list[str] from ResolvedCredential
                 missing = required_scopes - granted_scopes
                 if missing:

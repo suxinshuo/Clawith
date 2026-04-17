@@ -223,20 +223,24 @@ class CredentialResolver:
                     )
                 )
                 oauth_config = result.scalar_one_or_none()
+                if not oauth_config:
+                    logger.warning(f"[CredentialResolver] No OAuth config for provider={provider}")
+                    return decrypt_data(access_token_encrypted, settings.SECRET_KEY)
 
-            if not oauth_config:
-                logger.warning(f"[CredentialResolver] No OAuth config for provider={provider}")
-                return decrypt_data(access_token_encrypted, settings.SECRET_KEY)
+                # Extract scalar values before session closes to avoid detached-object issues
+                config_token_url = oauth_config.token_url
+                config_client_id = oauth_config.client_id
+                config_client_secret_encrypted = oauth_config.client_secret_encrypted
 
             # Decrypt secrets
-            client_secret = decrypt_data(oauth_config.client_secret_encrypted, settings.SECRET_KEY)
+            client_secret = decrypt_data(config_client_secret_encrypted, settings.SECRET_KEY)
             refresh_token = decrypt_data(refresh_token_encrypted, settings.SECRET_KEY)
 
             # Call refresh
             from app.services.oauth_service import refresh_access_token
             tokens = await refresh_access_token(
-                token_url=oauth_config.token_url,
-                client_id=oauth_config.client_id,
+                token_url=config_token_url,
+                client_id=config_client_id,
                 client_secret=client_secret,
                 refresh_token=refresh_token,
             )
