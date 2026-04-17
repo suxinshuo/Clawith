@@ -675,9 +675,9 @@ class FeishuService:
             return resp.json()
 
     # --- Approval API ---
-    async def create_approval_instance(self, app_id: str, app_secret: str, approval_code: str, user_id: str, form_data: str) -> dict:
+    async def create_approval_instance(self, app_id: str, app_secret: str, approval_code: str, user_id: str, form_data: str, *, access_token: str | None = None) -> dict:
         """Create a Feishu approval instance."""
-        tenant_token = await self.get_tenant_access_token(app_id, app_secret)
+        token = access_token or await self.get_tenant_access_token(app_id, app_secret)
         body = {
             "approval_code": approval_code,
             "user_id": user_id,
@@ -687,13 +687,13 @@ class FeishuService:
             resp = await client.post(
                 "https://open.feishu.cn/open-apis/approval/v4/instances",
                 json=body,
-                headers={"Authorization": f"Bearer {tenant_token}"}
+                headers={"Authorization": f"Bearer {token}"}
             )
             return resp.json()
 
-    async def query_approval_instances(self, app_id: str, app_secret: str, approval_code: str, status: str = None) -> dict:
+    async def query_approval_instances(self, app_id: str, app_secret: str, approval_code: str, status: str = None, *, access_token: str | None = None) -> dict:
         """Query Feishu approval instances."""
-        tenant_token = await self.get_tenant_access_token(app_id, app_secret)
+        token = access_token or await self.get_tenant_access_token(app_id, app_secret)
         body = {"approval_code": approval_code}
         if status:
             body["status"] = status
@@ -701,17 +701,17 @@ class FeishuService:
             resp = await client.post(
                 "https://open.feishu.cn/open-apis/approval/v4/instances/query",
                 json=body,
-                headers={"Authorization": f"Bearer {tenant_token}"}
+                headers={"Authorization": f"Bearer {token}"}
             )
             return resp.json()
 
-    async def get_approval_instance(self, app_id: str, app_secret: str, instance_id: str) -> dict:
+    async def get_approval_instance(self, app_id: str, app_secret: str, instance_id: str, *, access_token: str | None = None) -> dict:
         """Get details of a specific Feishu approval instance."""
-        tenant_token = await self.get_tenant_access_token(app_id, app_secret)
+        token = access_token or await self.get_tenant_access_token(app_id, app_secret)
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
                 f"https://open.feishu.cn/open-apis/approval/v4/instances/{instance_id}",
-                headers={"Authorization": f"Bearer {tenant_token}"}
+                headers={"Authorization": f"Bearer {token}"}
             )
             return resp.json()
 
