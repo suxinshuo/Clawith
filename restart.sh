@@ -116,7 +116,10 @@ add_pg_path() {
     if [ -d "$ROOT/.pg/bin" ]; then
         export PATH="$ROOT/.pg/bin:$PATH"
     fi
-    for dir in /www/server/pgsql/bin /usr/local/pgsql/bin; do
+    for dir in /opt/homebrew/bin /opt/homebrew/opt/postgresql@15/bin \
+               /opt/homebrew/opt/postgresql/bin /usr/local/bin \
+               /usr/local/opt/postgresql@15/bin /usr/local/opt/postgresql/bin \
+               /www/server/pgsql/bin /usr/local/pgsql/bin; do
         if [ -x "$dir/pg_isready" ] && ! command -v pg_isready &>/dev/null; then
             export PATH="$dir:$PATH"
         fi
@@ -166,7 +169,51 @@ start_postgres() {
             echo -e "${GREEN}🐘 PostgreSQL already running (port $PG_PORT)${NC}"
         fi
     else
-        echo -e "${YELLOW}🐘 pg_isready not found — assuming PostgreSQL is running${NC}"
+        echo -e "${YELLOW}🐘 pg_isready not found — checking port $PG_PORT...${NC}"
+
+        # Fall back to basic port check
+        _pg_listening=false
+        if (echo >/dev/tcp/localhost/"$PG_PORT") 2>/dev/null; then
+            _pg_listening=true
+        elif command -v nc &>/dev/null && nc -z localhost "$PG_PORT" 2>/dev/null; then
+            _pg_listening=true
+        fi
+
+        if [ "$_pg_listening" = true ]; then
+            echo -e "  ${GREEN}🐘 PostgreSQL already listening on port $PG_PORT${NC}"
+        else
+            echo -e "${YELLOW}🐘 PostgreSQL not listening — attempting to start...${NC}"
+
+            STARTED=false
+            [ -f "$ROOT/.pgdata/PG_VERSION" ] && command -v pg_ctl &>/dev/null && \
+                pg_ctl -D "$ROOT/.pgdata" -l "$ROOT/.pgdata/pg.log" start >/dev/null 2>&1 && STARTED=true
+
+            if [ "$STARTED" = false ] && command -v brew &>/dev/null; then
+                brew services start postgresql@15 2>/dev/null || brew services start postgresql 2>/dev/null || true
+                STARTED=true
+            fi
+
+            if [ "$STARTED" = false ] && command -v systemctl &>/dev/null; then
+                sudo systemctl start postgresql 2>/dev/null || true
+                STARTED=true
+            fi
+
+            # Wait for port to become available
+            for i in $(seq 1 10); do
+                if (echo >/dev/tcp/localhost/"$PG_PORT") 2>/dev/null; then
+                    echo -e "  ${GREEN}✅ PostgreSQL ready (${i}s)${NC}"
+                    _pg_listening=true
+                    break
+                fi
+                sleep 1
+            done
+
+            if [ "$_pg_listening" = false ]; then
+                echo -e "  ${RED}❌ PostgreSQL failed to start on port $PG_PORT${NC}"
+                echo -e "  ${RED}   Please start PostgreSQL manually and re-run.${NC}"
+                exit 1
+            fi
+        fi
     fi
 }
 
