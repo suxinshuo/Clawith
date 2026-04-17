@@ -3210,6 +3210,19 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None, user
                 return f"❌ 凭据解析失败: {str(e)[:200]}"
 
             if cred is None:
+                # Audit: credential not found
+                import asyncio
+                from app.services.audit_logger import write_audit_log
+                asyncio.create_task(write_audit_log(
+                    action="credential_resolve_fail",
+                    details={
+                        "provider": tool.required_credential_provider,
+                        "tool_name": tool_name,
+                        "reason": "not_found",
+                    },
+                    agent_id=agent_id,
+                    user_id=user_id,
+                ))
                 return await _build_credential_guidance(
                     provider=tool.required_credential_provider,
                     user_id=user_id,
@@ -3222,6 +3235,21 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None, user
                 user_headers["X-Clawith-User-Id"] = cred.external_user_id
             if cred.scopes:
                 user_headers["X-Clawith-User-Scopes"] = ",".join(cred.scopes)
+
+            # Audit: credential resolved successfully
+            from app.services.audit_logger import write_audit_log
+            import asyncio
+            asyncio.create_task(write_audit_log(
+                action="credential_resolve",
+                details={
+                    "provider": tool.required_credential_provider,
+                    "tool_name": tool_name,
+                    "credential_source": cred.source,
+                    "credential_id": str(cred.credential_id),
+                },
+                agent_id=agent_id,
+                user_id=user_id,
+            ))
 
         # Direct MCP call for non-Smithery servers
         direct_api_key = merged_config.get("api_key") or merged_config.get("atlassian_api_key")

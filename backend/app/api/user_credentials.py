@@ -97,6 +97,13 @@ async def create_credential(
         raise
     await db.refresh(cred)
 
+    from app.services.audit_logger import write_audit_log
+    import asyncio
+    asyncio.create_task(write_audit_log(
+        action="credential_create",
+        details={"provider": data.provider, "credential_type": data.credential_type},
+        user_id=current_user.id,
+    ))
     return _to_response(cred)
 
 
@@ -119,6 +126,14 @@ async def delete_credential(
 
     await db.delete(cred)
     await db.commit()
+
+    from app.services.audit_logger import write_audit_log
+    import asyncio
+    asyncio.create_task(write_audit_log(
+        action="credential_delete",
+        details={"provider": cred.provider, "credential_id": str(cred.id)},
+        user_id=current_user.id,
+    ))
 
 
 @router.patch("/{credential_id}")
