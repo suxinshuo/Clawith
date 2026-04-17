@@ -47,6 +47,12 @@ async def main():
     import app.models.trigger        # noqa
     import app.models.notification   # noqa
     import app.models.gateway_message # noqa
+    import app.models.identity        # noqa
+    import app.models.published_page  # noqa
+    import app.models.tenant_setting  # noqa
+    import app.models.agent_credential # noqa
+    import app.models.user_external_credential # noqa
+    import app.models.oauth_provider_config    # noqa
 
     # Create all tables that don't exist yet (safe to run on every startup)
     async with engine.begin() as conn:
@@ -85,6 +91,9 @@ async def main():
         "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS sso_enabled BOOLEAN DEFAULT FALSE",
         "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS sso_domain VARCHAR(255)",
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_tenants_sso_domain ON tenants(sso_domain) WHERE sso_domain IS NOT NULL",
+        # Credential vault fields added in user_auth
+        "ALTER TABLE tools ADD COLUMN IF NOT EXISTS required_credential_provider VARCHAR(100)",
+        "ALTER TABLE agent_triggers ADD COLUMN IF NOT EXISTS acting_user_id UUID",
     ]
 
     from sqlalchemy import text
