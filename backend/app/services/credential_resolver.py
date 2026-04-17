@@ -78,7 +78,7 @@ class CredentialResolver:
                     token = None
 
                 if token:
-                    return ResolvedCredential(
+                    resolved = ResolvedCredential(
                         provider=provider,
                         credential_type=user_cred.credential_type,
                         access_token=token,
@@ -88,6 +88,10 @@ class CredentialResolver:
                         source="user",
                         credential_id=user_cred.id,
                     )
+                    # Fire-and-forget: update last_used_at (don't block resolve)
+                    import asyncio
+                    asyncio.create_task(self._update_last_used(user_cred.id, UserExternalCredential))
+                    return resolved
 
             # 2. Fallback to tenant-level credential
             result = await db.execute(
@@ -105,7 +109,7 @@ class CredentialResolver:
                     logger.warning(f"[CredentialResolver] Failed to decrypt tenant credential for provider={provider}")
                     return None
 
-                return ResolvedCredential(
+                resolved = ResolvedCredential(
                     provider=provider,
                     credential_type=tenant_cred.credential_type,
                     access_token=token,
@@ -115,8 +119,26 @@ class CredentialResolver:
                     source="tenant",
                     credential_id=tenant_cred.id,
                 )
+                import asyncio
+                asyncio.create_task(self._update_last_used(tenant_cred.id, TenantExternalCredential))
+                return resolved
 
         return None
+
+    async def _update_last_used(self, credential_id: UUID, table_class) -> None:
+        """Update last_used_at timestamp for a resolved credential."""
+        try:
+            from datetime import datetime, timezone
+            from sqlalchemy import update
+            async with async_session() as db:
+                await db.execute(
+                    update(table_class)
+                    .where(table_class.id == credential_id)
+                    .values(last_used_at=datetime.now(timezone.utc))
+                )
+                await db.commit()
+        except Exception:
+            logger.debug(f"[CredentialResolver] Failed to update last_used_at for {credential_id}")
 
     async def resolve_or_fail(
         self,
