@@ -22,7 +22,7 @@ class MCPClient:
     Auto-detects the transport mode on first request.
     """
 
-    def __init__(self, server_url: str, api_key: str | None = None):
+    def __init__(self, server_url: str, api_key: str | None = None, user_headers: dict[str, str] | None = None):
         # Extract apiKey from URL query params and move to Authorization header
         parsed = urlparse(server_url)
         qs = parse_qs(parsed.query, keep_blank_values=True)
@@ -34,6 +34,9 @@ class MCPClient:
         # Rebuild URL without apiKey in query string
         remaining_qs = urlencode({k: v[0] for k, v in qs.items()}) if qs else ""
         self.server_url = urlunparse(parsed._replace(query=remaining_qs)).rstrip("/")
+
+        # User credential headers (X-Clawith-User-Token etc.)
+        self._user_headers = user_headers or {}
 
         # Transport state
         self._transport: str | None = None  # "streamable" or "sse"
@@ -50,6 +53,9 @@ class MCPClient:
             h["Authorization"] = f"Bearer {self.api_key}"
         if self._session_id:
             h["Mcp-Session-Id"] = self._session_id
+        # Inject user credential headers
+        if self._user_headers:
+            h.update(self._user_headers)
         return h
 
     def _parse_response(self, resp: httpx.Response) -> dict:
