@@ -415,6 +415,13 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
                 logger.warning(f"Agent {agent.name}'s model {model.model} is disabled, skipping trigger invocation")
                 return
 
+            # Determine acting user: use trigger's acting_user_id if set, otherwise agent creator
+            acting_user_id = agent.creator_id
+            for t in triggers:
+                if t.acting_user_id:
+                    acting_user_id = t.acting_user_id
+                    break  # Use the first trigger's acting_user_id
+
             # Build trigger context
             context_parts = []
             trigger_names = []
@@ -452,7 +459,7 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
 
             session = ChatSession(
                 agent_id=agent_id,
-                user_id=agent.creator_id,
+                user_id=acting_user_id,
                 participant_id=agent_participant.id if agent_participant else None,
                 source_channel="trigger",
                 title=title[:200],
@@ -472,7 +479,7 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
                 conversation_id=str(session_id),
                 role="user",
                 content=trigger_context,
-                user_id=agent.creator_id,
+                user_id=acting_user_id,
                 participant_id=agent_participant.id if agent_participant else None,
             ))
             await db.commit()
@@ -495,7 +502,7 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
                             conversation_id=str(session_id),
                             role="tool_call",
                             content=_json.dumps({"name": data["name"], "args": data["args"]}, ensure_ascii=False, default=str),
-                            user_id=agent.creator_id,
+                            user_id=acting_user_id,
                             participant_id=agent_participant_id,
                         ))
                     elif data["status"] == "done":
@@ -505,7 +512,7 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
                             conversation_id=str(session_id),
                             role="tool_call",
                             content=_json.dumps({"name": data["name"], "result": result_str}, ensure_ascii=False, default=str),
-                            user_id=agent.creator_id,
+                            user_id=acting_user_id,
                             participant_id=agent_participant_id,
                         ))
                     await _tc_db.commit()
@@ -518,7 +525,7 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
             agent_name=agent.name,
             role_description=agent.role_description or "",
             agent_id=agent_id,
-            user_id=agent.creator_id,
+            user_id=acting_user_id,
             session_id=str(session_id),
             on_chunk=on_chunk,
             on_tool_call=on_tool_call,
@@ -537,7 +544,7 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
                 conversation_id=str(session_id),
                 role="assistant",
                 content=reply or "".join(collected_content),
-                user_id=agent.creator_id,
+                user_id=acting_user_id,
                 participant_id=agent_participant.id if agent_participant else None,
             ))
 
