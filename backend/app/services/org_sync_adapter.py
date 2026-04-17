@@ -677,6 +677,36 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
         logger.info(f"Feishu auth scopes: {len(dept_ids)} authorized departments")
         return dept_ids
 
+    async def fetch_department_info(
+        self, dept_id: str, token: str, client: httpx.AsyncClient
+    ) -> dict | None:
+        """Fetch detail for a single department.
+
+        Returns the department dict (with name, parent_department_id, member_count, etc.)
+        or None if the API call fails.
+        """
+        try:
+            resp = await client.get(
+                f"{self.FEISHU_DEPT_URL}/{dept_id}",
+                params={"department_id_type": "open_department_id"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            data = resp.json()
+        except Exception as exc:
+            logger.error(
+                f"Feishu fetch department info request failed for {dept_id}: {exc!r}"
+            )
+            return None
+
+        if data.get("code") != 0:
+            logger.error(
+                f"Feishu fetch department info error for {dept_id}: "
+                f"code={data.get('code')}, msg={data.get('msg', '')}"
+            )
+            return None
+
+        return data.get("data", {}).get("department")
+
     async def fetch_departments(self) -> list[ExternalDepartment]:
         """Fetch all departments from Feishu using concurrent recursive calls to get parent-child relationships."""
         token = await self.get_access_token()

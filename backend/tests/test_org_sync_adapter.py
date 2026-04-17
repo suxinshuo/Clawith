@@ -56,6 +56,45 @@ async def test_fetch_auth_scopes_returns_empty_on_api_error():
     assert result == []
 
 
+@pytest.mark.asyncio
+async def test_fetch_department_info_returns_detail():
+    adapter = _make_feishu_adapter()
+    mock_client = AsyncMock()
+    mock_client.get.return_value = _mock_response({
+        "code": 0,
+        "data": {
+            "department": {
+                "open_department_id": "od-aaa",
+                "name": "Data Platform",
+                "parent_department_id": "od-parent",
+                "member_count": 5,
+            },
+        },
+    })
+
+    result = await adapter.fetch_department_info("od-aaa", "fake_token", mock_client)
+
+    assert result["name"] == "Data Platform"
+    assert result["parent_department_id"] == "od-parent"
+    assert result["member_count"] == 5
+    call_url = mock_client.get.call_args[0][0]
+    assert "departments/od-aaa" in call_url
+
+
+@pytest.mark.asyncio
+async def test_fetch_department_info_returns_none_on_error():
+    adapter = _make_feishu_adapter()
+    mock_client = AsyncMock()
+    mock_client.get.return_value = _mock_response({
+        "code": 40004,
+        "msg": "no dept authority",
+    })
+
+    result = await adapter.fetch_department_info("od-aaa", "fake_token", mock_client)
+
+    assert result is None
+
+
 class _DummyAdapter(BaseOrgSyncAdapter):
     provider_type = "feishu"
 
