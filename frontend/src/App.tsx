@@ -18,6 +18,7 @@ import InvitationCodes from './pages/InvitationCodes';
 import AdminCompanies from './pages/AdminCompanies';
 import SSOEntry from './pages/SSOEntry';
 import CredentialConnect from './pages/CredentialConnect';
+import ExternalConnections from './pages/ExternalConnections';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
     const token = useAuthStore((s) => s.token);
@@ -193,6 +194,7 @@ export default function App() {
                         The deprecated /agents/:id/chat path is intentionally removed. */}
                     <Route path="messages" element={<Messages />} />
                     <Route path="enterprise" element={<EnterpriseSettings />} />
+                    <Route path="external-connections" element={<ExternalConnections />} />
                     <Route path="invitations" element={<InvitationCodes />} />
                     <Route path="admin/platform-settings" element={<AdminCompanies />} />
                 </Route>
