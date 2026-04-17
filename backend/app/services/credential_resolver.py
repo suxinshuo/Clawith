@@ -72,9 +72,18 @@ class CredentialResolver:
 
             if user_cred and user_cred.status == "active":
                 try:
-                    token = decrypt_data(user_cred.access_token_encrypted, settings.SECRET_KEY)
+                    token = await self._ensure_token_fresh(
+                        credential_id=user_cred.id,
+                        credential_type=user_cred.credential_type,
+                        provider=provider,
+                        tenant_id=tenant_id,
+                        access_token_encrypted=user_cred.access_token_encrypted,
+                        refresh_token_encrypted=getattr(user_cred, 'refresh_token_encrypted', None),
+                        token_expires_at=getattr(user_cred, 'token_expires_at', None),
+                        table_class=UserExternalCredential,
+                    )
                 except Exception:
-                    logger.warning(f"[CredentialResolver] Failed to decrypt user credential for provider={provider}")
+                    logger.warning(f"[CredentialResolver] Failed to resolve user credential for provider={provider}")
                     token = None
 
                 if token:
@@ -88,7 +97,6 @@ class CredentialResolver:
                         source="user",
                         credential_id=user_cred.id,
                     )
-                    # Fire-and-forget: update last_used_at (don't block resolve)
                     import asyncio
                     asyncio.create_task(self._update_last_used(user_cred.id, UserExternalCredential))
                     return resolved
@@ -104,24 +112,34 @@ class CredentialResolver:
 
             if tenant_cred and tenant_cred.status == "active":
                 try:
-                    token = decrypt_data(tenant_cred.access_token_encrypted, settings.SECRET_KEY)
+                    token = await self._ensure_token_fresh(
+                        credential_id=tenant_cred.id,
+                        credential_type=tenant_cred.credential_type,
+                        provider=provider,
+                        tenant_id=tenant_id,
+                        access_token_encrypted=tenant_cred.access_token_encrypted,
+                        refresh_token_encrypted=getattr(tenant_cred, 'refresh_token_encrypted', None),
+                        token_expires_at=getattr(tenant_cred, 'token_expires_at', None),
+                        table_class=TenantExternalCredential,
+                    )
                 except Exception:
-                    logger.warning(f"[CredentialResolver] Failed to decrypt tenant credential for provider={provider}")
+                    logger.warning(f"[CredentialResolver] Failed to resolve tenant credential for provider={provider}")
                     return None
 
-                resolved = ResolvedCredential(
-                    provider=provider,
-                    credential_type=tenant_cred.credential_type,
-                    access_token=token,
-                    external_user_id=tenant_cred.external_user_id if hasattr(tenant_cred, 'external_user_id') else None,
-                    external_username=tenant_cred.external_username if hasattr(tenant_cred, 'external_username') else None,
-                    scopes=[s.strip() for s in tenant_cred.scopes.split(",") if s.strip()] if tenant_cred.scopes else [],
-                    source="tenant",
-                    credential_id=tenant_cred.id,
-                )
-                import asyncio
-                asyncio.create_task(self._update_last_used(tenant_cred.id, TenantExternalCredential))
-                return resolved
+                if token:
+                    resolved = ResolvedCredential(
+                        provider=provider,
+                        credential_type=tenant_cred.credential_type,
+                        access_token=token,
+                        external_user_id=tenant_cred.external_user_id if hasattr(tenant_cred, 'external_user_id') else None,
+                        external_username=tenant_cred.external_username if hasattr(tenant_cred, 'external_username') else None,
+                        scopes=[s.strip() for s in tenant_cred.scopes.split(",") if s.strip()] if tenant_cred.scopes else [],
+                        source="tenant",
+                        credential_id=tenant_cred.id,
+                    )
+                    import asyncio
+                    asyncio.create_task(self._update_last_used(tenant_cred.id, TenantExternalCredential))
+                    return resolved
 
         return None
 
@@ -139,6 +157,136 @@ class CredentialResolver:
                 await db.commit()
         except Exception:
             logger.debug(f"[CredentialResolver] Failed to update last_used_at for {credential_id}")
+
+    async def _ensure_token_fresh(
+        self,
+        *,
+        credential_id: UUID,
+        credential_type: str,
+        provider: str,
+        tenant_id: UUID,
+        access_token_encrypted: str,
+        refresh_token_encrypted: "str | None",
+        token_expires_at: "datetime | None",
+        table_class,
+    ) -> "str | None":
+        """Check if an OAuth token is expired and attempt to refresh it.
+
+        All credential fields are passed as scalar parameters (not ORM objects)
+        to avoid detached-session issues.
+
+        Returns the valid access token (possibly refreshed), or None if
+        refresh failed and credential was marked needs_reauth.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        settings = get_settings()
+
+        # Not an OAuth credential or no expiry set — return as-is
+        if credential_type != "oauth2" or not token_expires_at:
+            return decrypt_data(access_token_encrypted, settings.SECRET_KEY)
+
+        # Check if token is still fresh (5-minute buffer)
+        now = datetime.now(timezone.utc)
+        expires_at = token_expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+        if expires_at > now + timedelta(minutes=5):
+            # Token still valid
+            return decrypt_data(access_token_encrypted, settings.SECRET_KEY)
+
+        # Token expired or about to expire — try refresh
+        if not refresh_token_encrypted:
+            # No refresh token — mark as needs_reauth
+            logger.info(f"[CredentialResolver] Token expired for provider={provider}, no refresh token")
+            from sqlalchemy import update
+            async with async_session() as db:
+                await db.execute(
+                    update(table_class)
+                    .where(table_class.id == credential_id)
+                    .values(status="needs_reauth")
+                )
+                await db.commit()
+            return None
+
+        # Load OAuth provider config and refresh token in a single session
+        try:
+            from app.models.oauth_provider_config import OAuthProviderConfig
+            from sqlalchemy import select as sa_select
+
+            async with async_session() as db:
+                result = await db.execute(
+                    sa_select(OAuthProviderConfig).where(
+                        OAuthProviderConfig.tenant_id == tenant_id,
+                        OAuthProviderConfig.provider == provider,
+                    )
+                )
+                oauth_config = result.scalar_one_or_none()
+
+            if not oauth_config:
+                logger.warning(f"[CredentialResolver] No OAuth config for provider={provider}")
+                return decrypt_data(access_token_encrypted, settings.SECRET_KEY)
+
+            # Decrypt secrets
+            client_secret = decrypt_data(oauth_config.client_secret_encrypted, settings.SECRET_KEY)
+            refresh_token = decrypt_data(refresh_token_encrypted, settings.SECRET_KEY)
+
+            # Call refresh
+            from app.services.oauth_service import refresh_access_token
+            tokens = await refresh_access_token(
+                token_url=oauth_config.token_url,
+                client_id=oauth_config.client_id,
+                client_secret=client_secret,
+                refresh_token=refresh_token,
+            )
+
+            # Update stored tokens
+            from app.core.security import encrypt_data
+            from sqlalchemy import update
+            async with async_session() as db:
+                update_values = {
+                    "access_token_encrypted": encrypt_data(tokens.access_token, settings.SECRET_KEY),
+                    "token_expires_at": now + timedelta(seconds=tokens.expires_in) if tokens.expires_in else None,
+                    "status": "active",
+                }
+                if tokens.refresh_token:
+                    update_values["refresh_token_encrypted"] = encrypt_data(tokens.refresh_token, settings.SECRET_KEY)
+                if tokens.scope:
+                    update_values["scopes"] = tokens.scope
+
+                await db.execute(
+                    update(table_class)
+                    .where(table_class.id == credential_id)
+                    .values(**update_values)
+                )
+                await db.commit()
+
+            # Audit log
+            import asyncio
+            from app.services.audit_logger import write_audit_log
+            asyncio.create_task(write_audit_log(
+                action="credential_token_refresh",
+                details={"provider": provider, "credential_id": str(credential_id)},
+            ))
+
+            logger.info(f"[CredentialResolver] Token refreshed for provider={provider}")
+            return tokens.access_token
+
+        except Exception as e:
+            logger.exception(f"[CredentialResolver] Token refresh failed for provider={provider}")
+            # Audit log refresh failure
+            import asyncio
+            from app.services.audit_logger import write_audit_log
+            asyncio.create_task(write_audit_log(
+                action="credential_token_refresh_fail",
+                details={"provider": provider, "error": str(e)[:200]},
+            ))
+            # Fall back to existing (possibly expired) token
+            try:
+                return decrypt_data(access_token_encrypted, settings.SECRET_KEY)
+            except Exception:
+                return None
 
     async def resolve_or_fail(
         self,
