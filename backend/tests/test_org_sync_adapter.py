@@ -271,6 +271,8 @@ async def test_fetch_departments_partial_access_restores_hierarchy():
 
     dept_map = {d.external_id: d for d in depts}
 
+    # Exactly 4 departments: root + 3 scoped (no duplicates)
+    assert len(depts) == 4
     assert "0" in dept_map
     assert dept_map["0"].parent_external_id is None
     assert dept_map["od-A"].parent_external_id == "0"
@@ -376,3 +378,54 @@ async def test_fetch_departments_dept_detail_failure_degrades_to_root():
     assert "od-fail" in dept_map
     assert dept_map["od-fail"].parent_external_id == "0"
     assert dept_map["od-fail"].name == "od-fail"
+
+
+@pytest.mark.asyncio
+async def test_fetch_departments_full_access_uses_root():
+    """When scopes contains '0', use original logic from root."""
+    adapter = _make_feishu_adapter()
+
+    scopes_response = _mock_response({
+        "code": 0,
+        "data": {"department_ids": ["0", "od-other"], "user_ids": []},
+    })
+    children_response = _mock_response({
+        "code": 0,
+        "data": {
+            "items": [{"open_department_id": "od-child", "name": "Child", "member_count": 1}],
+            "has_more": False,
+            "page_token": "",
+        },
+    })
+    no_children = _mock_response({
+        "code": 0,
+        "data": {"items": [], "has_more": False, "page_token": ""},
+    })
+
+    call_count = {"children": 0}
+
+    async def mock_get(url, **kwargs):
+        if "scopes" in url:
+            return scopes_response
+        if "/children" in url:
+            call_count["children"] += 1
+            if call_count["children"] == 1:
+                return children_response
+            return no_children
+        return no_children
+
+    with patch.object(adapter, "get_access_token", return_value="fake_token"):
+        with patch("httpx.AsyncClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.get.side_effect = mock_get
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_client
+
+            depts = await adapter.fetch_departments()
+
+    dept_map = {d.external_id: d for d in depts}
+    # Full access: fetches from root, no dept detail calls
+    assert "0" in dept_map
+    assert "od-child" in dept_map
+    assert dept_map["od-child"].parent_external_id == "0"

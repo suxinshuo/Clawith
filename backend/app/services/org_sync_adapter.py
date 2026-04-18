@@ -732,6 +732,9 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
 
         async with httpx.AsyncClient() as client:
             sem = asyncio.Semaphore(15)
+            # Departments already added via the detail path (partial-access);
+            # fetch_children skips these to avoid duplicates.
+            seen_dept_ids: set[str] = set()
 
             async def fetch_children(parent_id: str):
                 page_token = ""
@@ -761,7 +764,7 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
                     items = res_data.get("items", []) or []
                     for item in items:
                         dept_id = item.get("open_department_id")
-                        if not dept_id:
+                        if not dept_id or dept_id in seen_dept_ids:
                             continue
 
                         parent_external = parent_id if parent_id and parent_id != "0" else "0"
@@ -774,6 +777,7 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
                             raw_data=item,
                         )
                         all_depts.append(dept)
+                        seen_dept_ids.add(dept_id)
                         tasks.append(fetch_children(dept_id))
 
                     page_token = res_data.get("page_token", "")
@@ -827,6 +831,9 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
                             member_count=0,
                             raw_data={},
                         ))
+
+                # Mark scoped depts as seen so fetch_children won't re-add them
+                seen_dept_ids.update(scoped_dept_ids)
 
                 # Recurse children for each authorized department
                 child_tasks = [fetch_children(dept_id) for dept_id in scoped_dept_ids]
