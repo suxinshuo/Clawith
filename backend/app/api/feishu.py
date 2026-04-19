@@ -690,6 +690,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                 },
                 "body": {
                     "elements": [
+                        {"tag": "markdown", "content": "", "text_size": "notation", "element_id": "tool_status"},
                         {"tag": "markdown", "content": "", "text_align": "left", "text_size": "normal_v2", "element_id": "streaming_content"},
                         {"tag": "markdown", "content": " ", "icon": {"tag": "custom_icon", "img_key": "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg", "size": "16px 16px"}, "element_id": "loading_icon"},
                     ]
@@ -737,6 +738,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
             _llm_done = False
             _last_flushed_hash: int = 0
             _last_flushed_text: str = ""
+            _last_flushed_tool_text: str = ""
             _flush_lock = asyncio.Lock()
 
             def _build_card(
@@ -802,10 +804,12 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
 
                 # Tool call summary (non-streaming final card only)
                 if not streaming and _tool_call_records:
-                    names = [r["name"] for r in _tool_call_records]
+                    from collections import Counter
+                    tool_counts = Counter(r["name"] for r in _tool_call_records)
+                    summary_parts = [f"{name} x{cnt}" if cnt > 1 else name for name, cnt in tool_counts.items()]
                     elements.append({
                         "tag": "markdown",
-                        "content": f"<font color='grey'>🔧 Used {len(_tool_call_records)} tools: {', '.join(names)}</font>",
+                        "content": f"<font color='grey'>🔧 Used {len(_tool_call_records)} tools: {', '.join(summary_parts)}</font>",
                         "text_size": "notation",
                     })
                     elements.append({"tag": "hr"})
@@ -839,12 +843,9 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                     })
                 # Tool call summary panel
                 if _tool_call_records:
-                    detail_lines = []
-                    for rec in _tool_call_records:
-                        if rec["result_summary"]:
-                            detail_lines.append(f"{rec['name']} — {rec['result_summary']}")
-                        else:
-                            detail_lines.append(rec["name"])
+                    from collections import Counter
+                    tool_counts = Counter(rec["name"] for rec in _tool_call_records)
+                    detail_lines = [f"{name} x{cnt}" if cnt > 1 else name for name, cnt in tool_counts.items()]
                     elements.append({
                         "tag": "collapsible_panel",
                         "expanded": False,
@@ -885,7 +886,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                 _patch_queue.enqueue(_job)
 
             async def _flush_stream(reason: str, force: bool = False):
-                nonlocal _last_flush_time, _last_flushed_hash, cardkit_sequence, _last_flushed_text
+                nonlocal _last_flush_time, _last_flushed_hash, cardkit_sequence, _last_flushed_text, _last_flushed_tool_text
                 if not cardkit_card_id and not msg_id_for_patch:
                     return
                 async with _flush_lock:
@@ -896,7 +897,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                         return
                     accumulated = "".join(_stream_buffer)
                     if cardkit_card_id:
-                        # Build composite content: tool status lines + answer text.
+                        # Build tool status text (small notation element) and answer text (normal element) separately.
                         done_visible = _tool_status_done[-_TOOL_STATUS_KEEP_LINES:]
                         running_visible = list(_tool_status_running.values())
                         parts = []
@@ -907,27 +908,43 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                                 parts.append(f"<font color='grey'>✅ {len(done_visible)} tools done</font>")
                         if running_visible:
                             parts.extend(running_visible)
-                        if parts:
-                            tool_section = "\n".join(parts)
-                            cardkit_text = f"{tool_section}\n---\n{accumulated}" if accumulated else tool_section
-                        else:
-                            cardkit_text = accumulated
-                        if cardkit_text != _last_flushed_text:
+                        tool_text = "\n".join(parts) if parts else ""
+                        # Combine for change detection
+                        combined = tool_text + "||" + accumulated
+                        if combined != _last_flushed_text:
+                            # Stream tool status to notation-sized element
+                            if tool_text != _last_flushed_tool_text:
+                                cardkit_sequence += 1
+                                try:
+                                    await asyncio.wait_for(
+                                        feishu_service.stream_card_content(
+                                            config.app_id, config.app_secret,
+                                            cardkit_card_id, "tool_status",
+                                            tool_text, cardkit_sequence,
+                                        ),
+                                        timeout=5.0,
+                                    )
+                                    _last_flushed_tool_text = tool_text
+                                except asyncio.TimeoutError:
+                                    logger.warning(f"[Feishu] CardKit tool_status stream timed out, seq={cardkit_sequence}")
+                                except Exception as e:
+                                    logger.warning(f"[Feishu] CardKit tool_status stream failed: {e}")
+                            # Stream answer to normal-sized element
                             cardkit_sequence += 1
                             try:
                                 await asyncio.wait_for(
                                     feishu_service.stream_card_content(
                                         config.app_id, config.app_secret,
                                         cardkit_card_id, "streaming_content",
-                                        cardkit_text, cardkit_sequence,
+                                        accumulated, cardkit_sequence,
                                     ),
                                     timeout=5.0,
                                 )
-                                _last_flushed_text = cardkit_text
                             except asyncio.TimeoutError:
                                 logger.warning(f"[Feishu] CardKit stream timed out, seq={cardkit_sequence}")
                             except Exception as e:
                                 logger.warning(f"[Feishu] CardKit stream failed: {e}")
+                            _last_flushed_text = combined
                     elif msg_id_for_patch:
                         card = _build_card(accumulated, "".join(_thinking_buffer), streaming=True)
                         current_hash = hash(accumulated + "".join(_thinking_buffer) + str(_tool_status_done) + str(list(_tool_status_running.values())))
