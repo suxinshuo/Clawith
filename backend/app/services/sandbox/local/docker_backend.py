@@ -146,13 +146,13 @@ class DockerBackend(BaseSandboxBackend):
             container = self.client.containers.run(
                 image,
                 cmd,
-                detach=False,
+                detach=True,
                 mem_limit=memory_limit,
                 cpu_period=100000,  # Docker default
                 cpu_quota=int(float(cpu_limit) * 100000),
                 network_mode=network,
                 environment=env,
-                remove=True,
+                remove=False,
                 stdout=True,
                 stderr=True,
             )
@@ -163,6 +163,12 @@ class DockerBackend(BaseSandboxBackend):
             # Get output
             stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")[:10000]
             stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")[:5000]
+
+            # Clean up container
+            try:
+                container.remove(force=True)
+            except Exception as e:
+                logger.warning(f"[Docker] Failed to remove container: {e}")
 
             duration_ms = int((time.time() - start_time) * 1000)
             exit_code = result.get("StatusCode", 1)
