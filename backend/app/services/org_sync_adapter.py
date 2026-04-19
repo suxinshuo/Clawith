@@ -625,6 +625,7 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
     FEISHU_APP_TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"
     FEISHU_DEPT_URL = "https://open.feishu.cn/open-apis/contact/v3/departments"
     FEISHU_USERS_URL = "https://open.feishu.cn/open-apis/contact/v3/users/find_by_department"
+    FEISHU_SCOPES_URL = "https://open.feishu.cn/open-apis/contact/v3/scopes"
 
     def __init__(self, provider: IdentityProvider | None = None, config: dict | None = None, tenant_id: uuid.UUID | None = None):
         super().__init__(provider, config, tenant_id)
@@ -644,24 +645,97 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
             data = resp.json()
             return data.get("tenant_access_token") or data.get("app_access_token") or ""
 
+    async def fetch_auth_scopes(self, token: str, client: httpx.AsyncClient) -> list[str]:
+        """Fetch authorized department IDs from Feishu scopes API.
+
+        Returns a list of open_department_id strings the app is authorized to access.
+        Returns empty list on API error (caller should fall back to root "0").
+        """
+        try:
+            resp = await client.get(
+                self.FEISHU_SCOPES_URL,
+                params={"department_id_type": "open_department_id"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            data = resp.json()
+        except Exception as exc:
+            logger.warning(
+                f"Feishu scopes API request failed ({exc!r}), "
+                f"falling back to root department."
+            )
+            return []
+
+        if data.get("code") != 0:
+            logger.warning(
+                f"Feishu scopes API failed (code={data.get('code')}), "
+                f"falling back to root department. "
+                f"Ensure 'contact:department.base:readonly' permission is enabled."
+            )
+            return []
+
+        dept_ids = data.get("data", {}).get("department_ids", []) or []
+        logger.info(f"Feishu auth scopes: {len(dept_ids)} authorized departments")
+        return dept_ids
+
+    async def fetch_department_info(
+        self, dept_id: str, token: str, client: httpx.AsyncClient
+    ) -> dict | None:
+        """Fetch detail for a single department.
+
+        Returns the department dict (with name, parent_department_id, member_count, etc.)
+        or None if the API call fails.
+        """
+        try:
+            resp = await client.get(
+                f"{self.FEISHU_DEPT_URL}/{dept_id}",
+                params={"department_id_type": "open_department_id"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            data = resp.json()
+        except Exception as exc:
+            logger.error(
+                f"Feishu fetch department info request failed for {dept_id}: {exc!r}"
+            )
+            return None
+
+        if data.get("code") != 0:
+            logger.error(
+                f"Feishu fetch department info error for {dept_id}: "
+                f"code={data.get('code')}, msg={data.get('msg', '')}"
+            )
+            return None
+
+        return data.get("data", {}).get("department")
+
     async def fetch_departments(self) -> list[ExternalDepartment]:
-        """Fetch all departments from Feishu using concurrent recursive calls to get parent-child relationships."""
+        """Fetch all departments from Feishu.
+
+        Automatically discovers authorized department scopes:
+        - Full access (root "0" in scopes): recurse from root (original behavior).
+        - Partial access: fetch detail for each authorized dept, restore parent
+          hierarchy among them, then recurse children of each.
+        - Scopes API failure: fall back to root "0" (backward compatible).
+        """
         token = await self.get_access_token()
         all_depts: list[ExternalDepartment] = []
-        # Add a virtual root for the tenant, consistent with DingTalk root behavior
+
+        # Virtual root, consistent with DingTalk root behavior
         all_depts.append(
             ExternalDepartment(
                 external_id="0",
                 name="Root",
                 parent_external_id=None,
                 member_count=0,
-                raw_data={"department_id": "0", "name": "Root"}
+                raw_data={"department_id": "0", "name": "Root"},
             )
         )
-        
+
         async with httpx.AsyncClient() as client:
-            sem = asyncio.Semaphore(15)  # Limit concurrent requests to avoid rate limits
-            
+            sem = asyncio.Semaphore(15)
+            # Departments already added via the detail path (partial-access);
+            # fetch_children skips these to avoid duplicates.
+            seen_dept_ids: set[str] = set()
+
             async def fetch_children(parent_id: str):
                 page_token = ""
                 tasks = []
@@ -676,9 +750,9 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
 
                     async with sem:
                         resp = await client.get(
-                            f"{self.FEISHU_DEPT_URL}/{parent_id}/children", 
-                            params=params, 
-                            headers={"Authorization": f"Bearer {token}"}
+                            f"{self.FEISHU_DEPT_URL}/{parent_id}/children",
+                            params=params,
+                            headers={"Authorization": f"Bearer {token}"},
                         )
                     data = resp.json()
 
@@ -690,11 +764,11 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
                     items = res_data.get("items", []) or []
                     for item in items:
                         dept_id = item.get("open_department_id")
-                        if not dept_id: continue
-                        
-                        # Since we fetched using parent_id, we intrinsically know the parent!
+                        if not dept_id or dept_id in seen_dept_ids:
+                            continue
+
                         parent_external = parent_id if parent_id and parent_id != "0" else "0"
-                        
+
                         dept = ExternalDepartment(
                             external_id=dept_id,
                             name=item.get("name", ""),
@@ -703,19 +777,69 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
                             raw_data=item,
                         )
                         all_depts.append(dept)
-                        
-                        # Recursively fetch children for this department
+                        seen_dept_ids.add(dept_id)
                         tasks.append(fetch_children(dept_id))
 
                     page_token = res_data.get("page_token", "")
                     if not page_token:
                         break
-                        
+
                 if tasks:
                     await asyncio.gather(*tasks)
 
-            await fetch_children("0")
-                        
+            # Discover authorized scopes
+            scoped_dept_ids = await self.fetch_auth_scopes(token, client)
+
+            if not scoped_dept_ids or "0" in scoped_dept_ids:
+                # Full access or scopes API failed: use original logic
+                await fetch_children("0")
+            else:
+                # Partial access: fetch detail for each authorized dept,
+                # restore parent hierarchy, then recurse children
+                logger.info(f"Starting sync from scoped departments: {scoped_dept_ids}")
+                scoped_set = set(scoped_dept_ids)
+                dept_infos: dict[str, dict] = {}
+
+                for dept_id in scoped_dept_ids:
+                    info = await self.fetch_department_info(dept_id, token, client)
+                    if info:
+                        dept_infos[dept_id] = info
+
+                # Build ExternalDepartment list with parent restoration
+                for dept_id in scoped_dept_ids:
+                    info = dept_infos.get(dept_id)
+                    if info:
+                        parent_dept_id = info.get("parent_department_id", "")
+                        if parent_dept_id in scoped_set:
+                            parent_external_id = parent_dept_id
+                        else:
+                            parent_external_id = "0"
+
+                        all_depts.append(ExternalDepartment(
+                            external_id=dept_id,
+                            name=info.get("name", ""),
+                            parent_external_id=parent_external_id,
+                            member_count=info.get("member_count", 0),
+                            raw_data=info,
+                        ))
+                    else:
+                        # Detail fetch failed: add with degraded info
+                        all_depts.append(ExternalDepartment(
+                            external_id=dept_id,
+                            name=dept_id,
+                            parent_external_id="0",
+                            member_count=0,
+                            raw_data={},
+                        ))
+
+                # Mark scoped depts as seen so fetch_children won't re-add them
+                seen_dept_ids.update(scoped_dept_ids)
+
+                # Recurse children for each authorized department
+                child_tasks = [fetch_children(dept_id) for dept_id in scoped_dept_ids]
+                if child_tasks:
+                    await asyncio.gather(*child_tasks)
+
         logger.info(f"Feishu fetched {len(all_depts)} departments total.")
         return all_depts
 
