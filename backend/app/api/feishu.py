@@ -797,6 +797,16 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                     })
                     elements.append({"tag": "hr"})
 
+                # Tool call summary (non-streaming final card only)
+                if not streaming and _tool_call_records:
+                    names = [r["name"] for r in _tool_call_records]
+                    elements.append({
+                        "tag": "markdown",
+                        "content": f"<font color='grey'>🔧 Used {len(_tool_call_records)} tools: {', '.join(names)}</font>",
+                        "text_size": "notation",
+                    })
+                    elements.append({"tag": "hr"})
+
                 body = answer_text + ("▌" if streaming and answer_text else ("..." if streaming else ""))
                 elements.append({"tag": "markdown", "content": body or "..."})
                 return {
