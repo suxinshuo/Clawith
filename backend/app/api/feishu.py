@@ -731,6 +731,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
             _agent_name = agent_obj.name if agent_obj else "AI 回复"
             _tool_status_running: dict[str, str] = {}
             _tool_status_done: list[str] = []
+            _tool_call_records: list[dict] = []  # {"name": str, "result_summary": str}
             _patch_queue = _SerialPatchQueue()
             _heartbeat_task: asyncio.Task | None = None
             _llm_done = False
@@ -760,27 +761,33 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                 elements = []
 
                 # Tool status section.
-                # For the primary text-streaming path we use the split running/done dicts;
-                # callers may pass an explicit list (image streaming) as override.
                 if tool_status_lines is not None:
                     # Caller-supplied override (image path): plain list, no split needed.
                     if tool_status_lines:
                         elements.append({
                             "tag": "markdown",
                             "content": "\n".join(tool_status_lines[-_TOOL_STATUS_KEEP_LINES:]),
+                            "text_size": "notation",
                         })
                         elements.append({"tag": "hr"})
                 else:
-                    # Primary text-streaming path: show done history + any still-running tools.
-                    # _tool_status_running entries are removed when the tool completes,
-                    # so only genuinely in-flight tools appear here.
+                    # Primary text-streaming path: done tools compact on one line,
+                    # running tools each on own line, all in small notation size.
                     done_visible = _tool_status_done[-_TOOL_STATUS_KEEP_LINES:]
                     running_visible = list(_tool_status_running.values())
-                    all_visible = done_visible + running_visible
-                    if all_visible:
+                    parts = []
+                    if done_visible:
+                        if len(done_visible) <= 8:
+                            parts.append(f"<font color='grey'>{' · '.join(done_visible)}</font>")
+                        else:
+                            parts.append(f"<font color='grey'>✅ {len(done_visible)} tools done</font>")
+                    if running_visible:
+                        parts.extend(running_visible)
+                    if parts:
                         elements.append({
                             "tag": "markdown",
-                            "content": "\n".join(all_visible),
+                            "content": "\n".join(parts),
+                            "text_size": "notation",
                         })
                         elements.append({"tag": "hr"})
 
@@ -790,6 +797,16 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                     elements.append({
                         "tag": "markdown",
                         "content": f"<font color='grey'>💭 **Thinking**\n{think_preview}{'...' if len(thinking_text) > 200 else ''}</font>",
+                    })
+                    elements.append({"tag": "hr"})
+
+                # Tool call summary (non-streaming final card only)
+                if not streaming and _tool_call_records:
+                    names = [r["name"] for r in _tool_call_records]
+                    elements.append({
+                        "tag": "markdown",
+                        "content": f"<font color='grey'>🔧 Used {len(_tool_call_records)} tools: {', '.join(names)}</font>",
+                        "text_size": "notation",
                     })
                     elements.append({"tag": "hr"})
 
@@ -819,6 +836,27 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                         },
                         "border": {"color": "grey", "corner_radius": "5px"},
                         "elements": [{"tag": "markdown", "content": thinking_text, "text_size": "notation"}],
+                    })
+                # Tool call summary panel
+                if _tool_call_records:
+                    detail_lines = []
+                    for rec in _tool_call_records:
+                        if rec["result_summary"]:
+                            detail_lines.append(f"{rec['name']} — {rec['result_summary']}")
+                        else:
+                            detail_lines.append(rec["name"])
+                    elements.append({
+                        "tag": "collapsible_panel",
+                        "expanded": False,
+                        "header": {
+                            "title": {"tag": "markdown", "content": f"🔧 Used {len(_tool_call_records)} tools"},
+                            "vertical_align": "center",
+                            "icon": {"tag": "standard_icon", "token": "down-small-ccm_outlined", "size": "16px 16px"},
+                            "icon_position": "follow_text",
+                            "icon_expanded_angle": -180,
+                        },
+                        "border": {"color": "grey", "corner_radius": "5px"},
+                        "elements": [{"tag": "markdown", "content": "\n".join(detail_lines), "text_size": "notation"}],
                     })
                 elements.append({"tag": "markdown", "content": answer_text or "..."})
                 return {
@@ -859,14 +897,18 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                     accumulated = "".join(_stream_buffer)
                     if cardkit_card_id:
                         # Build composite content: tool status lines + answer text.
-                        # This mirrors the IM Patch path where _build_card() includes the
-                        # tool status section, so CardKit users also see which tools are
-                        # running or completed during the LLM turn.
                         done_visible = _tool_status_done[-_TOOL_STATUS_KEEP_LINES:]
                         running_visible = list(_tool_status_running.values())
-                        all_tool_lines = done_visible + running_visible
-                        if all_tool_lines:
-                            tool_section = "\n".join(all_tool_lines)
+                        parts = []
+                        if done_visible:
+                            if len(done_visible) <= 8:
+                                parts.append(f"<font color='grey'>{' · '.join(done_visible)}</font>")
+                            else:
+                                parts.append(f"<font color='grey'>✅ {len(done_visible)} tools done</font>")
+                        if running_visible:
+                            parts.extend(running_visible)
+                        if parts:
+                            tool_section = "\n".join(parts)
                             cardkit_text = f"{tool_section}\n---\n{accumulated}" if accumulated else tool_section
                         else:
                             cardkit_text = accumulated
@@ -916,19 +958,20 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                 ensuring finished tools never linger as ⏳ in the card.
                 """
                 tool_name = evt.get("name") or "unknown_tool"
-                # Use call_id when available (unique per invocation); fall back to name.
                 call_id = evt.get("call_id") or tool_name
                 status = (evt.get("status") or "").lower()
                 if status == "running":
-                    # Register as in-flight; will be removed when "done" arrives.
-                    _tool_status_running[call_id] = f"⏳ Tool running: `{tool_name}`"
+                    _tool_status_running[call_id] = f"⏳ {tool_name}"
                 elif status == "done":
-                    # Remove from running dict so the ⏳ icon disappears immediately.
                     _tool_status_running.pop(call_id, None)
-                    _tool_status_done.append(f"✅ Tool done: `{tool_name}`")
+                    _tool_status_done.append(f"✅ {tool_name}")
+                    _tool_call_records.append({
+                        "name": tool_name,
+                        "result_summary": (str(evt.get("result") or ""))[:80],
+                    })
                 else:
                     _tool_status_running.pop(call_id, None)
-                    _tool_status_done.append(f"ℹ️ Tool update: `{tool_name}` ({status or 'unknown'})")
+                    _tool_status_done.append(f"ℹ️ {tool_name} ({status})")
                 await _flush_stream("tool")
 
             async def _heartbeat():
