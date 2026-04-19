@@ -761,27 +761,30 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                 elements = []
 
                 # Tool status section.
-                # For the primary text-streaming path we use the split running/done dicts;
-                # callers may pass an explicit list (image streaming) as override.
                 if tool_status_lines is not None:
                     # Caller-supplied override (image path): plain list, no split needed.
                     if tool_status_lines:
                         elements.append({
                             "tag": "markdown",
                             "content": "\n".join(tool_status_lines[-_TOOL_STATUS_KEEP_LINES:]),
+                            "text_size": "notation",
                         })
                         elements.append({"tag": "hr"})
                 else:
-                    # Primary text-streaming path: show done history + any still-running tools.
-                    # _tool_status_running entries are removed when the tool completes,
-                    # so only genuinely in-flight tools appear here.
+                    # Primary text-streaming path: done tools compact on one line,
+                    # running tools each on own line, all in small notation size.
                     done_visible = _tool_status_done[-_TOOL_STATUS_KEEP_LINES:]
                     running_visible = list(_tool_status_running.values())
-                    all_visible = done_visible + running_visible
-                    if all_visible:
+                    parts = []
+                    if done_visible:
+                        parts.append(f"<font color='grey'>{' · '.join(done_visible)}</font>")
+                    if running_visible:
+                        parts.extend(running_visible)
+                    if parts:
                         elements.append({
                             "tag": "markdown",
-                            "content": "\n".join(all_visible),
+                            "content": "\n".join(parts),
+                            "text_size": "notation",
                         })
                         elements.append({"tag": "hr"})
 
