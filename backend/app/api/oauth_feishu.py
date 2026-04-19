@@ -6,7 +6,6 @@ Bearer auth instead of client_id/client_secret in the body.
 """
 
 import asyncio
-import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Query
