@@ -777,7 +777,10 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                     running_visible = list(_tool_status_running.values())
                     parts = []
                     if done_visible:
-                        parts.append(f"<font color='grey'>{' · '.join(done_visible)}</font>")
+                        if len(done_visible) <= 8:
+                            parts.append(f"<font color='grey'>{' · '.join(done_visible)}</font>")
+                        else:
+                            parts.append(f"<font color='grey'>✅ {len(done_visible)} tools done</font>")
                     if running_visible:
                         parts.extend(running_visible)
                     if parts:
@@ -898,7 +901,10 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                         running_visible = list(_tool_status_running.values())
                         parts = []
                         if done_visible:
-                            parts.append(f"<font color='grey'>{' · '.join(done_visible)}</font>")
+                            if len(done_visible) <= 8:
+                                parts.append(f"<font color='grey'>{' · '.join(done_visible)}</font>")
+                            else:
+                                parts.append(f"<font color='grey'>✅ {len(done_visible)} tools done</font>")
                         if running_visible:
                             parts.extend(running_visible)
                         if parts:
@@ -965,7 +971,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                     })
                 else:
                     _tool_status_running.pop(call_id, None)
-                    _tool_status_done.append(f"ℹ️ {tool_name}")
+                    _tool_status_done.append(f"ℹ️ {tool_name} ({status})")
                 await _flush_stream("tool")
 
             async def _heartbeat():
