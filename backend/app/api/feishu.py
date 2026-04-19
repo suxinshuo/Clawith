@@ -824,6 +824,27 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                         "border": {"color": "grey", "corner_radius": "5px"},
                         "elements": [{"tag": "markdown", "content": thinking_text, "text_size": "notation"}],
                     })
+                # Tool call summary panel
+                if _tool_call_records:
+                    detail_lines = []
+                    for rec in _tool_call_records:
+                        if rec["result_summary"]:
+                            detail_lines.append(f"{rec['name']} — {rec['result_summary']}")
+                        else:
+                            detail_lines.append(rec["name"])
+                    elements.append({
+                        "tag": "collapsible_panel",
+                        "expanded": False,
+                        "header": {
+                            "title": {"tag": "markdown", "content": f"🔧 Used {len(_tool_call_records)} tools"},
+                            "vertical_align": "center",
+                            "icon": {"tag": "standard_icon", "token": "down-small-ccm_outlined", "size": "16px 16px"},
+                            "icon_position": "follow_text",
+                            "icon_expanded_angle": -180,
+                        },
+                        "border": {"color": "grey", "corner_radius": "5px"},
+                        "elements": [{"tag": "markdown", "content": "\n".join(detail_lines), "text_size": "notation"}],
+                    })
                 elements.append({"tag": "markdown", "content": answer_text or "..."})
                 return {
                     "schema": "2.0",
