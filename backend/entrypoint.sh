@@ -15,6 +15,17 @@ if [ "$(id -u)" = '0' ]; then
     chown -R clawith:clawith ${AGENT_DATA_DIR}
     chmod -R o+rX /app
 
+    # Grant clawith access to docker.sock for sandbox execution
+    if [ -S /var/run/docker.sock ]; then
+        DOCKER_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || stat -f '%g' /var/run/docker.sock 2>/dev/null)
+        if [ -n "$DOCKER_GID" ] && [ "$DOCKER_GID" != "0" ]; then
+            groupadd -g "$DOCKER_GID" docker 2>/dev/null || true
+            usermod -aG docker clawith 2>/dev/null || true
+        else
+            chmod 666 /var/run/docker.sock
+        fi
+    fi
+
     echo "[entrypoint] Dropping privileges to 'clawith' and re-executing..."
     exec gosu clawith /bin/bash "$0" "$@"
 fi
