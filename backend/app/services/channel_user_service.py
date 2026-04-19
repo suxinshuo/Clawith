@@ -241,7 +241,7 @@ class ChannelUserService:
             return result.scalar_one_or_none()
         except Exception as e:
             # OrgMember table may not exist or org sync not enabled
-            logger.debug(f"[{channel_type}] OrgMember lookup failed: {e}")
+            logger.warning(f"[{channel_type}] OrgMember lookup failed: {e}")
             return None
 
     async def _create_org_member_shell(
