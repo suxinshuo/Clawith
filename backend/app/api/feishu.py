@@ -860,14 +860,15 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                     accumulated = "".join(_stream_buffer)
                     if cardkit_card_id:
                         # Build composite content: tool status lines + answer text.
-                        # This mirrors the IM Patch path where _build_card() includes the
-                        # tool status section, so CardKit users also see which tools are
-                        # running or completed during the LLM turn.
                         done_visible = _tool_status_done[-_TOOL_STATUS_KEEP_LINES:]
                         running_visible = list(_tool_status_running.values())
-                        all_tool_lines = done_visible + running_visible
-                        if all_tool_lines:
-                            tool_section = "\n".join(all_tool_lines)
+                        parts = []
+                        if done_visible:
+                            parts.append(f"<font color='grey'>{' · '.join(done_visible)}</font>")
+                        if running_visible:
+                            parts.extend(running_visible)
+                        if parts:
+                            tool_section = "\n".join(parts)
                             cardkit_text = f"{tool_section}\n---\n{accumulated}" if accumulated else tool_section
                         else:
                             cardkit_text = accumulated
