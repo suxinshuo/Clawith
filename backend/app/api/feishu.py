@@ -731,6 +731,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
             _agent_name = agent_obj.name if agent_obj else "AI 回复"
             _tool_status_running: dict[str, str] = {}
             _tool_status_done: list[str] = []
+            _tool_call_records: list[dict] = []  # {"name": str, "result_summary": str}
             _patch_queue = _SerialPatchQueue()
             _heartbeat_task: asyncio.Task | None = None
             _llm_done = False
@@ -916,19 +917,20 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                 ensuring finished tools never linger as ⏳ in the card.
                 """
                 tool_name = evt.get("name") or "unknown_tool"
-                # Use call_id when available (unique per invocation); fall back to name.
                 call_id = evt.get("call_id") or tool_name
                 status = (evt.get("status") or "").lower()
                 if status == "running":
-                    # Register as in-flight; will be removed when "done" arrives.
-                    _tool_status_running[call_id] = f"⏳ Tool running: `{tool_name}`"
+                    _tool_status_running[call_id] = f"⏳ {tool_name}"
                 elif status == "done":
-                    # Remove from running dict so the ⏳ icon disappears immediately.
                     _tool_status_running.pop(call_id, None)
-                    _tool_status_done.append(f"✅ Tool done: `{tool_name}`")
+                    _tool_status_done.append(f"✅ {tool_name}")
+                    _tool_call_records.append({
+                        "name": tool_name,
+                        "result_summary": (str(evt.get("result") or ""))[:80],
+                    })
                 else:
                     _tool_status_running.pop(call_id, None)
-                    _tool_status_done.append(f"ℹ️ Tool update: `{tool_name}` ({status or 'unknown'})")
+                    _tool_status_done.append(f"ℹ️ {tool_name}")
                 await _flush_stream("tool")
 
             async def _heartbeat():
