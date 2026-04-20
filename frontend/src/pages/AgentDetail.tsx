@@ -389,7 +389,7 @@ function ToolsManager({ agentId, canManage = false }: { agentId: string; canMana
                 <div style={{ padding: '16px', border: '1px solid var(--border-subtle)', borderRadius: '8px', marginBottom: '4px' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
                         <h4 style={{ margin: 0, fontSize: '14px' }}>{t('agent.globalCredentials', 'Agent 全局凭据')}</h4>
-                        {canManage && <button style={{ background: 'var(--accent-color)', color: '#fff', border: 'none', borderRadius: '6px', padding: '4px 10px', fontSize: '11px', cursor: 'pointer' }} onClick={() => setShowAddAgentCred(true)}>+ {t('common.add', '添加')}</button>}
+                        {canManage && <button className="btn btn-primary" style={{ padding: '4px 10px', fontSize: '11px' }} onClick={() => setShowAddAgentCred(true)}>+ {t('common.add', '添加')}</button>}
                     </div>
                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '10px' }}>
                         {t('agent.globalCredentialsHint', '由 Agent 创建者设置，所有使用此 Agent 的用户共享。优先级：用户凭据 > Agent 凭据 > 公司凭据')}
@@ -435,7 +435,6 @@ function ToolsManager({ agentId, canManage = false }: { agentId: string; canMana
                                     value={agentCredForm.credential_type}
                                     onChange={e => setAgentCredForm(p => ({ ...p, credential_type: e.target.value }))}>
                                     <option value="api_key">API Key</option>
-                                    <option value="basic_auth">Basic Auth</option>
                                     <option value="oauth2">OAuth2</option>
                                 </select>
                                 <input style={{ padding: '6px 10px', border: '1px solid var(--border-subtle)', borderRadius: '6px', fontSize: '12px', background: 'var(--bg-secondary)' }}
@@ -453,7 +452,7 @@ function ToolsManager({ agentId, canManage = false }: { agentId: string; canMana
                                     onChange={e => setAgentCredForm(p => ({ ...p, external_username: e.target.value }))} />
                             </div>
                             <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
-                                <button style={{ background: 'var(--accent-color)', color: '#fff', border: 'none', borderRadius: '6px', padding: '6px 14px', fontSize: '12px', cursor: 'pointer' }} onClick={async () => {
+                                <button className="btn btn-primary" style={{ padding: '6px 14px', fontSize: '12px' }} onClick={async () => {
                                     if (!agentCredForm.provider || !agentCredForm.access_token) return;
                                     const token = localStorage.getItem('token');
                                     await fetch(`/api/tools/agents/${agentId}/credentials`, {

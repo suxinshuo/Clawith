@@ -1850,6 +1850,9 @@ export default function EnterpriseSettings() {
     const [mcpServerSaving, setMcpServerSaving] = useState(false);
     const [editingToolId, setEditingToolId] = useState<string | null>(null);
     const [editingConfig, setEditingConfig] = useState<Record<string, any>>({});
+    const [credPickerToolId, setCredPickerToolId] = useState<string | null>(null);
+    const [credPickerCustom, setCredPickerCustom] = useState('');
+    const [credPickerPos, setCredPickerPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
 
     const [configCategory, setConfigCategory] = useState<string | null>(null);
 
@@ -3026,6 +3029,106 @@ export default function EnterpriseSettings() {
                                                                                     </div>
                                                                                 </div>
                                                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+                                                                                    <div>
+                                                                                        <span
+                                                                                            onClick={(e) => {
+                                                                                                e.stopPropagation();
+                                                                                                if (credPickerToolId === tool.id) { setCredPickerToolId(null); return; }
+                                                                                                const rect = e.currentTarget.getBoundingClientRect();
+                                                                                                setCredPickerPos({ top: rect.bottom + 4, left: rect.right });
+                                                                                                setCredPickerToolId(tool.id);
+                                                                                                setCredPickerCustom('');
+                                                                                            }}
+                                                                                            style={{
+                                                                                                display: 'inline-flex', alignItems: 'center', gap: '4px',
+                                                                                                fontSize: '11px', padding: '2px 8px', borderRadius: '10px', cursor: 'pointer',
+                                                                                                border: '1px solid var(--border-subtle)',
+                                                                                                background: tool.required_credential_provider ? 'rgba(245,158,11,0.1)' : 'var(--bg-secondary)',
+                                                                                                color: tool.required_credential_provider ? 'rgb(180,120,0)' : 'var(--text-tertiary)',
+                                                                                                transition: 'all 0.15s',
+                                                                                            }}
+                                                                                            title={t('enterprise.tools.credentialProvider', '需要用户凭据 (Provider)')}
+                                                                                        >
+                                                                                            {tool.required_credential_provider ? `🔑 ${tool.required_credential_provider}` : t('enterprise.tools.noCredential', '无需凭据')}
+                                                                                            <span style={{ fontSize: '8px', opacity: 0.6 }}>▼</span>
+                                                                                        </span>
+                                                                                        {credPickerToolId === tool.id && (
+                                                                                            <>
+                                                                                                <div style={{ position: 'fixed', inset: 0, zIndex: 999 }} onClick={() => setCredPickerToolId(null)} />
+                                                                                                <div style={{
+                                                                                                    position: 'fixed', top: credPickerPos.top, left: credPickerPos.left, transform: 'translateX(-100%)', zIndex: 1000,
+                                                                                                    background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)',
+                                                                                                    borderRadius: '8px', boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+                                                                                                    minWidth: '160px', overflow: 'hidden',
+                                                                                                }}>
+                                                                                                    {[
+                                                                                                        { value: '', label: t('enterprise.tools.noCredential', '无需凭据') },
+                                                                                                        { value: 'github', label: 'GitHub' },
+                                                                                                        { value: 'jira', label: 'Jira' },
+                                                                                                        { value: 'slack', label: 'Slack' },
+                                                                                                        { value: 'feishu', label: 'Feishu' },
+                                                                                                        { value: 'linear', label: 'Linear' },
+                                                                                                    ].map(opt => (
+                                                                                                        <div
+                                                                                                            key={opt.value}
+                                                                                                            onClick={async (e) => {
+                                                                                                                e.stopPropagation();
+                                                                                                                try {
+                                                                                                                    await fetchJson(`/tools/${tool.id}`, { method: 'PUT', body: JSON.stringify({ required_credential_provider: opt.value || null }) });
+                                                                                                                    loadAllTools();
+                                                                                                                } catch {}
+                                                                                                                setCredPickerToolId(null);
+                                                                                                            }}
+                                                                                                            style={{
+                                                                                                                padding: '7px 12px', fontSize: '12px', cursor: 'pointer',
+                                                                                                                background: (tool.required_credential_provider || '') === opt.value ? 'var(--bg-tertiary)' : 'transparent',
+                                                                                                                color: 'var(--text-primary)',
+                                                                                                                borderBottom: '1px solid var(--border-subtle)',
+                                                                                                            }}
+                                                                                                            onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-secondary)')}
+                                                                                                            onMouseLeave={e => (e.currentTarget.style.background = (tool.required_credential_provider || '') === opt.value ? 'var(--bg-tertiary)' : 'transparent')}
+                                                                                                        >
+                                                                                                            {opt.value ? `🔑 ${opt.label}` : opt.label}
+                                                                                                        </div>
+                                                                                                    ))}
+                                                                                                    <div style={{ padding: '6px 8px', borderTop: '1px solid var(--border-subtle)' }}>
+                                                                                                        <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginBottom: '4px' }}>{t('enterprise.tools.customProvider', '自定义')}</div>
+                                                                                                        <div style={{ display: 'flex', gap: '4px' }}>
+                                                                                                            <input
+                                                                                                                type="text"
+                                                                                                                value={credPickerCustom}
+                                                                                                                onChange={e => setCredPickerCustom(e.target.value)}
+                                                                                                                onKeyDown={async (e) => {
+                                                                                                                    if (e.key === 'Enter' && credPickerCustom.trim()) {
+                                                                                                                        try {
+                                                                                                                            await fetchJson(`/tools/${tool.id}`, { method: 'PUT', body: JSON.stringify({ required_credential_provider: credPickerCustom.trim() }) });
+                                                                                                                            loadAllTools();
+                                                                                                                        } catch {}
+                                                                                                                        setCredPickerToolId(null);
+                                                                                                                    }
+                                                                                                                }}
+                                                                                                                placeholder="e.g. confluence"
+                                                                                                                onClick={e => e.stopPropagation()}
+                                                                                                                style={{ flex: 1, fontSize: '11px', padding: '3px 6px', borderRadius: '4px', border: '1px solid var(--border-subtle)', background: 'var(--bg-secondary)', outline: 'none', minWidth: 0 }}
+                                                                                                            />
+                                                                                                            <button
+                                                                                                                onClick={async (e) => {
+                                                                                                                    e.stopPropagation();
+                                                                                                                    if (!credPickerCustom.trim()) return;
+                                                                                                                    try {
+                                                                                                                        await fetchJson(`/tools/${tool.id}`, { method: 'PUT', body: JSON.stringify({ required_credential_provider: credPickerCustom.trim() }) });
+                                                                                                                        loadAllTools();
+                                                                                                                    } catch {}
+                                                                                                                    setCredPickerToolId(null);
+                                                                                                                }}
+                                                                                                                style={{ fontSize: '11px', padding: '3px 8px', borderRadius: '4px', border: 'none', background: 'var(--accent-primary)', color: '#fff', cursor: 'pointer', flexShrink: 0 }}
+                                                                                                            >OK</button>
+                                                                                                        </div>
+                                                                                                    </div>
+                                                                                                </div>
+                                                                                            </>
+                                                                                        )}
+                                                                                    </div>
                                                                                     <button className="btn btn-danger" style={{ padding: '3px 7px', fontSize: '10px' }} onClick={async () => {
                                                                                         if (!confirm(`${t('common.delete')} ${tool.display_name}?`)) return;
                                                                                         await fetchJson(`/tools/${tool.id}`, { method: 'DELETE' });
@@ -3161,28 +3264,6 @@ export default function EnterpriseSettings() {
                                                                                     {tool.is_default && <span style={{ fontSize: '10px', background: 'rgba(0,200,100,0.15)', color: 'var(--success)', borderRadius: '4px', padding: '1px 5px' }}>Default</span>}
                                                                                     {tool.config && Object.keys(tool.config).length > 0 && (
                                                                                         <span style={{ fontSize: '10px', background: 'rgba(99,102,241,0.15)', color: 'var(--accent-color)', borderRadius: '4px', padding: '1px 5px' }}>{t('enterprise.tools.configured', 'Configured')}</span>
-                                                                                    )}
-                                                                                    {tool.type === 'mcp' && (
-                                                                                        <select
-                                                                                            style={{ fontSize: '10px', padding: '1px 4px', borderRadius: '4px', border: '1px solid var(--border-subtle)', background: tool.required_credential_provider ? 'rgba(245,158,11,0.1)' : 'transparent', cursor: 'pointer' }}
-                                                                                            value={tool.required_credential_provider || ''}
-                                                                                            onChange={async (e) => {
-                                                                                                const val = e.target.value || null;
-                                                                                                try {
-                                                                                                    await fetchJson(`/tools/${tool.id}`, { method: 'PUT', body: JSON.stringify({ required_credential_provider: val }) });
-                                                                                                    loadAllTools();
-                                                                                                } catch {}
-                                                                                            }}
-                                                                                            onClick={(e) => e.stopPropagation()}
-                                                                                            title={t('enterprise.tools.credentialProvider', '需要用户凭据 (Provider)')}
-                                                                                        >
-                                                                                            <option value="">{t('enterprise.tools.noCredential', '无需凭据')}</option>
-                                                                                            <option value="github">github</option>
-                                                                                            <option value="jira">jira</option>
-                                                                                            <option value="slack">slack</option>
-                                                                                            <option value="feishu">feishu</option>
-                                                                                            <option value="linear">linear</option>
-                                                                                        </select>
                                                                                     )}
                                                                                 </div>
                                                                                 <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
