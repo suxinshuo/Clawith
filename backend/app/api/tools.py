@@ -288,7 +288,6 @@ class MCPServerUpdate(BaseModel):
     server_name: str            # Identifies which server's tools to update
     server_url: str             # New MCP server URL (may contain embedded key)
     api_key: str | None = None  # Optional standalone Bearer key
-    required_credential_provider: str | None = None  # Set for all tools from this server
     # Target tenant (platform admins may manage another company's tools)
     tenant_id: str | None = None
 
@@ -343,8 +342,6 @@ async def update_mcp_server(
             current_config["api_key"] = data.api_key
             tool.config = _encrypt_sensitive_fields(current_config, tool.config_schema)
         # If api_key is None (not provided), preserve the existing encrypted key
-        if data.required_credential_provider is not None:
-            tool.required_credential_provider = data.required_credential_provider or None
 
     await db.commit()
     return {"ok": True, "updated": len(tools)}
