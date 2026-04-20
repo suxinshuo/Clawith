@@ -3162,8 +3162,27 @@ export default function EnterpriseSettings() {
                                                                                     {tool.config && Object.keys(tool.config).length > 0 && (
                                                                                         <span style={{ fontSize: '10px', background: 'rgba(99,102,241,0.15)', color: 'var(--accent-color)', borderRadius: '4px', padding: '1px 5px' }}>{t('enterprise.tools.configured', 'Configured')}</span>
                                                                                     )}
-                                                                                    {tool.required_credential_provider && (
-                                                                                        <span style={{ fontSize: '10px', background: 'rgba(245,158,11,0.15)', color: 'rgb(180,120,0)', borderRadius: '4px', padding: '1px 5px' }}>🔑 {tool.required_credential_provider}</span>
+                                                                                    {tool.type === 'mcp' && (
+                                                                                        <select
+                                                                                            style={{ fontSize: '10px', padding: '1px 4px', borderRadius: '4px', border: '1px solid var(--border-subtle)', background: tool.required_credential_provider ? 'rgba(245,158,11,0.1)' : 'transparent', cursor: 'pointer' }}
+                                                                                            value={tool.required_credential_provider || ''}
+                                                                                            onChange={async (e) => {
+                                                                                                const val = e.target.value || null;
+                                                                                                try {
+                                                                                                    await fetchJson(`/tools/${tool.id}`, { method: 'PUT', body: JSON.stringify({ required_credential_provider: val }) });
+                                                                                                    loadAllTools();
+                                                                                                } catch {}
+                                                                                            }}
+                                                                                            onClick={(e) => e.stopPropagation()}
+                                                                                            title={t('enterprise.tools.credentialProvider', '需要用户凭据 (Provider)')}
+                                                                                        >
+                                                                                            <option value="">{t('enterprise.tools.noCredential', '无需凭据')}</option>
+                                                                                            <option value="github">github</option>
+                                                                                            <option value="jira">jira</option>
+                                                                                            <option value="slack">slack</option>
+                                                                                            <option value="feishu">feishu</option>
+                                                                                            <option value="linear">linear</option>
+                                                                                        </select>
                                                                                     )}
                                                                                 </div>
                                                                                 <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
