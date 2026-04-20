@@ -1837,7 +1837,7 @@ export default function EnterpriseSettings() {
 
     const [allTools, setAllTools] = useState<any[]>([]);
     const [showAddMCP, setShowAddMCP] = useState(false);
-    const [mcpForm, setMcpForm] = useState({ server_url: '', server_name: '', api_key: '', required_credential_provider: '' });
+    const [mcpForm, setMcpForm] = useState({ server_url: '', server_name: '', api_key: '' });
     const [mcpRawInput, setMcpRawInput] = useState('');
     const [mcpTestResult, setMcpTestResult] = useState<any>(null);
     const [mcpTesting, setMcpTesting] = useState(false);
@@ -1846,7 +1846,6 @@ export default function EnterpriseSettings() {
         server_name: string;
         server_url: string;
         api_key: string;
-        required_credential_provider: string;
     } | null>(null);
     const [mcpServerSaving, setMcpServerSaving] = useState(false);
     const [editingToolId, setEditingToolId] = useState<string | null>(null);
@@ -2825,22 +2824,6 @@ export default function EnterpriseSettings() {
                                             />
                                         </div>
 
-                                        {/* User credential provider — requires end-user to supply their own token */}
-                                        <div>
-                                            <label style={{ display: 'block', fontSize: '12px', marginBottom: '4px' }}>
-                                                {t('enterprise.tools.credentialProvider', '需要用户凭据 (Provider)')} <span style={{ color: 'var(--text-tertiary)', fontWeight: 400 }}>(optional)</span>
-                                            </label>
-                                            <input
-                                                className="form-input"
-                                                value={mcpForm.required_credential_provider}
-                                                onChange={e => setMcpForm(p => ({ ...p, required_credential_provider: e.target.value }))}
-                                                placeholder={t('enterprise.tools.credentialProviderPlaceholder', '例: jira, github（留空则不需要用户凭据）')}
-                                            />
-                                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
-                                                {t('enterprise.tools.credentialProviderHint', '设置后，用户必须先在个人设置中填写该 Provider 的 Token 才能使用此工具')}
-                                            </div>
-                                        </div>
-
                                         {/* Auth explanation for non-obvious behavior */}
                                         <div style={{ padding: '10px 12px', background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.18)', borderRadius: '6px', fontSize: '11px', color: 'var(--text-secondary)', lineHeight: '1.65' }}>
                                             <div style={{ fontWeight: 600, marginBottom: '4px', color: 'var(--text-primary)' }}>How authentication works</div>
@@ -2858,7 +2841,7 @@ export default function EnterpriseSettings() {
                                                 } catch (e: any) { setMcpTestResult({ ok: false, error: e.message }); }
                                                 setMcpTesting(false);
                                             }}>{mcpTesting ? t('enterprise.tools.testing') : t('enterprise.tools.testConnection')}</button>
-                                            <button className="btn btn-secondary" onClick={() => { setShowAddMCP(false); setMcpTestResult(null); setMcpForm({ server_url: '', server_name: '', api_key: '', required_credential_provider: '' }); setMcpRawInput(''); }}>{t('common.cancel')}</button>
+                                            <button className="btn btn-secondary" onClick={() => { setShowAddMCP(false); setMcpTestResult(null); setMcpForm({ server_url: '', server_name: '', api_key: '' }); setMcpRawInput(''); }}>{t('common.cancel')}</button>
                                         </div>
                                         {mcpTestResult && (
                                             <div className="card" style={{ padding: '12px', background: mcpTestResult.ok ? 'rgba(0,200,100,0.1)' : 'rgba(255,0,0,0.1)' }}>
@@ -2887,7 +2870,6 @@ export default function EnterpriseSettings() {
                                                                                 mcp_tool_name: tool.name,
                                                                                 parameters_schema: tool.inputSchema || {},
                                                                                 is_default: false,
-                                                                                required_credential_provider: mcpForm.required_credential_provider || undefined,
                                                                                 tenant_id: selectedTenantId || undefined,
                                                                             })
                                                                         });
@@ -2923,7 +2905,6 @@ export default function EnterpriseSettings() {
                                                                                 mcp_tool_name: tool.name,
                                                                                 parameters_schema: tool.inputSchema || {},
                                                                                 is_default: false,
-                                                                                required_credential_provider: mcpForm.required_credential_provider || undefined,
                                                                                 tenant_id: selectedTenantId || undefined,
                                                                             })
                                                                         });
@@ -2937,7 +2918,7 @@ export default function EnterpriseSettings() {
                                                                     await fetchJson('/tools/mcp-server', { method: 'PUT', body: JSON.stringify({ server_name: serverName, server_url: mcpForm.server_url, api_key: mcpForm.api_key, tenant_id: selectedTenantId || undefined }) }).catch(() => {});
                                                                 }
                                                                 await loadAllTools();
-                                                                setShowAddMCP(false); setMcpTestResult(null); setMcpForm({ server_url: '', server_name: '', api_key: '', required_credential_provider: '' }); setMcpRawInput('');
+                                                                setShowAddMCP(false); setMcpTestResult(null); setMcpForm({ server_url: '', server_name: '', api_key: '' }); setMcpRawInput('');
                                                                 if (errors.length > 0) {
                                                                     alert(`Imported ${successCount}/${tools.length} tools.\nFailed:\n${errors.join('\n')}`);
                                                                 }
@@ -3003,9 +2984,6 @@ export default function EnterpriseSettings() {
                                                                             {(serverTools as any[]).some((t: any) => t.config && Object.keys(t.config).length > 0) && (
                                                                                 <span style={{ fontSize: '10px', background: 'rgba(0,200,100,0.12)', color: 'var(--success)', borderRadius: '4px', padding: '1px 5px' }}>Configured</span>
                                                                             )}
-                                                                            {(serverTools as any[]).some((t: any) => t.required_credential_provider) && (
-                                                                                <span style={{ fontSize: '10px', background: 'rgba(245,158,11,0.15)', color: 'rgb(180,120,0)', borderRadius: '4px', padding: '1px 5px' }}>🔑 {(serverTools as any[]).find((t: any) => t.required_credential_provider)?.required_credential_provider}</span>
-                                                                            )}
                                                                         </div>
                                                                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                                                             <button
@@ -3017,7 +2995,6 @@ export default function EnterpriseSettings() {
                                                                                         server_name: serverName,
                                                                                         server_url: firstTool?.mcp_server_url || '',
                                                                                         api_key: '',
-                                                                                        required_credential_provider: firstTool?.required_credential_provider || '',
                                                                                     });
                                                                                 }}
                                                                             >Edit Server</button>
@@ -3185,8 +3162,27 @@ export default function EnterpriseSettings() {
                                                                                     {tool.config && Object.keys(tool.config).length > 0 && (
                                                                                         <span style={{ fontSize: '10px', background: 'rgba(99,102,241,0.15)', color: 'var(--accent-color)', borderRadius: '4px', padding: '1px 5px' }}>{t('enterprise.tools.configured', 'Configured')}</span>
                                                                                     )}
-                                                                                    {tool.required_credential_provider && (
-                                                                                        <span style={{ fontSize: '10px', background: 'rgba(245,158,11,0.15)', color: 'rgb(180,120,0)', borderRadius: '4px', padding: '1px 5px' }}>🔑 {tool.required_credential_provider}</span>
+                                                                                    {tool.type === 'mcp' && (
+                                                                                        <select
+                                                                                            style={{ fontSize: '10px', padding: '1px 4px', borderRadius: '4px', border: '1px solid var(--border-subtle)', background: tool.required_credential_provider ? 'rgba(245,158,11,0.1)' : 'transparent', cursor: 'pointer' }}
+                                                                                            value={tool.required_credential_provider || ''}
+                                                                                            onChange={async (e) => {
+                                                                                                const val = e.target.value || null;
+                                                                                                try {
+                                                                                                    await fetchJson(`/tools/${tool.id}`, { method: 'PUT', body: JSON.stringify({ required_credential_provider: val }) });
+                                                                                                    loadAllTools();
+                                                                                                } catch {}
+                                                                                            }}
+                                                                                            onClick={(e) => e.stopPropagation()}
+                                                                                            title={t('enterprise.tools.credentialProvider', '需要用户凭据 (Provider)')}
+                                                                                        >
+                                                                                            <option value="">{t('enterprise.tools.noCredential', '无需凭据')}</option>
+                                                                                            <option value="github">github</option>
+                                                                                            <option value="jira">jira</option>
+                                                                                            <option value="slack">slack</option>
+                                                                                            <option value="feishu">feishu</option>
+                                                                                            <option value="linear">linear</option>
+                                                                                        </select>
                                                                                     )}
                                                                                 </div>
                                                                                 <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -3295,22 +3291,6 @@ export default function EnterpriseSettings() {
                                                 <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '3px' }}>Sent as <code style={{ background: 'rgba(0,0,0,0.06)', padding: '0 3px', borderRadius: '3px' }}>Authorization: Bearer ...</code> Takes priority over URL-embedded keys.</div>
                                             </div>
 
-                                            {/* User credential provider */}
-                                            <div>
-                                                <label style={{ display: 'block', fontSize: '12px', marginBottom: '4px' }}>
-                                                    {t('enterprise.tools.credentialProvider', '需要用户凭据 (Provider)')} <span style={{ color: 'var(--text-tertiary)', fontWeight: 400 }}>(optional)</span>
-                                                </label>
-                                                <input
-                                                    className="form-input"
-                                                    value={editingMcpServer.required_credential_provider}
-                                                    onChange={e => setEditingMcpServer(s => s ? { ...s, required_credential_provider: e.target.value } : null)}
-                                                    placeholder={t('enterprise.tools.credentialProviderPlaceholder', '例: jira, github（留空则不需要用户凭据）')}
-                                                />
-                                                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '3px' }}>
-                                                    {t('enterprise.tools.credentialProviderHint', '设置后，用户必须先在个人设置中填写该 Provider 的 Token 才能使用此工具')}
-                                                </div>
-                                            </div>
-
                                             {/* Auth explanation */}
                                             <div style={{ padding: '10px 12px', background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.18)', borderRadius: '6px', fontSize: '11px', color: 'var(--text-secondary)', lineHeight: '1.65' }}>
                                                 <div style={{ fontWeight: 600, marginBottom: '4px', color: 'var(--text-primary)' }}>How authentication works</div>
@@ -3332,7 +3312,6 @@ export default function EnterpriseSettings() {
                                                             server_url: editingMcpServer.server_url,
                                                             // Only send api_key if the user typed something; null = keep existing
                                                             api_key: editingMcpServer.api_key || undefined,
-                                                            required_credential_provider: editingMcpServer.required_credential_provider || undefined,
                                                             tenant_id: selectedTenantId || undefined,
                                                         })
                                                     });

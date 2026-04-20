@@ -61,6 +61,9 @@ function ToolsManager({ agentId, canManage = false }: { agentId: string; canMana
     // Global (company-level) config for the currently open modal — used to show
     // lock hints and prevent agent from overriding company-set fields.
     const [configGlobalData, setConfigGlobalData] = useState<Record<string, any>>({});
+    const [agentCredentials, setAgentCredentials] = useState<any[]>([]);
+    const [showAddAgentCred, setShowAddAgentCred] = useState(false);
+    const [agentCredForm, setAgentCredForm] = useState({ provider: '', credential_type: 'api_key', access_token: '', external_user_id: '', external_username: '' });
 
     const CATEGORY_CONFIG_SCHEMAS: Record<string, any> = {
         agentbay: {
@@ -95,7 +98,17 @@ function ToolsManager({ agentId, canManage = false }: { agentId: string; canMana
         setLoading(false);
     };
 
-    useEffect(() => { loadTools(); }, [agentId]);
+    const loadAgentCredentials = async () => {
+        try {
+            const token = localStorage.getItem('token');
+            const res = await fetch(`/api/tools/agents/${agentId}/credentials`, {
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            if (res.ok) setAgentCredentials(await res.json());
+        } catch (e) { console.error(e); }
+    };
+
+    useEffect(() => { loadTools(); loadAgentCredentials(); }, [agentId]);
 
     const toggleTool = async (toolId: string, enabled: boolean) => {
         setTools(prev => prev.map(t => t.id === toolId ? { ...t, enabled } : t));
@@ -372,6 +385,97 @@ function ToolsManager({ agentId, canManage = false }: { agentId: string; canMana
     return (
         <>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                {/* Agent Global Credentials */}
+                <div style={{ padding: '16px', border: '1px solid var(--border-subtle)', borderRadius: '8px', marginBottom: '4px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                        <h4 style={{ margin: 0, fontSize: '14px' }}>{t('agent.globalCredentials', 'Agent 全局凭据')}</h4>
+                        {canManage && <button style={{ background: 'var(--accent-color)', color: '#fff', border: 'none', borderRadius: '6px', padding: '4px 10px', fontSize: '11px', cursor: 'pointer' }} onClick={() => setShowAddAgentCred(true)}>+ {t('common.add', '添加')}</button>}
+                    </div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '10px' }}>
+                        {t('agent.globalCredentialsHint', '由 Agent 创建者设置，所有使用此 Agent 的用户共享。优先级：用户凭据 > Agent 凭据 > 公司凭据')}
+                    </div>
+                    {agentCredentials.length === 0 ? (
+                        <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', textAlign: 'center', padding: '16px' }}>
+                            {t('agent.noCredentials', '暂无全局凭据')}
+                        </div>
+                    ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                            {agentCredentials.map((cred: any) => (
+                                <div key={cred.id} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 10px', background: 'var(--bg-secondary)', borderRadius: '6px', fontSize: '12px' }}>
+                                    <span style={{ fontWeight: 600, minWidth: '70px' }}>{cred.provider}</span>
+                                    <span style={{ color: 'var(--text-tertiary)' }}>{cred.credential_type}</span>
+                                    {cred.external_user_id && <span style={{ color: 'var(--text-secondary)' }}>ID: {cred.external_user_id}</span>}
+                                    <span style={{ fontFamily: 'monospace', color: 'var(--text-tertiary)' }}>{cred.access_token_masked}</span>
+                                    <span style={{ flex: 1 }} />
+                                    {canManage && (
+                                        <button style={{ background: 'none', border: 'none', color: 'var(--danger)', cursor: 'pointer', fontSize: '11px' }} onClick={async () => {
+                                            if (!confirm(t('common.confirmDelete', '确认删除？'))) return;
+                                            const token = localStorage.getItem('token');
+                                            await fetch(`/api/tools/agents/${agentId}/credentials/${cred.id}`, {
+                                                method: 'DELETE',
+                                                headers: { Authorization: `Bearer ${token}` },
+                                            });
+                                            loadAgentCredentials();
+                                        }}>{t('common.delete', '删除')}</button>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
+                    {/* Add credential form */}
+                    {showAddAgentCred && (
+                        <div style={{ marginTop: '12px', padding: '12px', border: '1px solid var(--border-subtle)', borderRadius: '6px', background: 'var(--bg-primary)' }}>
+                            <div style={{ display: 'grid', gap: '8px' }}>
+                                <input style={{ padding: '6px 10px', border: '1px solid var(--border-subtle)', borderRadius: '6px', fontSize: '12px', background: 'var(--bg-secondary)' }}
+                                    placeholder="Provider (e.g. github, jira)"
+                                    value={agentCredForm.provider}
+                                    onChange={e => setAgentCredForm(p => ({ ...p, provider: e.target.value }))} />
+                                <select style={{ padding: '6px 10px', border: '1px solid var(--border-subtle)', borderRadius: '6px', fontSize: '12px', background: 'var(--bg-secondary)' }}
+                                    value={agentCredForm.credential_type}
+                                    onChange={e => setAgentCredForm(p => ({ ...p, credential_type: e.target.value }))}>
+                                    <option value="api_key">API Key</option>
+                                    <option value="basic_auth">Basic Auth</option>
+                                    <option value="oauth2">OAuth2</option>
+                                </select>
+                                <input style={{ padding: '6px 10px', border: '1px solid var(--border-subtle)', borderRadius: '6px', fontSize: '12px', background: 'var(--bg-secondary)' }}
+                                    type="password"
+                                    placeholder="Access Token / API Key"
+                                    value={agentCredForm.access_token}
+                                    onChange={e => setAgentCredForm(p => ({ ...p, access_token: e.target.value }))} />
+                                <input style={{ padding: '6px 10px', border: '1px solid var(--border-subtle)', borderRadius: '6px', fontSize: '12px', background: 'var(--bg-secondary)' }}
+                                    placeholder={t('agent.externalUserId', '外部系统用户 ID (可选)')}
+                                    value={agentCredForm.external_user_id}
+                                    onChange={e => setAgentCredForm(p => ({ ...p, external_user_id: e.target.value }))} />
+                                <input style={{ padding: '6px 10px', border: '1px solid var(--border-subtle)', borderRadius: '6px', fontSize: '12px', background: 'var(--bg-secondary)' }}
+                                    placeholder={t('agent.externalUsername', '外部用户名 (可选)')}
+                                    value={agentCredForm.external_username}
+                                    onChange={e => setAgentCredForm(p => ({ ...p, external_username: e.target.value }))} />
+                            </div>
+                            <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
+                                <button style={{ background: 'var(--accent-color)', color: '#fff', border: 'none', borderRadius: '6px', padding: '6px 14px', fontSize: '12px', cursor: 'pointer' }} onClick={async () => {
+                                    if (!agentCredForm.provider || !agentCredForm.access_token) return;
+                                    const token = localStorage.getItem('token');
+                                    await fetch(`/api/tools/agents/${agentId}/credentials`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                        body: JSON.stringify({
+                                            provider: agentCredForm.provider,
+                                            credential_type: agentCredForm.credential_type,
+                                            access_token: agentCredForm.access_token,
+                                            external_user_id: agentCredForm.external_user_id || undefined,
+                                            external_username: agentCredForm.external_username || undefined,
+                                        })
+                                    });
+                                    setShowAddAgentCred(false);
+                                    setAgentCredForm({ provider: '', credential_type: 'api_key', access_token: '', external_user_id: '', external_username: '' });
+                                    loadAgentCredentials();
+                                }}>{t('common.save', '保存')}</button>
+                                <button style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '6px 14px', fontSize: '12px', cursor: 'pointer' }} onClick={() => setShowAddAgentCred(false)}>{t('common.cancel', '取消')}</button>
+                            </div>
+                        </div>
+                    )}
+                </div>
                 <div style={{ display: 'flex', gap: '4px', padding: '4px', background: 'var(--bg-secondary)', borderRadius: '8px', marginBottom: '12px' }}>
                     <button
                         onClick={() => setToolTab('company')}

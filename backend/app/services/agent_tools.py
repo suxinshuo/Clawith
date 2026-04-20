@@ -3467,7 +3467,7 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None, user
                 return f"❌ 无法解析凭据：Agent 未关联租户。"
             try:
                 from uuid import UUID as _UUID
-                cred = await resolver.resolve(user_id, _UUID(tenant_id_str), tool.required_credential_provider)
+                cred = await resolver.resolve(user_id, _UUID(tenant_id_str), tool.required_credential_provider, agent_id=agent_id)
             except Exception as e:
                 logger.exception(f"[MCP] Credential resolution error for {tool.required_credential_provider}")
                 return f"❌ 凭据解析失败: {str(e)[:200]}"
