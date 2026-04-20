@@ -19,13 +19,10 @@ from app.config import get_settings
 from app.core.security import encrypt_data, get_current_user
 from app.database import get_db
 from app.models.user import User
-from app.models.user_external_credential import UserExternalCredential, TenantExternalCredential
+from app.models.user_external_credential import UserExternalCredential
 from app.schemas.user_credential import (
     UserCredentialCreate,
-    UserCredentialResponse,
     UserCredentialUpdate,
-    TenantCredentialCreate,
-    TenantCredentialResponse,
     OneTimeTokenSubmit,
 )
 from app.services.one_time_token import validate_one_time_token

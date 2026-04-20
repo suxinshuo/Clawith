@@ -245,53 +245,7 @@ function ToolsManager({ agentId, canManage = false }: { agentId: string; canMana
             return acc;
         }, {});
 
-    const renderToolGroup = (groupedTools: Record<string, any[]>) =>
-        Object.entries(groupedTools).map(([category, catTools]) => (
-            <div key={category}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 14px', marginBottom: '8px' }}>
-                    <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                        {getCategoryLabels(t)[category] || category}
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        {CATEGORY_CONFIG_SCHEMAS[category] && canManage && (
-                            <button
-                                onClick={() => openCategoryConfig(category)}
-                                style={{ background: 'none', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', color: 'var(--text-secondary)' }}
-                                title={`Configure ${category}`}
-                            >⚙️ Config</button>
-                        )}
-                        {canManage && (
-                            <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: 'pointer', flexShrink: 0 }} title={`Enable/Disable all ${getCategoryLabels(t)[category] || category} tools`}>
-                                <input type="checkbox"
-                                    checked={(catTools as any[]).every(t => t.enabled)}
-                                    onChange={async (e) => {
-                                        const targetEnabled = e.target.checked;
-                                        // Optimistic fast update
-                                        const catToolIds = new Set((catTools as any[]).map(t => t.id));
-                                        setTools(prev => prev.map(t => catToolIds.has(t.id) ? { ...t, enabled: targetEnabled } : t));
-                                        try {
-                                            const token = localStorage.getItem('token');
-                                            const payload = Array.from(catToolIds).map(id => ({ tool_id: id, enabled: targetEnabled }));
-                                            await fetch(`/api/tools/agents/${agentId}`, {
-                                                method: 'PUT',
-                                                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                                                body: JSON.stringify(payload),
-                                            });
-                                        } catch (err: any) {
-                                            console.error('Bulk update failed', err);
-                                            loadTools();
-                                        }
-                                    }}
-                                    style={{ opacity: 0, width: 0, height: 0 }} />
-                                <span style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: '22px', background: (catTools as any[]).every(t => t.enabled) ? 'var(--accent-primary)' : 'var(--bg-tertiary)', transition: '0.3s', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.1)' }}>
-                                    <span style={{ position: 'absolute', left: (catTools as any[]).every(t => t.enabled) ? '20px' : '2px', top: '2px', width: '18px', height: '18px', borderRadius: '50%', background: '#fff', transition: '0.3s', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }} />
-                                </span>
-                            </label>
-                        )}
-                    </div>
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                    {(catTools as any[]).map((tool: any) => {
+    const renderToolItem = (tool: any, category: string) => {
                         const hasConfig = tool.config_schema?.fields?.length > 0 || tool.type === 'mcp';
                         const hasAgentOverride = tool.agent_config && Object.keys(tool.agent_config).length > 0;
                         const isGlobalCategoryConfig = category === 'agentbay' && tool.name === 'agentbay_browser_navigate';
@@ -375,10 +329,163 @@ function ToolsManager({ agentId, canManage = false }: { agentId: string; canMana
                                 </div>
                             </div>
                         );
-                    })}
+    };
+
+    const renderToolGroup = (groupedTools: Record<string, any[]>) =>
+        Object.entries(groupedTools).map(([category, catTools]) => {
+            // For 'custom' category: sub-group MCP tools by mcp_server_name
+            if (category === 'custom') {
+                const mcpByServer: Record<string, any[]> = {};
+                const nonMcpTools: any[] = [];
+                (catTools as any[]).forEach((tool: any) => {
+                    if (tool.type === 'mcp' && tool.mcp_server_name) {
+                        (mcpByServer[tool.mcp_server_name] = mcpByServer[tool.mcp_server_name] || []).push(tool);
+                    } else {
+                        nonMcpTools.push(tool);
+                    }
+                });
+
+                return (
+                    <div key={category}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 14px', marginBottom: '8px' }}>
+                            <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                                {getCategoryLabels(t)[category] || category}
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                {canManage && (
+                                    <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: 'pointer', flexShrink: 0 }} title={`Enable/Disable all ${getCategoryLabels(t)[category] || category} tools`}>
+                                        <input type="checkbox"
+                                            checked={(catTools as any[]).every(t => t.enabled)}
+                                            onChange={async (e) => {
+                                                const targetEnabled = e.target.checked;
+                                                const catToolIds = new Set((catTools as any[]).map(t => t.id));
+                                                setTools(prev => prev.map(t => catToolIds.has(t.id) ? { ...t, enabled: targetEnabled } : t));
+                                                try {
+                                                    const token = localStorage.getItem('token');
+                                                    const payload = Array.from(catToolIds).map(id => ({ tool_id: id, enabled: targetEnabled }));
+                                                    await fetch(`/api/tools/agents/${agentId}`, {
+                                                        method: 'PUT',
+                                                        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                                        body: JSON.stringify(payload),
+                                                    });
+                                                } catch (err: any) {
+                                                    console.error('Bulk update failed', err);
+                                                    loadTools();
+                                                }
+                                            }}
+                                            style={{ opacity: 0, width: 0, height: 0 }} />
+                                        <span style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: '22px', background: (catTools as any[]).every(t => t.enabled) ? 'var(--accent-primary)' : 'var(--bg-tertiary)', transition: '0.3s', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.1)' }}>
+                                            <span style={{ position: 'absolute', left: (catTools as any[]).every(t => t.enabled) ? '20px' : '2px', top: '2px', width: '18px', height: '18px', borderRadius: '50%', background: '#fff', transition: '0.3s', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }} />
+                                        </span>
+                                    </label>
+                                )}
+                            </div>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                            {/* MCP tools sub-grouped by server */}
+                            {Object.entries(mcpByServer).map(([serverName, serverTools]) => (
+                                <div key={serverName} style={{ border: '1px solid var(--border-subtle)', borderRadius: '8px', overflow: 'hidden' }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 14px', background: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-subtle)' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '7px' }}>
+                                            <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-secondary)' }} title={serverName}>
+                                                {(() => { try { if (serverName.startsWith('http')) { return new URL(serverName).hostname; } } catch {} return serverName; })()}
+                                            </span>
+                                            <span style={{ fontSize: '10px', background: 'rgba(99,102,241,0.12)', color: 'var(--accent-color)', borderRadius: '4px', padding: '1px 5px' }}>MCP</span>
+                                        </div>
+                                        {canManage && (
+                                            <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: 'pointer', flexShrink: 0 }} title={`Enable/Disable all ${serverName} tools`}>
+                                                <input type="checkbox"
+                                                    checked={(serverTools as any[]).every(t => t.enabled)}
+                                                    onChange={async (e) => {
+                                                        const targetEnabled = e.target.checked;
+                                                        const serverToolIds = new Set((serverTools as any[]).map(t => t.id));
+                                                        setTools(prev => prev.map(t => serverToolIds.has(t.id) ? { ...t, enabled: targetEnabled } : t));
+                                                        try {
+                                                            const token = localStorage.getItem('token');
+                                                            const payload = Array.from(serverToolIds).map(id => ({ tool_id: id, enabled: targetEnabled }));
+                                                            await fetch(`/api/tools/agents/${agentId}`, {
+                                                                method: 'PUT',
+                                                                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                                                body: JSON.stringify(payload),
+                                                            });
+                                                        } catch (err: any) {
+                                                            console.error('Bulk update failed', err);
+                                                            loadTools();
+                                                        }
+                                                    }}
+                                                    style={{ opacity: 0, width: 0, height: 0 }} />
+                                                <span style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: '22px', background: (serverTools as any[]).every(t => t.enabled) ? 'var(--accent-primary)' : 'var(--bg-tertiary)', transition: '0.3s', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.1)' }}>
+                                                    <span style={{ position: 'absolute', left: (serverTools as any[]).every(t => t.enabled) ? '20px' : '2px', top: '2px', width: '18px', height: '18px', borderRadius: '50%', background: '#fff', transition: '0.3s', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }} />
+                                                </span>
+                                            </label>
+                                        )}
+                                    </div>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', padding: '6px' }}>
+                                        {(serverTools as any[]).map((tool: any) => renderToolItem(tool, category))}
+                                    </div>
+                                </div>
+                            ))}
+                            {/* Non-MCP custom tools */}
+                            {nonMcpTools.length > 0 && (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                    {nonMcpTools.map((tool: any) => renderToolItem(tool, category))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+            <div key={category}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 14px', marginBottom: '8px' }}>
+                    <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                        {getCategoryLabels(t)[category] || category}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        {CATEGORY_CONFIG_SCHEMAS[category] && canManage && (
+                            <button
+                                onClick={() => openCategoryConfig(category)}
+                                style={{ background: 'none', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', color: 'var(--text-secondary)' }}
+                                title={`Configure ${category}`}
+                            >⚙️ Config</button>
+                        )}
+                        {canManage && (
+                            <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: 'pointer', flexShrink: 0 }} title={`Enable/Disable all ${getCategoryLabels(t)[category] || category} tools`}>
+                                <input type="checkbox"
+                                    checked={(catTools as any[]).every(t => t.enabled)}
+                                    onChange={async (e) => {
+                                        const targetEnabled = e.target.checked;
+                                        // Optimistic fast update
+                                        const catToolIds = new Set((catTools as any[]).map(t => t.id));
+                                        setTools(prev => prev.map(t => catToolIds.has(t.id) ? { ...t, enabled: targetEnabled } : t));
+                                        try {
+                                            const token = localStorage.getItem('token');
+                                            const payload = Array.from(catToolIds).map(id => ({ tool_id: id, enabled: targetEnabled }));
+                                            await fetch(`/api/tools/agents/${agentId}`, {
+                                                method: 'PUT',
+                                                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                                body: JSON.stringify(payload),
+                                            });
+                                        } catch (err: any) {
+                                            console.error('Bulk update failed', err);
+                                            loadTools();
+                                        }
+                                    }}
+                                    style={{ opacity: 0, width: 0, height: 0 }} />
+                                <span style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: '22px', background: (catTools as any[]).every(t => t.enabled) ? 'var(--accent-primary)' : 'var(--bg-tertiary)', transition: '0.3s', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.1)' }}>
+                                    <span style={{ position: 'absolute', left: (catTools as any[]).every(t => t.enabled) ? '20px' : '2px', top: '2px', width: '18px', height: '18px', borderRadius: '50%', background: '#fff', transition: '0.3s', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }} />
+                                </span>
+                            </label>
+                        )}
+                    </div>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    {(catTools as any[]).map((tool: any) => renderToolItem(tool, category))}
                 </div>
             </div>
-        ));
+            );
+        });
 
     const activeTools = toolTab === 'company' ? companyTools : agentInstalledTools;
 
