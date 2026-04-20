@@ -159,6 +159,23 @@ class CategoryConfigUpdate(BaseModel):
     config: dict
 
 
+class AgentCredentialCreate(BaseModel):
+    provider: str
+    credential_type: str = "api_key"
+    access_token: str
+    external_user_id: str | None = None
+    external_username: str | None = None
+    scopes: str | None = None
+
+
+class AgentCredentialUpdate(BaseModel):
+    credential_type: str | None = None
+    access_token: str | None = None
+    external_user_id: str | None = None
+    external_username: str | None = None
+    scopes: str | None = None
+
+
 # ─── Global Tool CRUD ──────────────────────────────────────
 @router.get("")
 async def list_tools(
@@ -969,3 +986,170 @@ async def test_category_config(
         return await test_agentbay_channel(agent_id, current_user, db)
 
     return {"ok": True, "message": f"Settings for {category} saved."}
+
+
+# ─── Agent-level External Credentials ────────────────────────────
+
+
+@router.get("/agents/{agent_id}/credentials")
+async def list_agent_credentials(
+    agent_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all external credentials for an agent (sensitive fields masked)."""
+    from app.models.agent import Agent
+    from app.models.user_external_credential import AgentExternalCredential
+
+    # Permission: agent creator or admin
+    agent = await db.get(Agent, agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.creator_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Only agent creator or admin can manage agent credentials")
+
+    result = await db.execute(
+        select(AgentExternalCredential).where(AgentExternalCredential.agent_id == agent_id)
+    )
+    creds = result.scalars().all()
+
+    def _mask(token: str) -> str:
+        if not token or len(token) < 8:
+            return "****"
+        return "****" + token[-4:]
+
+    from app.core.security import decrypt_data
+    from app.config import get_settings
+    settings = get_settings()
+
+    items = []
+    for c in creds:
+        try:
+            decrypted = decrypt_data(c.access_token_encrypted, settings.SECRET_KEY)
+            masked = _mask(decrypted)
+        except Exception:
+            masked = "****"
+        items.append({
+            "id": str(c.id),
+            "provider": c.provider,
+            "credential_type": c.credential_type,
+            "access_token_masked": masked,
+            "external_user_id": c.external_user_id,
+            "external_username": c.external_username,
+            "scopes": c.scopes,
+            "status": c.status,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+            "updated_at": c.updated_at.isoformat() if c.updated_at else None,
+        })
+    return items
+
+
+@router.post("/agents/{agent_id}/credentials")
+async def create_agent_credential(
+    agent_id: uuid.UUID,
+    data: AgentCredentialCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create an external credential for an agent."""
+    from app.models.agent import Agent
+    from app.models.user_external_credential import AgentExternalCredential
+    from app.core.security import encrypt_data
+    from app.config import get_settings
+
+    agent = await db.get(Agent, agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.creator_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Only agent creator or admin can manage agent credentials")
+
+    # Check uniqueness
+    existing = await db.execute(
+        select(AgentExternalCredential).where(
+            AgentExternalCredential.agent_id == agent_id,
+            AgentExternalCredential.provider == data.provider,
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail=f"Credential for provider '{data.provider}' already exists on this agent")
+
+    settings = get_settings()
+    cred = AgentExternalCredential(
+        agent_id=agent_id,
+        provider=data.provider,
+        credential_type=data.credential_type,
+        access_token_encrypted=encrypt_data(data.access_token, settings.SECRET_KEY),
+        external_user_id=data.external_user_id,
+        external_username=data.external_username,
+        scopes=data.scopes,
+        created_by=current_user.id,
+    )
+    db.add(cred)
+    await db.commit()
+    return {"id": str(cred.id), "provider": cred.provider}
+
+
+@router.put("/agents/{agent_id}/credentials/{credential_id}")
+async def update_agent_credential(
+    agent_id: uuid.UUID,
+    credential_id: uuid.UUID,
+    data: AgentCredentialUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update an agent credential."""
+    from app.models.agent import Agent
+    from app.models.user_external_credential import AgentExternalCredential
+    from app.core.security import encrypt_data
+    from app.config import get_settings
+
+    agent = await db.get(Agent, agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.creator_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Only agent creator or admin can manage agent credentials")
+
+    cred = await db.get(AgentExternalCredential, credential_id)
+    if not cred or cred.agent_id != agent_id:
+        raise HTTPException(status_code=404, detail="Credential not found")
+
+    settings = get_settings()
+    if data.credential_type is not None:
+        cred.credential_type = data.credential_type
+    if data.access_token is not None:
+        cred.access_token_encrypted = encrypt_data(data.access_token, settings.SECRET_KEY)
+    if data.external_user_id is not None:
+        cred.external_user_id = data.external_user_id
+    if data.external_username is not None:
+        cred.external_username = data.external_username
+    if data.scopes is not None:
+        cred.scopes = data.scopes
+
+    await db.commit()
+    return {"ok": True}
+
+
+@router.delete("/agents/{agent_id}/credentials/{credential_id}")
+async def delete_agent_credential(
+    agent_id: uuid.UUID,
+    credential_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete an agent credential."""
+    from app.models.agent import Agent
+    from app.models.user_external_credential import AgentExternalCredential
+
+    agent = await db.get(Agent, agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.creator_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Only agent creator or admin can manage agent credentials")
+
+    cred = await db.get(AgentExternalCredential, credential_id)
+    if not cred or cred.agent_id != agent_id:
+        raise HTTPException(status_code=404, detail="Credential not found")
+
+    await db.delete(cred)
+    await db.commit()
+    return {"ok": True}
