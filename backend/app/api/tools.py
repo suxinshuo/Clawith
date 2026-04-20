@@ -998,15 +998,7 @@ async def list_agent_credentials(
     db: AsyncSession = Depends(get_db),
 ):
     """List all external credentials for an agent (sensitive fields masked)."""
-    from app.models.agent import Agent
     from app.models.user_external_credential import AgentExternalCredential
-
-    # Permission: agent creator or admin
-    agent = await db.get(Agent, agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    if agent.creator_id != current_user.id and not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Only agent creator or admin can manage agent credentials")
 
     result = await db.execute(
         select(AgentExternalCredential).where(AgentExternalCredential.agent_id == agent_id)
@@ -1060,7 +1052,7 @@ async def create_agent_credential(
     agent = await db.get(Agent, agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    if agent.creator_id != current_user.id and not current_user.is_admin:
+    if agent.creator_id != current_user.id and current_user.role not in ("platform_admin", "org_admin"):
         raise HTTPException(status_code=403, detail="Only agent creator or admin can manage agent credentials")
 
     # Check uniqueness
@@ -1106,7 +1098,7 @@ async def update_agent_credential(
     agent = await db.get(Agent, agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    if agent.creator_id != current_user.id and not current_user.is_admin:
+    if agent.creator_id != current_user.id and current_user.role not in ("platform_admin", "org_admin"):
         raise HTTPException(status_code=403, detail="Only agent creator or admin can manage agent credentials")
 
     cred = await db.get(AgentExternalCredential, credential_id)
@@ -1143,7 +1135,7 @@ async def delete_agent_credential(
     agent = await db.get(Agent, agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    if agent.creator_id != current_user.id and not current_user.is_admin:
+    if agent.creator_id != current_user.id and current_user.role not in ("platform_admin", "org_admin"):
         raise HTTPException(status_code=403, detail="Only agent creator or admin can manage agent credentials")
 
     cred = await db.get(AgentExternalCredential, credential_id)
