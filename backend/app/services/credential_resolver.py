@@ -9,9 +9,9 @@ from loguru import logger
 from sqlalchemy import select
 
 from app.config import get_settings
-from app.models.user_external_credential import TenantExternalCredential, UserExternalCredential
+from app.models.user_external_credential import AgentExternalCredential, TenantExternalCredential, UserExternalCredential
 
-_CredentialTable = type[UserExternalCredential] | type[TenantExternalCredential]
+_CredentialTable = type[UserExternalCredential] | type[TenantExternalCredential] | type[AgentExternalCredential]
 
 
 def parse_credential_scopes(s: str | None) -> list[str]:
@@ -57,7 +57,7 @@ class ResolvedCredential:
     external_user_id: str | None
     external_username: str | None
     scopes: list[str]
-    source: str  # "user" | "tenant"
+    source: str  # "user" | "agent" | "tenant"
     credential_id: UUID
 
 
@@ -69,10 +69,13 @@ class CredentialResolver:
         user_id: UUID,
         tenant_id: UUID,
         provider: str,
+        *,
+        agent_id: UUID | None = None,
     ) -> ResolvedCredential | None:
-        """Resolve credential with priority: user > tenant. Returns None if not found."""
+        """Resolve credential with priority: user > agent > tenant. Returns None if not found."""
         from app.models.user_external_credential import (
             UserExternalCredential,
+            AgentExternalCredential,
             TenantExternalCredential,
         )
 
@@ -119,7 +122,47 @@ class CredentialResolver:
                     asyncio.create_task(self._update_last_used(user_cred.id, UserExternalCredential))
                     return resolved
 
-            # 2. Fallback to tenant-level credential
+            # 2. Fallback to agent-level credential
+            if agent_id:
+                result = await db.execute(
+                    select(AgentExternalCredential).where(
+                        AgentExternalCredential.agent_id == agent_id,
+                        AgentExternalCredential.provider == provider,
+                    )
+                )
+                agent_cred = result.scalar_one_or_none()
+
+                if agent_cred and agent_cred.status == "active":
+                    try:
+                        token = await self._ensure_token_fresh(
+                            credential_id=agent_cred.id,
+                            credential_type=agent_cred.credential_type,
+                            provider=provider,
+                            tenant_id=tenant_id,
+                            access_token_encrypted=agent_cred.access_token_encrypted,
+                            refresh_token_encrypted=getattr(agent_cred, 'refresh_token_encrypted', None),
+                            token_expires_at=getattr(agent_cred, 'token_expires_at', None),
+                            table_class=AgentExternalCredential,
+                        )
+                    except Exception:
+                        logger.warning(f"[CredentialResolver] Failed to resolve agent credential for provider={provider}")
+                        token = None
+
+                    if token:
+                        resolved = ResolvedCredential(
+                            provider=provider,
+                            credential_type=agent_cred.credential_type,
+                            access_token=token,
+                            external_user_id=agent_cred.external_user_id,
+                            external_username=agent_cred.external_username,
+                            scopes=parse_credential_scopes(agent_cred.scopes),
+                            source="agent",
+                            credential_id=agent_cred.id,
+                        )
+                        asyncio.create_task(self._update_last_used(agent_cred.id, AgentExternalCredential))
+                        return resolved
+
+            # 3. Fallback to tenant-level credential
             result = await db.execute(
                 select(TenantExternalCredential).where(
                     TenantExternalCredential.tenant_id == tenant_id,
@@ -524,9 +567,11 @@ class CredentialResolver:
         user_id: UUID,
         tenant_id: UUID,
         provider: str,
+        *,
+        agent_id: UUID | None = None,
     ) -> ResolvedCredential:
         """Same as resolve(), but raises CredentialNotFoundError if not found."""
-        result = await self.resolve(user_id, tenant_id, provider)
+        result = await self.resolve(user_id, tenant_id, provider, agent_id=agent_id)
         if result is None:
             raise CredentialNotFoundError(provider)
         return result
