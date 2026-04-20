@@ -2245,7 +2245,7 @@ async def execute_tool(
         elif tool_name == "manage_tasks":
             result = await _manage_tasks(agent_id, user_id, ws, arguments)
         elif tool_name == "set_trigger":
-            result = await _handle_set_trigger(agent_id, arguments)
+            result = await _handle_set_trigger(agent_id, arguments, user_id=user_id)
         elif tool_name == "update_trigger":
             result = await _handle_update_trigger(agent_id, arguments)
         elif tool_name == "cancel_trigger":
@@ -2259,7 +2259,7 @@ async def execute_tool(
         elif tool_name == "send_channel_message":
             result = await _send_channel_message(agent_id, arguments)
         elif tool_name == "send_message_to_agent":
-            result = await _send_message_to_agent(agent_id, arguments)
+            result = await _send_message_to_agent(agent_id, arguments, user_id=user_id)
         elif tool_name == "send_file_to_agent":
             result = await _send_file_to_agent(agent_id, ws, arguments)
         elif tool_name == "send_channel_file":
@@ -5117,6 +5117,7 @@ async def _create_on_message_trigger(
     reason: str,
     focus_ref: str | None = None,
     notification_summary: str | None = None,
+    acting_user_id: uuid.UUID | None = None,
 ) -> None:
     """Programmatically create an on_message trigger for an agent."""
     from app.models.trigger import AgentTrigger
@@ -5157,6 +5158,8 @@ async def _create_on_message_trigger(
                 existing.reason = reason
                 if focus_ref:
                     existing.focus_ref = focus_ref
+                if acting_user_id:
+                    existing.acting_user_id = acting_user_id
                 await db.commit()
                 return
             else:
@@ -5165,6 +5168,8 @@ async def _create_on_message_trigger(
                 existing.reason = reason
                 existing.focus_ref = focus_ref or None
                 existing.is_enabled = True
+                if acting_user_id:
+                    existing.acting_user_id = acting_user_id
                 await db.commit()
                 return
 
@@ -5177,6 +5182,7 @@ async def _create_on_message_trigger(
             focus_ref=focus_ref or None,
             max_fires=1,
             expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+            acting_user_id=acting_user_id,
         )
         db.add(trigger)
         await db.commit()
@@ -5211,7 +5217,7 @@ async def _wake_agent_async(agent_id: uuid.UUID, reason_context: str, *, from_ag
     await wake_agent_with_context(agent_id, reason_context, from_agent_id=from_agent_id, skip_dedup=skip_dedup, a2a_session_id=a2a_session_id)
 
 
-async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
+async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict, user_id: uuid.UUID | None = None) -> str:
     """Send a message to another digital employee.
 
     Behaviour depends on ``msg_type``:
@@ -5442,6 +5448,7 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                         reason=trigger_reason,
                         focus_ref=focus_id,
                         notification_summary=f"等待{target.name}完成任务并回复",
+                        acting_user_id=user_id,
                     )
                 except Exception as e:
                     logger.warning(f"[A2A] Failed to create trigger for delegate: {e}")
@@ -6250,7 +6257,7 @@ MAX_TRIGGERS_PER_AGENT = 20
 VALID_TRIGGER_TYPES = {"cron", "once", "interval", "poll", "on_message", "webhook"}
 
 
-async def _handle_set_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
+async def _handle_set_trigger(agent_id: uuid.UUID, arguments: dict, user_id: uuid.UUID | None = None) -> str:
     """Create a new trigger for the agent."""
     from app.models.trigger import AgentTrigger
 
@@ -6357,6 +6364,8 @@ async def _handle_set_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
                     existing.reason = reason
                     existing.focus_ref = focus_ref or None
                     existing.is_enabled = True
+                    if user_id:
+                        existing.acting_user_id = user_id
                     # Keep fire_count and last_fired_at — they are cumulative stats
                     await db.commit()
                     return f"✅ Trigger '{name}' re-enabled with new configuration ({ttype}, fired {existing.fire_count} times so far)"
@@ -6368,6 +6377,7 @@ async def _handle_set_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
                 config=config,
                 reason=reason,
                 focus_ref=focus_ref or None,
+                acting_user_id=user_id,
             )
             db.add(trigger)
             await db.commit()
