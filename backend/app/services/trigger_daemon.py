@@ -381,7 +381,7 @@ async def _check_new_agent_messages(trigger: AgentTrigger) -> bool:
 
 # ── Agent Invocation ────────────────────────────────────────────────
 
-async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTrigger]):
+async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTrigger], acting_user_id: uuid.UUID | None = None):
     """Invoke an agent with context from one or more fired triggers.
 
     Creates a Reflection Session and calls the LLM.
@@ -415,12 +415,9 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
                 logger.warning(f"Agent {agent.name}'s model {model.model} is disabled, skipping trigger invocation")
                 return
 
-            # Determine acting user: use trigger's acting_user_id if set, otherwise agent creator
-            acting_user_id = agent.creator_id
-            for t in triggers:
-                if t.acting_user_id:
-                    acting_user_id = t.acting_user_id
-                    break  # Use the first trigger's acting_user_id
+            # Use the acting_user_id passed from the caller; fall back to agent creator
+            if not acting_user_id:
+                acting_user_id = agent.creator_id
 
             # Build trigger context
             context_parts = []
@@ -775,8 +772,9 @@ async def _tick():
         return
 
 
-    # Evaluate and group fired triggers by agent
-    fired_by_agent: dict[uuid.UUID, list[AgentTrigger]] = {}
+    # Evaluate and group fired triggers by (agent, acting_user)
+    # Different acting_user_id means different permissions, so they must be invoked separately.
+    fired_by_agent_user: dict[tuple[uuid.UUID, uuid.UUID | None], list[AgentTrigger]] = {}
     for trigger in all_triggers:
         # Auto-disable expired triggers
         if trigger.expires_at and now >= trigger.expires_at:
@@ -790,12 +788,13 @@ async def _tick():
 
         try:
             if await _evaluate_trigger(trigger, now):
-                fired_by_agent.setdefault(trigger.agent_id, []).append(trigger)
+                key = (trigger.agent_id, trigger.acting_user_id)
+                fired_by_agent_user.setdefault(key, []).append(trigger)
         except Exception as e:
             logger.warning(f"Error evaluating trigger {trigger.name}: {e}")
 
-    # Invoke each agent (with dedup window)
-    for agent_id, agent_triggers in fired_by_agent.items():
+    # Invoke each (agent, acting_user) group (with dedup window)
+    for (agent_id, acting_user_id), agent_triggers in fired_by_agent_user.items():
         last = _last_invoke.get(agent_id)
         if last and (now - last).total_seconds() < DEDUP_WINDOW:
             continue  # Skip — invoked too recently
@@ -831,7 +830,7 @@ async def _tick():
         except Exception as e:
             logger.warning(f"Failed to pre-update trigger state: {e}")
 
-        asyncio.create_task(_invoke_agent_for_triggers(agent_id, agent_triggers))
+        asyncio.create_task(_invoke_agent_for_triggers(agent_id, agent_triggers, acting_user_id))
 
     # Check for expiring credentials every ~60 minutes (240 ticks * 15s = 3600s)
     global _credential_expiry_check_counter
