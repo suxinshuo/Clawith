@@ -2014,6 +2014,7 @@ function AgentDetailInner() {
         sandbox_cpu_limit: '0.5',
         allowed_repos: '' as string,
         dev_approval_mode: 'confirm',
+        dev_tools_access_mode: 'all',
     });
     const [settingsSaving, setSettingsSaving] = useState(false);
     const [settingsSaved, setSettingsSaved] = useState(false);
@@ -2040,6 +2041,7 @@ function AgentDetailInner() {
                 sandbox_cpu_limit: (agent as any).sandbox_cpu_limit || '0.5',
                 allowed_repos: ((agent as any).allowed_repos || []).join(', '),
                 dev_approval_mode: (agent as any).dev_approval_mode || 'confirm',
+                dev_tools_access_mode: (agent as any).dev_tools_access_mode || 'all',
             });
             settingsInitRef.current = true;
         }
@@ -5233,7 +5235,8 @@ function AgentDetailInner() {
                             settingsForm.sandbox_memory_limit !== ((agent as any)?.sandbox_memory_limit || '500m') ||
                             settingsForm.sandbox_cpu_limit !== ((agent as any)?.sandbox_cpu_limit || '0.5') ||
                             settingsForm.allowed_repos !== ((agent as any)?.allowed_repos || []).join(', ') ||
-                            settingsForm.dev_approval_mode !== ((agent as any)?.dev_approval_mode || 'confirm')
+                            settingsForm.dev_approval_mode !== ((agent as any)?.dev_approval_mode || 'confirm') ||
+                            settingsForm.dev_tools_access_mode !== ((agent as any)?.dev_tools_access_mode || 'all')
                         );
 
                         const handleSaveSettings = async () => {
@@ -5257,6 +5260,7 @@ function AgentDetailInner() {
                                     sandbox_cpu_limit: settingsForm.sandbox_cpu_limit,
                                     allowed_repos: settingsForm.allowed_repos.split(',').map(s => s.trim()).filter(Boolean),
                                     dev_approval_mode: settingsForm.dev_approval_mode,
+                                    dev_tools_access_mode: settingsForm.dev_tools_access_mode,
                                 } as any);
                                 queryClient.invalidateQueries({ queryKey: ['agent', id] });
                                 settingsInitRef.current = false;
@@ -5591,6 +5595,29 @@ function AgentDetailInner() {
                                             <option value="confirm">{t('agent.approvalConfirm', '聊天中确认后执行')}</option>
                                             <option value="strict">{t('agent.approvalStrict', '需审批人批准')}</option>
                                         </select>
+                                    </div>
+                                </div>
+
+                                {/* 开发权限准入 */}
+                                <div className="card" style={{ padding: '20px', marginTop: '16px' }}>
+                                    <h4 style={{ marginBottom: '16px', fontSize: '15px', fontWeight: 600 }}>
+                                        {t('agent.devPermission', '开发权限准入')}
+                                    </h4>
+                                    <div className="form-group" style={{ marginBottom: '12px' }}>
+                                        <label style={{ fontSize: '13px', fontWeight: 500 }}>
+                                            {t('agent.devPermissionScope', '允许使用开发工具的范围')}
+                                        </label>
+                                        <select
+                                            className="input"
+                                            value={settingsForm.dev_tools_access_mode}
+                                            onChange={e => setSettingsForm(f => ({ ...f, dev_tools_access_mode: e.target.value }))}
+                                        >
+                                            <option value="all">{t('agent.devPermAll', '所有有权访问此 Agent 的用户')}</option>
+                                            <option value="restricted">{t('agent.devPermRestricted', '仅指定用户')}</option>
+                                        </select>
+                                        <small style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                            {t('agent.devPermHint', '控制谁可以触发 execute_command / git_* 等开发工具')}
+                                        </small>
                                     </div>
                                 </div>
 

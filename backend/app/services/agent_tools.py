@@ -2312,6 +2312,19 @@ async def execute_tool(
 
     ws = await ensure_workspace(agent_id, tenant_id=_agent_tenant_id)
 
+    # Dev tools permission check
+    if tool_name in _DEV_TOOL_NAMES:
+        try:
+            async with async_session() as _pdb:
+                _pr = await _pdb.execute(select(AgentModel).where(AgentModel.id == agent_id))
+                _pagent = _pr.scalar_one_or_none()
+                if _pagent:
+                    dev_allowed = await _check_dev_permission(_pagent, user_id)
+                    if not dev_allowed:
+                        return "❌ 您没有开发操作权限，请联系管理员开通。\n(You don't have dev tools permission. Contact the admin.)"
+        except Exception as e:
+            logger.exception(f"[DevPermission] Check error: {e}")
+
     # ── Autonomy boundary check ──
     action_type = _TOOL_AUTONOMY_MAP.get(tool_name)
     if action_type:
@@ -6222,6 +6235,38 @@ def _check_code_safety(language: str, code: str) -> str | None:
                 return f"❌ Blocked: unsafe operation detected ({pattern})"
 
     return None
+
+
+_DEV_TOOL_NAMES = {
+    "execute_command", "git_clone", "git_status", "git_diff", "git_log",
+    "git_commit", "git_push", "git_pull", "git_branch", "git_create_pr",
+}
+
+
+async def _check_dev_permission(agent, user_id: uuid.UUID) -> bool:
+    """Check if a user has permission to use dev tools on this agent."""
+    mode = getattr(agent, "dev_tools_access_mode", "all") or "all"
+    if mode == "all":
+        return True
+
+    # "restricted" mode: check for dev_tools permission
+    try:
+        from app.models.agent import AgentPermission
+        async with async_session() as db:
+            result = await db.execute(
+                select(AgentPermission).where(
+                    AgentPermission.agent_id == agent.id,
+                    AgentPermission.permission_type == "dev_tools",
+                ).where(
+                    (AgentPermission.scope_type == "company") |
+                    ((AgentPermission.scope_type == "user") & (AgentPermission.scope_id == user_id))
+                ).limit(1)
+            )
+            perm = result.scalar_one_or_none()
+            return perm is not None
+    except Exception as e:
+        logger.warning(f"[DevPermission] Check failed: {e}")
+        return False
 
 
 # ── Dev Tool Handlers ──
