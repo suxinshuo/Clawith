@@ -690,6 +690,150 @@ AGENT_TOOLS = [
             },
         },
     },
+    # ── Dev Tools: Shell & Git ──
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_command",
+            "description": "Execute a shell command in the development sandbox. Use for compiling, running tests, installing dependencies, or any command-line operation. The command runs in the agent's repos directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Shell command to execute"},
+                    "cwd": {"type": "string", "description": "Working directory relative to repo root (default: repo root)"},
+                    "timeout": {"type": "integer", "description": "Timeout in seconds (default: 120, max: 300)"},
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_clone",
+            "description": "Clone a Git repository into the workspace. The repo must be in the allowed repos whitelist.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_url": {"type": "string", "description": "Repository URL (HTTPS or SSH)"},
+                    "branch": {"type": "string", "description": "Branch to checkout (optional)"},
+                    "dir_name": {"type": "string", "description": "Directory name (default: repo name)"},
+                },
+                "required": ["repo_url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_status",
+            "description": "Show the working tree status (modified, staged, untracked files).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_dir": {"type": "string", "description": "Repository directory name in workspace"},
+                },
+                "required": ["repo_dir"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_diff",
+            "description": "Show changes in the working tree or between commits.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_dir": {"type": "string", "description": "Repository directory name"},
+                    "args": {"type": "string", "description": "Additional diff arguments (e.g., '--staged', 'HEAD~1', 'file.py')"},
+                },
+                "required": ["repo_dir"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_log",
+            "description": "Show commit history.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_dir": {"type": "string", "description": "Repository directory name"},
+                    "count": {"type": "integer", "description": "Number of commits to show (default: 10)"},
+                    "args": {"type": "string", "description": "Additional log arguments (e.g., '--oneline', '--graph')"},
+                },
+                "required": ["repo_dir"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_commit",
+            "description": "Stage files and create a commit.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_dir": {"type": "string", "description": "Repository directory name"},
+                    "message": {"type": "string", "description": "Commit message"},
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Files to stage (empty = git add -A)",
+                    },
+                },
+                "required": ["repo_dir", "message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_push",
+            "description": "Push commits to the remote repository.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_dir": {"type": "string", "description": "Repository directory name"},
+                    "remote": {"type": "string", "description": "Remote name (default: origin)"},
+                    "branch": {"type": "string", "description": "Branch to push (default: current branch)"},
+                },
+                "required": ["repo_dir"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_pull",
+            "description": "Pull updates from the remote repository.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_dir": {"type": "string", "description": "Repository directory name"},
+                },
+                "required": ["repo_dir"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_branch",
+            "description": "List, create, or switch branches.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_dir": {"type": "string", "description": "Repository directory name"},
+                    "action": {"type": "string", "enum": ["list", "create", "switch"], "description": "Action to perform"},
+                    "branch_name": {"type": "string", "description": "Branch name (required for create/switch)"},
+                },
+                "required": ["repo_dir", "action"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -2042,6 +2186,15 @@ _TOOL_AUTONOMY_MAP = {
     "web_search": "web_search",
     "execute_code": "execute_code",
     "execute_code_e2b": "execute_code",
+    "execute_command": "execute_code",         # L2 default
+    "git_clone": "write_workspace_files",      # L2
+    "git_status": "read_files",                # L1
+    "git_diff": "read_files",                  # L1
+    "git_log": "read_files",                   # L1
+    "git_commit": "write_workspace_files",     # L2
+    "git_push": "send_external_message",       # L3
+    "git_pull": "write_workspace_files",       # L2
+    "git_branch": "write_workspace_files",     # L2
 }
 
 
@@ -2411,6 +2564,14 @@ async def execute_tool(
             result = await _search_clawhub(agent_id, arguments)
         elif tool_name == "install_skill":
             result = await _install_skill(agent_id, ws, arguments)
+        # ── Dev Tools: Shell & Git ──
+        elif tool_name == "execute_command":
+            result = await _handle_execute_command(arguments, agent_id, user_id)
+        elif tool_name == "git_clone":
+            result = await _handle_git_clone(arguments, agent_id, user_id)
+        elif tool_name in ("git_status", "git_diff", "git_log", "git_commit",
+                           "git_push", "git_pull", "git_branch"):
+            result = await _handle_git_tool(tool_name, arguments, agent_id, user_id)
         else:
             # Try MCP tool execution
             result = await _execute_mcp_tool(tool_name, arguments, agent_id=agent_id, user_id=user_id, session_id=session_id)
@@ -6040,6 +6201,151 @@ def _check_code_safety(language: str, code: str) -> str | None:
                 return f"❌ Blocked: unsafe operation detected ({pattern})"
 
     return None
+
+
+# ── Dev Tool Handlers ──
+
+async def _get_dev_sandbox_config(agent_id: uuid.UUID) -> "SandboxConfig":
+    """Get sandbox config for dev tools, with agent-level override."""
+    from app.config import get_sandbox_config
+    from app.services.sandbox.config import SandboxConfig
+
+    fallback = get_sandbox_config()
+    tool_config = await _get_tool_config(agent_id, "execute_command")
+    if tool_config:
+        return SandboxConfig.from_dict(tool_config, fallback)
+    return fallback
+
+
+def _get_repos_dir(agent_id: uuid.UUID) -> str:
+    """Get the repos directory path for an agent."""
+    ws = WORKSPACE_ROOT / str(agent_id)
+    repos_dir = os.path.join(str(ws), "repos")
+    os.makedirs(repos_dir, exist_ok=True)
+    return repos_dir
+
+
+async def _handle_execute_command(arguments: dict, agent_id: uuid.UUID, user_id: uuid.UUID) -> str:
+    command = arguments.get("command", "")
+    cwd_rel = arguments.get("cwd", ".")
+    timeout = min(int(arguments.get("timeout", 120)), 300)
+
+    if not command:
+        return "❌ Missing required argument: command"
+
+    repos_dir = _get_repos_dir(agent_id)
+    cwd = os.path.normpath(os.path.join(repos_dir, cwd_rel))
+
+    # Prevent path escape
+    if not cwd.startswith(repos_dir):
+        return "❌ Working directory must be within the repos directory"
+
+    config = await _get_dev_sandbox_config(agent_id)
+
+    from app.services.dev_tools import execute_command_tool
+    return await execute_command_tool(
+        command=command, cwd=cwd, timeout=timeout,
+        agent_id=agent_id, sandbox_config=config,
+    )
+
+
+async def _handle_git_clone(arguments: dict, agent_id: uuid.UUID, user_id: uuid.UUID) -> str:
+    repo_url = arguments.get("repo_url", "")
+    branch = arguments.get("branch", "")
+    dir_name = arguments.get("dir_name", "")
+
+    if not repo_url:
+        return "❌ Missing required argument: repo_url"
+
+    # Check repo whitelist
+    from app.services.dev_tools import check_repo_allowed
+    async with async_session() as db:
+        r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+        agent = r.scalar_one_or_none()
+    allowed_repos = getattr(agent, "allowed_repos", []) or [] if agent else []
+    if not check_repo_allowed(repo_url, allowed_repos):
+        return f"❌ Repository not in whitelist: {repo_url}\nAllowed: {', '.join(allowed_repos) if allowed_repos else '(none configured)'}"
+
+    repos_dir = _get_repos_dir(agent_id)
+    config = await _get_dev_sandbox_config(agent_id)
+
+    from app.services.dev_tools import git_tool
+    return await git_tool(
+        sub_command=f"clone {repo_url}" + (f" -b {branch}" if branch else "") + (f" {dir_name}" if dir_name else ""),
+        cwd=repos_dir, agent_id=agent_id, sandbox_config=config, timeout=120,
+    )
+
+
+async def _handle_git_tool(tool_name: str, arguments: dict, agent_id: uuid.UUID, user_id: uuid.UUID) -> str:
+    repo_dir_name = arguments.get("repo_dir", "")
+    if not repo_dir_name:
+        return "❌ Missing required argument: repo_dir"
+
+    repos_dir = _get_repos_dir(agent_id)
+    repo_path = os.path.normpath(os.path.join(repos_dir, repo_dir_name))
+
+    # Prevent path escape
+    if not repo_path.startswith(repos_dir):
+        return "❌ repo_dir must be within the repos directory"
+    if not os.path.isdir(repo_path):
+        return f"❌ Repository directory not found: {repo_dir_name}"
+
+    config = await _get_dev_sandbox_config(agent_id)
+
+    from app.services.dev_tools import git_tool
+
+    if tool_name == "git_status":
+        return await git_tool("status", cwd=repo_path, agent_id=agent_id, sandbox_config=config)
+
+    elif tool_name == "git_diff":
+        args = arguments.get("args", "")
+        return await git_tool(f"diff {args}".strip(), cwd=repo_path, agent_id=agent_id, sandbox_config=config)
+
+    elif tool_name == "git_log":
+        count = int(arguments.get("count", 10))
+        args = arguments.get("args", "")
+        return await git_tool(f"log -n {count} {args}".strip(), cwd=repo_path, agent_id=agent_id, sandbox_config=config)
+
+    elif tool_name == "git_commit":
+        message = arguments.get("message", "")
+        files = arguments.get("files", [])
+        if not message:
+            return "❌ Missing required argument: message"
+        # Stage files
+        if files:
+            stage_cmd = "add " + " ".join(f'"{f}"' for f in files)
+        else:
+            stage_cmd = "add -A"
+        await git_tool(stage_cmd, cwd=repo_path, agent_id=agent_id, sandbox_config=config)
+        # Commit
+        return await git_tool(f'commit -m "{message}"', cwd=repo_path, agent_id=agent_id, sandbox_config=config)
+
+    elif tool_name == "git_push":
+        remote = arguments.get("remote", "origin")
+        branch = arguments.get("branch", "")
+        cmd = f"push {remote}" + (f" {branch}" if branch else "")
+        return await git_tool(cmd, cwd=repo_path, agent_id=agent_id, sandbox_config=config)
+
+    elif tool_name == "git_pull":
+        return await git_tool("pull", cwd=repo_path, agent_id=agent_id, sandbox_config=config)
+
+    elif tool_name == "git_branch":
+        action = arguments.get("action", "list")
+        branch_name = arguments.get("branch_name", "")
+        if action == "list":
+            return await git_tool("branch -a", cwd=repo_path, agent_id=agent_id, sandbox_config=config)
+        elif action == "create":
+            if not branch_name:
+                return "❌ branch_name is required for create action"
+            return await git_tool(f"checkout -b {branch_name}", cwd=repo_path, agent_id=agent_id, sandbox_config=config)
+        elif action == "switch":
+            if not branch_name:
+                return "❌ branch_name is required for switch action"
+            return await git_tool(f"checkout {branch_name}", cwd=repo_path, agent_id=agent_id, sandbox_config=config)
+        else:
+            return f"❌ Unknown action: {action}. Use: list, create, switch"
+
+    return f"❌ Unknown git tool: {tool_name}"
 
 
 async def _execute_code(
