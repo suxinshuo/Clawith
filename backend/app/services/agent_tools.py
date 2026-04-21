@@ -837,6 +837,24 @@ AGENT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "git_create_pr",
+            "description": "Create a Pull Request (GitHub) or Merge Request (GitLab). Pushes the current branch first if needed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_dir": {"type": "string", "description": "Repository directory name in workspace"},
+                    "title": {"type": "string", "description": "PR/MR title"},
+                    "body": {"type": "string", "description": "PR/MR description (optional)"},
+                    "base": {"type": "string", "description": "Target branch (default: main)"},
+                    "head": {"type": "string", "description": "Source branch (default: current branch)"},
+                },
+                "required": ["repo_dir", "title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "upload_image",
             "description": "Upload an image file from your workspace (or from a public URL) to a cloud CDN and get a permanent public URL. Use this when you need to share images externally, embed them in messages/reports, or make workspace images accessible via URL. Supports common formats: PNG, JPG, GIF, WebP, SVG.",
             "parameters": {
@@ -2195,6 +2213,7 @@ _TOOL_AUTONOMY_MAP = {
     "git_push": "send_external_message",       # L3
     "git_pull": "write_workspace_files",       # L2
     "git_branch": "write_workspace_files",     # L2
+    "git_create_pr": "send_external_message",  # L3
 }
 
 
@@ -2572,6 +2591,8 @@ async def execute_tool(
         elif tool_name in ("git_status", "git_diff", "git_log", "git_commit",
                            "git_push", "git_pull", "git_branch"):
             result = await _handle_git_tool(tool_name, arguments, agent_id, user_id)
+        elif tool_name == "git_create_pr":
+            result = await _handle_git_create_pr(arguments, agent_id, user_id)
         else:
             # Try MCP tool execution
             result = await _execute_mcp_tool(tool_name, arguments, agent_id=agent_id, user_id=user_id, session_id=session_id)
@@ -6416,6 +6437,84 @@ async def _handle_git_tool(tool_name: str, arguments: dict, agent_id: uuid.UUID,
             return f"❌ Unknown action: {action}. Use: list, create, switch"
 
     return f"❌ Unknown git tool: {tool_name}"
+
+
+async def _handle_git_create_pr(arguments: dict, agent_id: uuid.UUID, user_id: uuid.UUID) -> str:
+    repo_dir_name = arguments.get("repo_dir", "")
+    title = arguments.get("title", "")
+    body = arguments.get("body", "")
+    base = arguments.get("base", "main")
+    head = arguments.get("head", "")
+
+    if not repo_dir_name:
+        return "❌ Missing required argument: repo_dir"
+    if not title:
+        return "❌ Missing required argument: title"
+
+    repos_dir = _get_repos_dir(agent_id)
+    repo_path = os.path.normpath(os.path.join(repos_dir, repo_dir_name))
+
+    if not repo_path.startswith(repos_dir):
+        return "❌ repo_dir must be within the repos directory"
+    if not os.path.isdir(repo_path):
+        return f"❌ Repository directory not found: {repo_dir_name}"
+
+    config = await _get_dev_sandbox_config(agent_id)
+
+    from app.services.sandbox.registry import get_sandbox_backend
+    backend = get_sandbox_backend(config)
+
+    # Get remote URL
+    remote_result = await backend.execute_command(
+        "git remote get-url origin",
+        cwd=repo_path, timeout=5,
+        agent_id=str(agent_id), work_dir=repo_path,
+    )
+    if not remote_result.success or not remote_result.stdout.strip():
+        return "❌ Cannot determine remote URL. Is this a cloned repository?"
+    remote_url = remote_result.stdout.strip()
+
+    # Get current branch if head not specified
+    if not head:
+        branch_result = await backend.execute_command(
+            "git rev-parse --abbrev-ref HEAD",
+            cwd=repo_path, timeout=5,
+            agent_id=str(agent_id), work_dir=repo_path,
+        )
+        if branch_result.success and branch_result.stdout.strip():
+            head = branch_result.stdout.strip()
+        else:
+            return "❌ Cannot determine current branch"
+
+    if head == base:
+        return f"❌ Source branch ({head}) and target branch ({base}) are the same"
+
+    # Resolve credential
+    git_env, secrets = await _resolve_git_credential(agent_id, user_id, remote_url)
+
+    # Push the branch first
+    from app.services.dev_tools import git_tool
+    push_result = await git_tool(
+        f"push -u origin {head}",
+        cwd=repo_path, agent_id=agent_id, sandbox_config=config,
+        env=git_env, secrets=secrets, timeout=60,
+    )
+
+    # Get token for API call
+    token = secrets[0] if secrets else ""
+    if not token:
+        return f"❌ No credentials found for {remote_url}. Configure a GitHub/GitLab credential for this agent."
+
+    from app.services.git_platform import create_pull_request
+    pr_result = await create_pull_request(
+        repo_url=remote_url, token=token,
+        title=title, body=body, base=base, head=head,
+    )
+
+    if pr_result["success"]:
+        return f"✅ PR created: {pr_result['url']}\n#{pr_result.get('number', '')} — {title}"
+    else:
+        return f"❌ PR creation failed: {pr_result['error']}\n(Push result: {push_result[:200]})"
 
 
 async def _execute_code(
