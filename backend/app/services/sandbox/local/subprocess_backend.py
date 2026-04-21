@@ -122,6 +122,96 @@ class SubprocessBackend(BaseSandboxBackend):
         except Exception:
             return False
 
+    async def execute_command(
+        self,
+        command: str,
+        cwd: str | None = None,
+        timeout: int = 120,
+        env: dict[str, str] | None = None,
+        **kwargs
+    ) -> ExecutionResult:
+        """Execute a shell command directly via asyncio.create_subprocess_shell."""
+        start_time = time.time()
+
+        # Safety check
+        safety_error = _check_code_safety("bash", command, self.config.allow_network)
+        if safety_error:
+            return ExecutionResult(
+                success=False,
+                stdout="",
+                stderr="",
+                exit_code=1,
+                duration_ms=int((time.time() - start_time) * 1000),
+                error=safety_error,
+            )
+
+        # Validate cwd
+        if cwd and not os.path.isdir(cwd):
+            return ExecutionResult(
+                success=False,
+                stdout="",
+                stderr="",
+                exit_code=1,
+                duration_ms=int((time.time() - start_time) * 1000),
+                error=f"Working directory does not exist: {cwd}",
+            )
+
+        # Set up environment
+        run_env = dict(os.environ)
+        if env:
+            run_env.update(env)
+
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=run_env,
+            )
+
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                return ExecutionResult(
+                    success=False,
+                    stdout="",
+                    stderr="",
+                    exit_code=124,
+                    duration_ms=int((time.time() - start_time) * 1000),
+                    error=f"Command timed out after {timeout}s",
+                )
+
+            stdout_str = stdout.decode("utf-8", errors="replace")[:20000]
+            stderr_str = stderr.decode("utf-8", errors="replace")[:10000]
+            duration_ms = int((time.time() - start_time) * 1000)
+
+            return ExecutionResult(
+                success=proc.returncode == 0,
+                stdout=stdout_str,
+                stderr=stderr_str,
+                exit_code=proc.returncode,
+                duration_ms=duration_ms,
+                error=None if proc.returncode == 0 else f"Exit code: {proc.returncode}",
+            )
+
+        except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            logger.exception("[Subprocess] execute_command error")
+            return ExecutionResult(
+                success=False,
+                stdout="",
+                stderr="",
+                exit_code=1,
+                duration_ms=duration_ms,
+                error=f"Execution error: {str(e)[:200]}",
+            )
+
     async def execute(
         self,
         code: str,

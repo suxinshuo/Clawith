@@ -59,3 +59,50 @@ async def test_execute_command_delegates_to_execute():
     assert backend.last_call["work_dir"] == "/tmp"
     assert result.success is True
     assert result.stdout == "ok"
+
+
+# ── Tests for SubprocessBackend.execute_command() ──
+
+from app.services.sandbox.local.subprocess_backend import SubprocessBackend
+import tempfile
+import os
+
+
+@pytest.mark.asyncio
+async def test_subprocess_execute_command_echo():
+    config = SandboxConfig(type="subprocess")
+    backend = SubprocessBackend(config)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = await backend.execute_command("echo hello", cwd=tmpdir, timeout=10)
+        assert result.exit_code == 0
+        assert "hello" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_subprocess_execute_command_cwd():
+    config = SandboxConfig(type="subprocess")
+    backend = SubprocessBackend(config)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = await backend.execute_command("pwd", cwd=tmpdir, timeout=10)
+        assert result.exit_code == 0
+        assert tmpdir in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_subprocess_execute_command_timeout():
+    config = SandboxConfig(type="subprocess")
+    backend = SubprocessBackend(config)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = await backend.execute_command("sleep 30", cwd=tmpdir, timeout=1)
+        assert result.exit_code == 124
+        assert result.error and "timed out" in result.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_subprocess_execute_command_blocks_dangerous():
+    config = SandboxConfig(type="subprocess")
+    backend = SubprocessBackend(config)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = await backend.execute_command("rm -rf /", cwd=tmpdir, timeout=10)
+        assert result.exit_code == 1
+        assert result.error
