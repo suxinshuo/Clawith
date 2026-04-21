@@ -177,7 +177,10 @@ class SubprocessBackend(BaseSandboxBackend):
                 )
             except asyncio.TimeoutError:
                 proc.kill()
-                await proc.communicate()
+                try:
+                    await asyncio.wait_for(proc.communicate(), timeout=5)
+                except asyncio.TimeoutError:
+                    pass
                 return ExecutionResult(
                     success=False,
                     stdout="",

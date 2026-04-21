@@ -1,5 +1,6 @@
 """Local docker-based sandbox backend."""
 
+import hashlib
 import time
 from pathlib import Path
 
@@ -44,7 +45,8 @@ _DOCKER_COMMANDS = {
 
 def _dev_container_name(agent_id: str) -> str:
     """Return the deterministic container name for a given agent."""
-    return f"clawith-dev-{agent_id[:8]}"
+    short_hash = hashlib.sha256(agent_id.encode()).hexdigest()[:12]
+    return f"clawith-dev-{short_hash}"
 
 
 class DockerBackend(BaseSandboxBackend):
@@ -250,24 +252,34 @@ class DockerBackend(BaseSandboxBackend):
                 if work_dir:
                     volumes[work_dir] = {"bind": "/workspace", "mode": "rw"}
 
-                container = client.containers.run(
-                    self.config.dev_image,
-                    "sleep infinity",
-                    detach=True,
-                    name=container_name,
-                    labels={
-                        "clawith.agent_id": agent_id,
-                        "clawith.dev_container": "true",
-                    },
-                    volumes=volumes,
-                    working_dir="/workspace",
-                    mem_limit=self.config.memory_limit,
-                    cpu_period=100000,
-                    cpu_quota=int(float(self.config.cpu_limit) * 100000),
-                    network_mode="bridge",
-                    user="root",
-                )
-                logger.info(f"[DevContainer] Created container {container_name} for agent {agent_id}")
+                try:
+                    container = client.containers.run(
+                        self.config.dev_image,
+                        "sleep infinity",
+                        detach=True,
+                        name=container_name,
+                        labels={
+                            "clawith.agent_id": agent_id,
+                            "clawith.dev_container": "true",
+                        },
+                        volumes=volumes,
+                        working_dir="/workspace",
+                        mem_limit=self.config.memory_limit,
+                        cpu_period=100000,
+                        cpu_quota=int(float(self.config.cpu_limit) * 100000),
+                        network_mode="bridge",
+                        user="root",
+                    )
+                    logger.info(f"[DevContainer] Created container {container_name} for agent {agent_id}")
+                except docker_lib.errors.APIError as api_err:
+                    if api_err.status_code == 409:
+                        # Concurrent creation — container already exists, just get it
+                        container = client.containers.get(container_name)
+                    else:
+                        raise
+
+            # Record activity before execution to prevent premature cleanup during long commands
+            record_activity(agent_id)
 
             # Execute command via docker exec
             exec_env = env or {}

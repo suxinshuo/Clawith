@@ -1,6 +1,5 @@
 """Dev container lifecycle manager — create, track idle, cleanup."""
 
-import asyncio
 import time
 from loguru import logger
 
