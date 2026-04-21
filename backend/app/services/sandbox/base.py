@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from loguru import logger
+
 
 @dataclass
 class ExecutionResult:
@@ -130,6 +132,8 @@ class BaseSandboxBackend(ABC):
         **kwargs
     ) -> ExecutionResult:
         """Execute a shell command. Default delegates to execute(command, 'bash')."""
+        if env:
+            logger.debug("[BaseSandboxBackend] execute_command default impl ignores env parameter")
         return await self.execute(command, language="bash", timeout=timeout, work_dir=cwd)
 
     def _format_result(self, result: ExecutionResult) -> str:

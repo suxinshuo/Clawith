@@ -110,7 +110,7 @@ class Agent(Base):
     timezone: Mapped[str | None] = mapped_column(String(50), default=None, nullable=True)
 
     # Dev tools config
-    allowed_repos: Mapped[list] = mapped_column(JSON, default=[])  # ["github.com/org/*", "github.com/org/repo"]
+    allowed_repos: Mapped[list] = mapped_column(JSON, default=list)  # ["github.com/org/*", "github.com/org/repo"]
     dev_approval_mode: Mapped[str] = mapped_column(String(20), default="confirm")  # auto | confirm | strict
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

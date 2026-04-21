@@ -20,4 +20,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    pass
+    op.execute("ALTER TABLE agents DROP COLUMN IF EXISTS allowed_repos")
+    op.execute("ALTER TABLE agents DROP COLUMN IF EXISTS dev_approval_mode")
