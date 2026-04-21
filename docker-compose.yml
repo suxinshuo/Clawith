@@ -49,7 +49,7 @@ services:
       CORS_ORIGINS: '["*"]'
       FEISHU_APP_ID: ${FEISHU_APP_ID:-}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
-      DOCKER_NETWORK: clawith_yaojin_network
+      DOCKER_NETWORK: clawith_network
       SS_CONFIG_FILE: /data/ss-nodes.json
       # Public base URL for constructing OAuth callback URLs and email links.
       # Required when deployed behind a reverse proxy (e.g. Nginx, Cloudflare).
@@ -96,4 +96,4 @@ volumes:
 
 networks:
   clawith_dev:
-    name: clawith_yaojin_network
+    name: clawith_network
