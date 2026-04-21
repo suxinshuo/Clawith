@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from loguru import logger
+
 
 @dataclass
 class ExecutionResult:
@@ -78,6 +80,17 @@ class SandboxBackend(Protocol):
         """
         ...
 
+    async def execute_command(
+        self,
+        command: str,
+        cwd: str | None = None,
+        timeout: int = 120,
+        env: dict[str, str] | None = None,
+        **kwargs
+    ) -> ExecutionResult:
+        """Execute a shell command in the sandbox."""
+        ...
+
 
 class BaseSandboxBackend(ABC):
     """Base class providing common functionality for sandbox backends."""
@@ -109,6 +122,19 @@ class BaseSandboxBackend(ABC):
     def get_capabilities(self) -> SandboxCapabilities:
         """Get the capabilities of this sandbox backend."""
         pass
+
+    async def execute_command(
+        self,
+        command: str,
+        cwd: str | None = None,
+        timeout: int = 120,
+        env: dict[str, str] | None = None,
+        **kwargs
+    ) -> ExecutionResult:
+        """Execute a shell command. Default delegates to execute(command, 'bash')."""
+        if env:
+            logger.debug("[BaseSandboxBackend] execute_command default impl ignores env parameter")
+        return await self.execute(command, language="bash", timeout=timeout, work_dir=cwd)
 
     def _format_result(self, result: ExecutionResult) -> str:
         """Format execution result for user display."""

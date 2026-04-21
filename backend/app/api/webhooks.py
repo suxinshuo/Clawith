@@ -128,8 +128,25 @@ async def receive_webhook(token: str, request: Request):
         except Exception:
             payload_str = repr(body[:2000])
 
+        # Parse PR event if applicable
+        pr_event_context = ""
+        try:
+            from app.services.pr_event_parser import parse_pr_event, format_pr_event_context
+            payload_obj_for_pr = json.loads(body.decode("utf-8")) if isinstance(body, bytes) else json.loads(payload_str)
+            pr_event = parse_pr_event(payload_obj_for_pr, dict(request.headers))
+            if pr_event:
+                pr_event_context = format_pr_event_context(pr_event)
+        except Exception:
+            pass  # Don't fail webhook processing if PR parsing fails
+
         # Store payload and set pending flag
-        new_config = {**cfg, "_webhook_pending": True, "_webhook_payload": payload_str[:8000]}
+        new_config = {
+            **cfg,
+            "_webhook_pending": True,
+            "_webhook_payload": payload_str[:8000],
+        }
+        if pr_event_context:
+            new_config["_webhook_context"] = pr_event_context
         from sqlalchemy import update
         await db.execute(
             update(AgentTrigger)

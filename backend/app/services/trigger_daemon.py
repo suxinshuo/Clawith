@@ -436,6 +436,9 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
                     if len(payload_str) > 2000:
                         payload_str = payload_str[:2000] + "... (truncated)"
                     part += f"\nWebhook Payload:\n{payload_str}"
+                # Inject structured PR event context if available
+                if cfg.get("_webhook_context"):
+                    part += f"\n\n{cfg['_webhook_context']}"
                 context_parts.append(part)
                 trigger_names.append(t.name)
 

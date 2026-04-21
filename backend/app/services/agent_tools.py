@@ -686,6 +686,168 @@ AGENT_TOOLS = [
             },
         },
     },
+    # ── Dev Tools: Shell & Git ──
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_command",
+            "description": "Execute a shell command in the development sandbox. Use for compiling, running tests, installing dependencies, or any command-line operation. The command runs in the agent's repos directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Shell command to execute"},
+                    "cwd": {"type": "string", "description": "Working directory relative to repo root (default: repo root)"},
+                    "timeout": {"type": "integer", "description": "Timeout in seconds (default: 120, max: 300)"},
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_clone",
+            "description": "Clone a Git repository into the workspace. The repo must be in the allowed repos whitelist.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_url": {"type": "string", "description": "Repository URL (HTTPS or SSH)"},
+                    "branch": {"type": "string", "description": "Branch to checkout (optional)"},
+                    "dir_name": {"type": "string", "description": "Directory name (default: repo name)"},
+                },
+                "required": ["repo_url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_status",
+            "description": "Show the working tree status (modified, staged, untracked files).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_dir": {"type": "string", "description": "Repository directory name in workspace"},
+                },
+                "required": ["repo_dir"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_diff",
+            "description": "Show changes in the working tree or between commits.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_dir": {"type": "string", "description": "Repository directory name"},
+                    "args": {"type": "string", "description": "Additional diff arguments (e.g., '--staged', 'HEAD~1', 'file.py')"},
+                },
+                "required": ["repo_dir"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_log",
+            "description": "Show commit history.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_dir": {"type": "string", "description": "Repository directory name"},
+                    "count": {"type": "integer", "description": "Number of commits to show (default: 10)"},
+                    "args": {"type": "string", "description": "Additional log arguments (e.g., '--oneline', '--graph')"},
+                },
+                "required": ["repo_dir"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_commit",
+            "description": "Stage files and create a commit.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_dir": {"type": "string", "description": "Repository directory name"},
+                    "message": {"type": "string", "description": "Commit message"},
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Files to stage (empty = git add -A)",
+                    },
+                },
+                "required": ["repo_dir", "message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_push",
+            "description": "Push commits to the remote repository.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_dir": {"type": "string", "description": "Repository directory name"},
+                    "remote": {"type": "string", "description": "Remote name (default: origin)"},
+                    "branch": {"type": "string", "description": "Branch to push (default: current branch)"},
+                },
+                "required": ["repo_dir"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_pull",
+            "description": "Pull updates from the remote repository.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_dir": {"type": "string", "description": "Repository directory name"},
+                },
+                "required": ["repo_dir"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_branch",
+            "description": "List, create, or switch branches.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_dir": {"type": "string", "description": "Repository directory name"},
+                    "action": {"type": "string", "enum": ["list", "create", "switch"], "description": "Action to perform"},
+                    "branch_name": {"type": "string", "description": "Branch name (required for create/switch)"},
+                },
+                "required": ["repo_dir", "action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_create_pr",
+            "description": "Create a Pull Request (GitHub) or Merge Request (GitLab). Pushes the current branch first if needed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_dir": {"type": "string", "description": "Repository directory name in workspace"},
+                    "title": {"type": "string", "description": "PR/MR title"},
+                    "body": {"type": "string", "description": "PR/MR description (optional)"},
+                    "base": {"type": "string", "description": "Target branch (default: main)"},
+                    "head": {"type": "string", "description": "Source branch (default: current branch)"},
+                },
+                "required": ["repo_dir", "title"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -2038,6 +2200,16 @@ _TOOL_AUTONOMY_MAP = {
     "web_search": "web_search",
     "execute_code": "execute_code",
     "execute_code_e2b": "execute_code",
+    "execute_command": "execute_code",         # L2 default
+    "git_clone": "write_workspace_files",      # L2
+    "git_status": "read_files",                # L1
+    "git_diff": "read_files",                  # L1
+    "git_log": "read_files",                   # L1
+    "git_commit": "write_workspace_files",     # L2
+    "git_push": "send_external_message",       # L3
+    "git_pull": "write_workspace_files",       # L2
+    "git_branch": "write_workspace_files",     # L2
+    "git_create_pr": "send_external_message",  # L3
 }
 
 
@@ -2136,26 +2308,109 @@ async def execute_tool(
 
     ws = await ensure_workspace(agent_id, tenant_id=_agent_tenant_id)
 
-    # ── Autonomy boundary check ──
+    # Dev tools permission check
+    if tool_name in _DEV_TOOL_NAMES:
+        try:
+            async with async_session() as _pdb:
+                _pr = await _pdb.execute(select(AgentModel).where(AgentModel.id == agent_id))
+                _pagent = _pr.scalar_one_or_none()
+                if _pagent:
+                    dev_allowed = await _check_dev_permission(_pagent, user_id)
+                    if not dev_allowed:
+                        return "❌ 您没有开发操作权限，请联系管理员开通。\n(You don't have dev tools permission. Contact the admin.)"
+        except Exception as e:
+            logger.exception(f"[DevPermission] Check error: {e}")
+
+    # ── Autonomy boundary check (with dev_approval_mode + per-tool overrides) ──
     action_type = _TOOL_AUTONOMY_MAP.get(tool_name)
     if action_type:
         try:
             from app.services.autonomy_service import autonomy_service
-            from app.models.agent import Agent as AgentModel
             async with async_session() as _adb:
                 _ar = await _adb.execute(select(AgentModel).where(AgentModel.id == agent_id))
                 _agent = _ar.scalar_one_or_none()
                 if _agent:
-                    result_check = await autonomy_service.check_and_enforce(
-                        _adb, _agent, action_type, {"tool": tool_name, "args": arguments, "requested_by": str(user_id)}
-                    )
-                    await _adb.commit()
-                    if not result_check.get("allowed"):
-                        level = result_check.get("level", "L3")
-                        logger.info(f"[Autonomy] Tool {tool_name} denied, level: {level}")
-                        if level == "L3":
-                            return f"⏳ This action requires approval. An approval request has been sent. Please wait for approval before retrying. (Approval ID: {result_check.get('approval_id', 'N/A')})"
-                        return f"❌ Action denied: {result_check.get('message', 'unknown reason')}"
+                    # Per-tool autonomy override: check "tool:{tool_name}" key first
+                    policy = _agent.autonomy_policy or {}
+                    tool_key = f"tool:{tool_name}"
+                    effective_action_type = action_type
+                    if tool_key in policy:
+                        effective_action_type = tool_key
+
+                    # dev_approval_mode override for dev tools
+                    if tool_name in _DEV_TOOL_NAMES:
+                        dev_mode = getattr(_agent, "dev_approval_mode", "confirm") or "confirm"
+                        if dev_mode == "auto":
+                            # Skip autonomy check — auto-execute
+                            logger.info(f"[Autonomy] dev_approval_mode=auto, skipping check for {tool_name}")
+                        elif dev_mode == "strict":
+                            # Force L3 for all dev tools
+                            strict_policy = dict(policy)
+                            strict_policy[effective_action_type] = "L3"
+                            original_policy = _agent.autonomy_policy
+                            _agent.autonomy_policy = strict_policy
+                            result_check = await autonomy_service.check_and_enforce(
+                                _adb, _agent, effective_action_type,
+                                {"tool": tool_name, "args": arguments, "requested_by": str(user_id)},
+                            )
+                            _agent.autonomy_policy = original_policy
+                            await _adb.commit()
+                            if not result_check.get("allowed"):
+                                level = result_check.get("level", "L3")
+                                if level == "L3":
+                                    await _broadcast_approval_event(
+                                        agent_id, session_id,
+                                        {
+                                            "approval_id": result_check.get("approval_id"),
+                                            "action_type": effective_action_type,
+                                            "tool": tool_name,
+                                            "args": str(arguments)[:200],
+                                        },
+                                    )
+                                    return f"⏳ This action requires approval. An approval request has been sent. Please wait for approval before retrying. (Approval ID: {result_check.get('approval_id', 'N/A')})"
+                                return f"❌ Action denied: {result_check.get('message', 'unknown reason')}"
+                        else:
+                            # "confirm" mode — use normal autonomy check with effective_action_type
+                            result_check = await autonomy_service.check_and_enforce(
+                                _adb, _agent, effective_action_type,
+                                {"tool": tool_name, "args": arguments, "requested_by": str(user_id)},
+                            )
+                            await _adb.commit()
+                            if not result_check.get("allowed"):
+                                level = result_check.get("level", "L3")
+                                if level == "L3":
+                                    await _broadcast_approval_event(
+                                        agent_id, session_id,
+                                        {
+                                            "approval_id": result_check.get("approval_id"),
+                                            "action_type": effective_action_type,
+                                            "tool": tool_name,
+                                            "args": str(arguments)[:200],
+                                        },
+                                    )
+                                    return f"⏳ This action requires approval. An approval request has been sent. Please wait for approval before retrying. (Approval ID: {result_check.get('approval_id', 'N/A')})"
+                                return f"❌ Action denied: {result_check.get('message', 'unknown reason')}"
+                    else:
+                        # Non-dev tool — standard autonomy check
+                        result_check = await autonomy_service.check_and_enforce(
+                            _adb, _agent, effective_action_type,
+                            {"tool": tool_name, "args": arguments, "requested_by": str(user_id)},
+                        )
+                        await _adb.commit()
+                        if not result_check.get("allowed"):
+                            level = result_check.get("level", "L3")
+                            if level == "L3":
+                                await _broadcast_approval_event(
+                                    agent_id, session_id,
+                                    {
+                                        "approval_id": result_check.get("approval_id"),
+                                        "action_type": effective_action_type,
+                                        "tool": tool_name,
+                                        "args": str(arguments)[:200],
+                                    },
+                                )
+                                return f"⏳ This action requires approval. An approval request has been sent. Please wait for approval before retrying. (Approval ID: {result_check.get('approval_id', 'N/A')})"
+                            return f"❌ Action denied: {result_check.get('message', 'unknown reason')}"
         except Exception as e:
             logger.exception(f"[Autonomy] Check failed: {e}")
             return f"⚠️ Autonomy check failed ({e}). Operation blocked for safety. Please retry or contact admin."
@@ -2407,6 +2662,16 @@ async def execute_tool(
             result = await _search_clawhub(agent_id, arguments)
         elif tool_name == "install_skill":
             result = await _install_skill(agent_id, ws, arguments)
+        # ── Dev Tools: Shell & Git ──
+        elif tool_name == "execute_command":
+            result = await _handle_execute_command(arguments, agent_id, user_id)
+        elif tool_name == "git_clone":
+            result = await _handle_git_clone(arguments, agent_id, user_id)
+        elif tool_name in ("git_status", "git_diff", "git_log", "git_commit",
+                           "git_push", "git_pull", "git_branch"):
+            result = await _handle_git_tool(tool_name, arguments, agent_id, user_id)
+        elif tool_name == "git_create_pr":
+            result = await _handle_git_create_pr(arguments, agent_id, user_id)
         else:
             # Try MCP tool execution
             result = await _execute_mcp_tool(tool_name, arguments, agent_id=agent_id, user_id=user_id, session_id=session_id)
@@ -5996,6 +6261,391 @@ def _check_code_safety(language: str, code: str) -> str | None:
                 return f"❌ Blocked: unsafe operation detected ({pattern})"
 
     return None
+
+
+_DEV_TOOL_NAMES = {
+    "execute_command", "git_clone", "git_status", "git_diff", "git_log",
+    "git_commit", "git_push", "git_pull", "git_branch", "git_create_pr",
+}
+
+
+async def _check_dev_permission(agent, user_id: uuid.UUID) -> bool:
+    """Check if a user has permission to use dev tools on this agent."""
+    mode = getattr(agent, "dev_tools_access_mode", "all") or "all"
+    if mode == "all":
+        return True
+
+    # "restricted" mode: check for dev_tools permission
+    try:
+        from app.models.agent import AgentPermission
+        async with async_session() as db:
+            result = await db.execute(
+                select(AgentPermission).where(
+                    AgentPermission.agent_id == agent.id,
+                    AgentPermission.permission_type == "dev_tools",
+                ).where(
+                    (AgentPermission.scope_type == "company") |
+                    ((AgentPermission.scope_type == "user") & (AgentPermission.scope_id == user_id))
+                ).limit(1)
+            )
+            perm = result.scalar_one_or_none()
+            return perm is not None
+    except Exception as e:
+        logger.warning(f"[DevPermission] Check failed: {e}")
+        return False
+
+
+# ── Approval Broadcast Helper ──
+
+async def _broadcast_approval_event(agent_id: uuid.UUID, session_id: str | None, approval_data: dict):
+    """Send an approval request event to connected WebSocket clients."""
+    try:
+        from app.api.websocket import manager
+        message = {
+            "type": "approval_request",
+            "approval_id": str(approval_data.get("approval_id", "")),
+            "action_type": approval_data.get("action_type", ""),
+            "tool_name": approval_data.get("tool", ""),
+            "tool_args": approval_data.get("args", ""),
+            "status": "pending",
+        }
+        if session_id:
+            await manager.send_to_session(str(agent_id), session_id, message)
+        else:
+            await manager.send_message(str(agent_id), message)
+    except Exception as e:
+        logger.warning(f"[WS] Failed to broadcast approval event: {e}")
+
+
+# ── Dev Tool Handlers ──
+
+async def _get_dev_sandbox_config(agent_id: uuid.UUID) -> "SandboxConfig":
+    """Get sandbox config for dev tools, with agent-level override."""
+    from app.config import get_sandbox_config
+    from app.services.sandbox.config import SandboxConfig
+
+    fallback = get_sandbox_config()
+    tool_config = await _get_tool_config(agent_id, "execute_command")
+    if tool_config:
+        return SandboxConfig.from_dict(tool_config, fallback)
+    return fallback
+
+
+def _get_repos_dir(agent_id: uuid.UUID) -> str:
+    """Get the repos directory path for an agent."""
+    ws = WORKSPACE_ROOT / str(agent_id)
+    repos_dir = os.path.join(str(ws), "repos")
+    os.makedirs(repos_dir, exist_ok=True)
+    return repos_dir
+
+
+async def _resolve_git_credential(agent_id: uuid.UUID, user_id: uuid.UUID, repo_url: str, tenant_id: uuid.UUID | None = None) -> tuple[dict[str, str], list[str]]:
+    """Resolve git credentials for a repo URL.
+
+    Returns:
+        (env_vars, secrets) — env vars to pass to git command, list of secret strings to sanitize.
+    """
+    from app.services.git_credential_helper import build_git_auth_env, get_credential_provider
+
+    try:
+        provider = get_credential_provider(repo_url)
+        from app.services.credential_resolver import CredentialResolver
+        resolver = CredentialResolver()
+        # Get tenant_id from agent if not provided
+        if tenant_id is None:
+            async with async_session() as db:
+                r = await db.execute(select(AgentModel.tenant_id).where(AgentModel.id == agent_id))
+                tenant_id = r.scalar_one_or_none()
+
+        if not tenant_id:
+            return {}, []
+
+        cred = await resolver.resolve(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            provider=provider,
+            agent_id=agent_id,
+        )
+        if not cred:
+            logger.info(f"[GitCred] No {provider} credential found for agent {agent_id}")
+            return {}, []
+
+        env = build_git_auth_env(repo_url, cred.access_token)
+        secrets = [cred.access_token] if cred.access_token else []
+        return env, secrets
+
+    except Exception as e:
+        logger.warning(f"[GitCred] Credential resolution failed: {e}")
+        return {}, []
+
+
+async def _handle_execute_command(arguments: dict, agent_id: uuid.UUID, user_id: uuid.UUID) -> str:
+    command = arguments.get("command", "")
+    cwd_rel = arguments.get("cwd", ".")
+    timeout = min(int(arguments.get("timeout", 120)), 300)
+
+    if not command:
+        return "❌ Missing required argument: command"
+
+    repos_dir = _get_repos_dir(agent_id)
+    cwd = os.path.normpath(os.path.join(repos_dir, cwd_rel))
+
+    # Prevent path escape
+    if not cwd.startswith(repos_dir):
+        return "❌ Working directory must be within the repos directory"
+
+    config = await _get_dev_sandbox_config(agent_id)
+
+    from app.services.dev_tools import execute_command_tool
+    return await execute_command_tool(
+        command=command, cwd=cwd, timeout=timeout,
+        agent_id=agent_id, sandbox_config=config,
+    )
+
+
+async def _handle_git_clone(arguments: dict, agent_id: uuid.UUID, user_id: uuid.UUID) -> str:
+    repo_url = arguments.get("repo_url", "")
+    branch = arguments.get("branch", "")
+    dir_name = arguments.get("dir_name", "")
+
+    if not repo_url:
+        return "❌ Missing required argument: repo_url"
+
+    # Check repo whitelist
+    from app.services.dev_tools import check_repo_allowed
+    async with async_session() as db:
+        r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+        agent = r.scalar_one_or_none()
+    allowed_repos = getattr(agent, "allowed_repos", []) or [] if agent else []
+    if not check_repo_allowed(repo_url, allowed_repos):
+        return f"❌ Repository not in whitelist: {repo_url}\nAllowed: {', '.join(allowed_repos) if allowed_repos else '(none configured)'}"
+
+    repos_dir = _get_repos_dir(agent_id)
+    config = await _get_dev_sandbox_config(agent_id)
+
+    # Resolve git credentials — pass tenant_id from already-fetched agent to avoid a second DB query
+    agent_tenant_id = getattr(agent, "tenant_id", None) if agent else None
+    git_env, secrets = await _resolve_git_credential(agent_id, user_id, repo_url, tenant_id=agent_tenant_id)
+
+    from app.services.dev_tools import git_tool
+    sub_command = f"clone {repo_url}"
+    if branch:
+        sub_command += f" -b {branch}"
+    if dir_name:
+        sub_command += f" {dir_name}"
+
+    clone_result = await git_tool(
+        sub_command=sub_command,
+        cwd=repos_dir,
+        agent_id=agent_id,
+        sandbox_config=config,
+        env=git_env or None,
+        timeout=120,
+        secrets=secrets,
+    )
+
+    # Auto-create agent-specific branch
+    if dir_name:
+        clone_dir = dir_name
+    else:
+        from app.services.git_credential_helper import extract_owner_repo
+        _, repo_name = extract_owner_repo(repo_url)
+        clone_dir = repo_name or repo_url.rstrip("/").split("/")[-1].replace(".git", "")
+
+    cloned_path = os.path.join(repos_dir, clone_dir)
+    if os.path.isdir(cloned_path):
+        from app.services.branch_naming import generate_agent_branch
+        agent_name = getattr(agent, "name", "") or str(agent_id)[:8]
+        context_id = dir_name or branch or str(uuid.uuid4())[:8]
+        agent_branch = generate_agent_branch(agent_name, context_id)
+
+        branch_result = await git_tool(
+            f"checkout -b {agent_branch}",
+            cwd=cloned_path, agent_id=agent_id, sandbox_config=config, secrets=secrets,
+        )
+        clone_result += f"\n📌 Auto-created branch: {agent_branch}"
+
+    return clone_result
+
+
+async def _handle_git_tool(tool_name: str, arguments: dict, agent_id: uuid.UUID, user_id: uuid.UUID) -> str:
+    repo_dir_name = arguments.get("repo_dir", "")
+    if not repo_dir_name:
+        return "❌ Missing required argument: repo_dir"
+
+    repos_dir = _get_repos_dir(agent_id)
+    repo_path = os.path.normpath(os.path.join(repos_dir, repo_dir_name))
+
+    if not repo_path.startswith(repos_dir):
+        return "❌ repo_dir must be within the repos directory"
+    if not os.path.isdir(repo_path):
+        return f"❌ Repository directory not found: {repo_dir_name}"
+
+    config = await _get_dev_sandbox_config(agent_id)
+
+    # Resolve credentials for auth-requiring operations (push, pull)
+    git_env: dict[str, str] | None = None
+    secrets: list[str] = []
+    if tool_name in ("git_push", "git_pull"):
+        try:
+            from app.services.sandbox.registry import get_sandbox_backend
+            _backend = get_sandbox_backend(config)
+            _remote_result = await _backend.execute_command(
+                "git remote get-url origin",
+                cwd=repo_path, timeout=5,
+                agent_id=str(agent_id), work_dir=repo_path,
+            )
+            if _remote_result.success and _remote_result.stdout.strip():
+                remote_url = _remote_result.stdout.strip()
+                git_env, secrets = await _resolve_git_credential(agent_id, user_id, remote_url)
+        except Exception as e:
+            logger.warning(f"[GitTool] Could not resolve remote URL for credential: {e}")
+
+    from app.services.dev_tools import git_tool
+
+    if tool_name == "git_status":
+        return await git_tool("status", cwd=repo_path, agent_id=agent_id, sandbox_config=config, secrets=secrets)
+
+    elif tool_name == "git_diff":
+        args = arguments.get("args", "")
+        return await git_tool(f"diff {args}".strip(), cwd=repo_path, agent_id=agent_id, sandbox_config=config, secrets=secrets)
+
+    elif tool_name == "git_log":
+        count = int(arguments.get("count", 10))
+        args = arguments.get("args", "")
+        return await git_tool(f"log -n {count} {args}".strip(), cwd=repo_path, agent_id=agent_id, sandbox_config=config, secrets=secrets)
+
+    elif tool_name == "git_commit":
+        message = arguments.get("message", "")
+        files = arguments.get("files", [])
+        if not message:
+            return "❌ Missing required argument: message"
+        if files:
+            stage_cmd = "add " + " ".join(f'"{f}"' for f in files)
+        else:
+            stage_cmd = "add -A"
+        await git_tool(stage_cmd, cwd=repo_path, agent_id=agent_id, sandbox_config=config, secrets=secrets)
+        return await git_tool(f'commit -m "{message}"', cwd=repo_path, agent_id=agent_id, sandbox_config=config, secrets=secrets)
+
+    elif tool_name == "git_push":
+        # Check protected branch
+        from app.services.branch_naming import is_protected_branch
+        from app.services.sandbox.registry import get_sandbox_backend
+        _pb = get_sandbox_backend(config)
+        branch_check = await _pb.execute_command(
+            "git rev-parse --abbrev-ref HEAD",
+            cwd=repo_path, timeout=5,
+            agent_id=str(agent_id), work_dir=repo_path,
+        )
+        if branch_check.success:
+            current_branch = branch_check.stdout.strip()
+            push_branch = arguments.get("branch", "") or current_branch
+            if is_protected_branch(push_branch):
+                return f"❌ Cannot push directly to protected branch '{push_branch}'. Use git_create_pr instead."
+
+        remote = arguments.get("remote", "origin")
+        branch = arguments.get("branch", "")
+        cmd = f"push {remote}" + (f" {branch}" if branch else "")
+        return await git_tool(cmd, cwd=repo_path, agent_id=agent_id, sandbox_config=config, env=git_env, secrets=secrets)
+
+    elif tool_name == "git_pull":
+        return await git_tool("pull", cwd=repo_path, agent_id=agent_id, sandbox_config=config, env=git_env, secrets=secrets)
+
+    elif tool_name == "git_branch":
+        action = arguments.get("action", "list")
+        branch_name = arguments.get("branch_name", "")
+        if action == "list":
+            return await git_tool("branch -a", cwd=repo_path, agent_id=agent_id, sandbox_config=config, secrets=secrets)
+        elif action == "create":
+            if not branch_name:
+                return "❌ branch_name is required for create action"
+            return await git_tool(f"checkout -b {branch_name}", cwd=repo_path, agent_id=agent_id, sandbox_config=config, secrets=secrets)
+        elif action == "switch":
+            if not branch_name:
+                return "❌ branch_name is required for switch action"
+            return await git_tool(f"checkout {branch_name}", cwd=repo_path, agent_id=agent_id, sandbox_config=config, secrets=secrets)
+        else:
+            return f"❌ Unknown action: {action}. Use: list, create, switch"
+
+    return f"❌ Unknown git tool: {tool_name}"
+
+
+async def _handle_git_create_pr(arguments: dict, agent_id: uuid.UUID, user_id: uuid.UUID) -> str:
+    repo_dir_name = arguments.get("repo_dir", "")
+    title = arguments.get("title", "")
+    body = arguments.get("body", "")
+    base = arguments.get("base", "main")
+    head = arguments.get("head", "")
+
+    if not repo_dir_name:
+        return "❌ Missing required argument: repo_dir"
+    if not title:
+        return "❌ Missing required argument: title"
+
+    repos_dir = _get_repos_dir(agent_id)
+    repo_path = os.path.normpath(os.path.join(repos_dir, repo_dir_name))
+
+    if not repo_path.startswith(repos_dir):
+        return "❌ repo_dir must be within the repos directory"
+    if not os.path.isdir(repo_path):
+        return f"❌ Repository directory not found: {repo_dir_name}"
+
+    config = await _get_dev_sandbox_config(agent_id)
+
+    from app.services.sandbox.registry import get_sandbox_backend
+    backend = get_sandbox_backend(config)
+
+    # Get remote URL
+    remote_result = await backend.execute_command(
+        "git remote get-url origin",
+        cwd=repo_path, timeout=5,
+        agent_id=str(agent_id), work_dir=repo_path,
+    )
+    if not remote_result.success or not remote_result.stdout.strip():
+        return "❌ Cannot determine remote URL. Is this a cloned repository?"
+    remote_url = remote_result.stdout.strip()
+
+    # Get current branch if head not specified
+    if not head:
+        branch_result = await backend.execute_command(
+            "git rev-parse --abbrev-ref HEAD",
+            cwd=repo_path, timeout=5,
+            agent_id=str(agent_id), work_dir=repo_path,
+        )
+        if branch_result.success and branch_result.stdout.strip():
+            head = branch_result.stdout.strip()
+        else:
+            return "❌ Cannot determine current branch"
+
+    if head == base:
+        return f"❌ Source branch ({head}) and target branch ({base}) are the same"
+
+    # Resolve credential
+    git_env, secrets = await _resolve_git_credential(agent_id, user_id, remote_url)
+
+    # Check token before attempting push
+    token = secrets[0] if secrets else ""
+    if not token:
+        return f"❌ No credentials found for {remote_url}. Configure a GitHub/GitLab credential for this agent."
+
+    # Push the branch first
+    from app.services.dev_tools import git_tool
+    push_result = await git_tool(
+        f"push -u origin {head}",
+        cwd=repo_path, agent_id=agent_id, sandbox_config=config,
+        env=git_env, secrets=secrets, timeout=60,
+    )
+
+    from app.services.git_platform import create_pull_request
+    pr_result = await create_pull_request(
+        repo_url=remote_url, token=token,
+        title=title, body=body, base=base, head=head,
+    )
+
+    if pr_result["success"]:
+        return f"✅ PR created: {pr_result['url']}\n#{pr_result.get('number', '')} — {title}"
+    else:
+        return f"❌ PR creation failed: {pr_result['error']}\n(Push result: {push_result[:200]})"
 
 
 async def _execute_code(

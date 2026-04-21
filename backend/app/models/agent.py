@@ -109,6 +109,11 @@ class Agent(Base):
     # Timezone (IANA format, e.g. "Asia/Shanghai"). None = inherit from tenant.
     timezone: Mapped[str | None] = mapped_column(String(50), default=None, nullable=True)
 
+    # Dev tools config
+    allowed_repos: Mapped[list] = mapped_column(JSON, default=list)  # ["github.com/org/*", "github.com/org/repo"]
+    dev_approval_mode: Mapped[str] = mapped_column(String(20), default="confirm")  # auto | confirm | strict
+    dev_tools_access_mode: Mapped[str] = mapped_column(String(20), default="all")  # "all" | "restricted"
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -144,6 +149,7 @@ class AgentPermission(Base):
     scope_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     # access_level: 'use' = task/chat/tool/skill/workspace only, 'manage' = full access
     access_level: Mapped[str] = mapped_column(String(20), default="use", nullable=False)
+    permission_type: Mapped[str] = mapped_column(String(20), default="general")  # "general" | "dev_tools"
 
     agent: Mapped["Agent"] = relationship(back_populates="permissions")
 
