@@ -1,8 +1,9 @@
-import pytest
 from app.services.git_credential_helper import (
     detect_git_platform,
     build_git_auth_env,
     extract_repo_host,
+    extract_owner_repo,
+    get_credential_provider,
 )
 
 
@@ -60,3 +61,35 @@ def test_build_git_auth_env_empty_token():
 def test_build_git_auth_env_none_token():
     env = build_git_auth_env("https://github.com/org/repo.git", None)
     assert env == {}
+
+
+# extract_owner_repo tests
+
+def test_extract_owner_repo_https_with_git_suffix():
+    assert extract_owner_repo("https://github.com/myorg/myrepo.git") == ("myorg", "myrepo")
+
+
+def test_extract_owner_repo_https_without_git_suffix():
+    assert extract_owner_repo("https://github.com/myorg/myrepo") == ("myorg", "myrepo")
+
+
+def test_extract_owner_repo_ssh():
+    assert extract_owner_repo("git@github.com:myorg/myrepo.git") == ("myorg", "myrepo")
+
+
+def test_extract_owner_repo_malformed():
+    assert extract_owner_repo("not-a-valid-url") == ("", "")
+
+
+# get_credential_provider tests
+
+def test_get_credential_provider_github():
+    assert get_credential_provider("https://github.com/org/repo.git") == "github"
+
+
+def test_get_credential_provider_gitlab():
+    assert get_credential_provider("https://gitlab.com/org/repo.git") == "gitlab"
+
+
+def test_get_credential_provider_unknown():
+    assert get_credential_provider("https://gitea.example.com/org/repo.git") == "gitea"
