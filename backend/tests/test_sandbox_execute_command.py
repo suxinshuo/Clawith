@@ -106,3 +106,25 @@ async def test_subprocess_execute_command_blocks_dangerous():
         result = await backend.execute_command("rm -rf /", cwd=tmpdir, timeout=10)
         assert result.exit_code == 1
         assert result.error
+
+
+# ── Tests for dev_container_manager tracking ──
+
+from app.services.sandbox.dev_container_manager import (
+    record_activity, get_idle_seconds, remove_tracking, get_all_tracked,
+)
+import time
+
+
+def test_dev_container_tracking():
+    agent_id = "test-agent-123"
+    remove_tracking(agent_id)  # clean state
+
+    assert get_idle_seconds(agent_id) == float("inf")
+
+    record_activity(agent_id)
+    assert get_idle_seconds(agent_id) < 1.0
+    assert agent_id in get_all_tracked()
+
+    remove_tracking(agent_id)
+    assert agent_id not in get_all_tracked()

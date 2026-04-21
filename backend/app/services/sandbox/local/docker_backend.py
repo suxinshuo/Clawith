@@ -5,6 +5,7 @@ from pathlib import Path
 
 from app.services.sandbox.base import BaseSandboxBackend, ExecutionResult, SandboxCapabilities
 from app.services.sandbox.config import SandboxConfig
+from app.services.sandbox.dev_container_manager import record_activity
 from loguru import logger
 
 # Lazy import docker to make it optional
@@ -39,6 +40,11 @@ _DOCKER_COMMANDS = {
     "bash": ["bash", "-c"],
     "node": ["node", "-e"],
 }
+
+
+def _dev_container_name(agent_id: str) -> str:
+    """Return the deterministic container name for a given agent."""
+    return f"clawith-dev-{agent_id[:8]}"
 
 
 class DockerBackend(BaseSandboxBackend):
@@ -205,4 +211,96 @@ class DockerBackend(BaseSandboxBackend):
                 exit_code=1,
                 duration_ms=duration_ms,
                 error=f"Docker execution error: {error_msg[:200]}"
+            )
+
+    async def execute_command(
+        self,
+        command: str,
+        cwd: str | None = None,
+        timeout: int = 120,
+        env: dict[str, str] | None = None,
+        **kwargs
+    ) -> ExecutionResult:
+        """Execute a shell command in a persistent dev container."""
+        start_time = time.time()
+        agent_id = kwargs.get("agent_id", "")
+        work_dir = kwargs.get("work_dir")
+
+        if not agent_id:
+            return ExecutionResult(
+                success=False, stdout="", stderr="",
+                exit_code=1,
+                duration_ms=int((time.time() - start_time) * 1000),
+                error="agent_id is required for Docker execute_command",
+            )
+
+        try:
+            docker_lib = _get_docker()
+            client = self.client
+            container_name = _dev_container_name(agent_id)
+
+            # Get or create persistent container
+            try:
+                container = client.containers.get(container_name)
+                if container.status != "running":
+                    container.start()
+            except docker_lib.errors.NotFound:
+                # Create new dev container
+                volumes = {}
+                if work_dir:
+                    volumes[work_dir] = {"bind": "/workspace", "mode": "rw"}
+
+                container = client.containers.run(
+                    self.config.dev_image,
+                    "sleep infinity",
+                    detach=True,
+                    name=container_name,
+                    labels={
+                        "clawith.agent_id": agent_id,
+                        "clawith.dev_container": "true",
+                    },
+                    volumes=volumes,
+                    working_dir="/workspace",
+                    mem_limit=self.config.memory_limit,
+                    cpu_period=100000,
+                    cpu_quota=int(float(self.config.cpu_limit) * 100000),
+                    network_mode="bridge",
+                    user="root",
+                )
+                logger.info(f"[DevContainer] Created container {container_name} for agent {agent_id}")
+
+            # Execute command via docker exec
+            exec_env = env or {}
+            workdir = cwd if cwd else "/workspace"
+            exec_result = container.exec_run(
+                ["bash", "-c", command],
+                workdir=workdir,
+                environment=exec_env,
+                demux=True,
+            )
+
+            record_activity(agent_id)
+
+            stdout_raw, stderr_raw = exec_result.output if isinstance(exec_result.output, tuple) else (exec_result.output, b"")
+            stdout_str = (stdout_raw or b"").decode("utf-8", errors="replace")[:20000]
+            stderr_str = (stderr_raw or b"").decode("utf-8", errors="replace")[:10000]
+            exit_code = exec_result.exit_code
+            duration_ms = int((time.time() - start_time) * 1000)
+
+            return ExecutionResult(
+                success=exit_code == 0,
+                stdout=stdout_str,
+                stderr=stderr_str,
+                exit_code=exit_code,
+                duration_ms=duration_ms,
+                error=None if exit_code == 0 else f"Exit code: {exit_code}",
+            )
+
+        except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            logger.exception("[DockerBackend] execute_command error")
+            return ExecutionResult(
+                success=False, stdout="", stderr="",
+                exit_code=1, duration_ms=duration_ms,
+                error=f"Docker execution error: {str(e)[:200]}",
             )
