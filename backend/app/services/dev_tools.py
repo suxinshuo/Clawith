@@ -65,6 +65,45 @@ def truncate_output(output: str, head: int = 200, tail: int = 50) -> str:
     )
 
 
+# Token patterns to redact from command output
+_SENSITIVE_PATTERNS = [
+    # GitHub PAT / OAuth / fine-grained tokens
+    re.compile(r"(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{6,}"),
+    # GitLab PAT
+    re.compile(r"glpat-[A-Za-z0-9\-_]{20,}"),
+    # Bearer / JWT tokens
+    re.compile(r"Bearer\s+[A-Za-z0-9\-_\.]{20,}"),
+    # Basic auth in URLs: https://user:token@host
+    re.compile(r"(https?://[^:]+:)[^@\s]{8,}(@)"),
+    # Generic long hex/base64 strings that look like tokens (40+ chars)
+    re.compile(r"(?<=[=:\s])[A-Za-z0-9+/\-_]{40,}(?=[&\s\n]|$)"),
+]
+
+
+def sanitize_output(text: str, secrets: list[str] | None = None) -> str:
+    """Redact known token patterns and explicit secrets from command output."""
+    if not text:
+        return text
+
+    result = text
+
+    # Redact explicitly provided secrets first (highest priority)
+    if secrets:
+        for secret in secrets:
+            if secret and len(secret) >= 8:
+                result = result.replace(secret, "***")
+
+    # Redact known patterns
+    for pattern in _SENSITIVE_PATTERNS:
+        if pattern.groups >= 2:
+            # Pattern with capture groups (e.g., URL auth) — preserve structure
+            result = pattern.sub(r"\1***\2", result)
+        else:
+            result = pattern.sub("***", result)
+
+    return result
+
+
 async def execute_command_tool(
     command: str,
     cwd: str,
@@ -72,6 +111,7 @@ async def execute_command_tool(
     agent_id: uuid.UUID,
     sandbox_config: SandboxConfig,
     env: dict[str, str] | None = None,
+    secrets: list[str] | None = None,
 ) -> str:
     """Execute a shell command via sandbox backend. Returns formatted result string."""
     backend = get_sandbox_backend(sandbox_config)
@@ -86,7 +126,7 @@ async def execute_command_tool(
         work_dir=repos_dir,
     )
 
-    return _format_command_result(command, result)
+    return _format_command_result(command, result, secrets=secrets)
 
 
 async def git_tool(
@@ -96,6 +136,7 @@ async def git_tool(
     sandbox_config: SandboxConfig,
     env: dict[str, str] | None = None,
     timeout: int = 60,
+    secrets: list[str] | None = None,
 ) -> str:
     """Execute a git command via sandbox backend."""
     command = f"git {sub_command}"
@@ -110,20 +151,20 @@ async def git_tool(
         work_dir=cwd,
     )
 
-    return _format_command_result(command, result)
+    return _format_command_result(command, result, secrets=secrets)
 
 
-def _format_command_result(command: str, result: ExecutionResult) -> str:
+def _format_command_result(command: str, result: ExecutionResult, secrets: list[str] | None = None) -> str:
     """Format ExecutionResult as a readable string for LLM."""
-    parts = [f"$ {command}"]
+    parts = [f"$ {sanitize_output(command, secrets=secrets)}"]
 
     stdout = truncate_output(result.stdout.strip()) if result.stdout.strip() else ""
     stderr = result.stderr.strip() if result.stderr.strip() else ""
 
     if stdout:
-        parts.append(stdout)
+        parts.append(sanitize_output(stdout, secrets=secrets))
     if stderr:
-        parts.append(f"stderr: {stderr}")
+        parts.append(f"stderr: {sanitize_output(stderr, secrets=secrets)}")
     if result.error and result.exit_code != 0:
         parts.append(f"❌ {result.error}")
     elif result.exit_code == 0 and not stdout:
