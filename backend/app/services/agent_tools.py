@@ -6478,7 +6478,7 @@ async def _handle_git_clone(arguments: dict, agent_id: uuid.UUID, user_id: uuid.
     if dir_name:
         sub_command += f" {dir_name}"
 
-    return await git_tool(
+    clone_result = await git_tool(
         sub_command=sub_command,
         cwd=repos_dir,
         agent_id=agent_id,
@@ -6487,6 +6487,29 @@ async def _handle_git_clone(arguments: dict, agent_id: uuid.UUID, user_id: uuid.
         timeout=120,
         secrets=secrets,
     )
+
+    # Auto-create agent-specific branch
+    if dir_name:
+        clone_dir = dir_name
+    else:
+        from app.services.git_credential_helper import extract_owner_repo
+        _, repo_name = extract_owner_repo(repo_url)
+        clone_dir = repo_name or repo_url.rstrip("/").split("/")[-1].replace(".git", "")
+
+    cloned_path = os.path.join(repos_dir, clone_dir)
+    if os.path.isdir(cloned_path):
+        from app.services.branch_naming import generate_agent_branch
+        agent_name = getattr(agent, "name", "") or str(agent_id)[:8]
+        context_id = dir_name or branch or str(uuid.uuid4())[:8]
+        agent_branch = generate_agent_branch(agent_name, context_id)
+
+        branch_result = await git_tool(
+            f"checkout -b {agent_branch}",
+            cwd=cloned_path, agent_id=agent_id, sandbox_config=config, secrets=secrets,
+        )
+        clone_result += f"\n📌 Auto-created branch: {agent_branch}"
+
+    return clone_result
 
 
 async def _handle_git_tool(tool_name: str, arguments: dict, agent_id: uuid.UUID, user_id: uuid.UUID) -> str:
@@ -6549,6 +6572,21 @@ async def _handle_git_tool(tool_name: str, arguments: dict, agent_id: uuid.UUID,
         return await git_tool(f'commit -m "{message}"', cwd=repo_path, agent_id=agent_id, sandbox_config=config, secrets=secrets)
 
     elif tool_name == "git_push":
+        # Check protected branch
+        from app.services.branch_naming import is_protected_branch
+        from app.services.sandbox.registry import get_sandbox_backend
+        _pb = get_sandbox_backend(config)
+        branch_check = await _pb.execute_command(
+            "git rev-parse --abbrev-ref HEAD",
+            cwd=repo_path, timeout=5,
+            agent_id=str(agent_id), work_dir=repo_path,
+        )
+        if branch_check.success:
+            current_branch = branch_check.stdout.strip()
+            push_branch = arguments.get("branch", "") or current_branch
+            if is_protected_branch(push_branch):
+                return f"❌ Cannot push directly to protected branch '{push_branch}'. Use git_create_pr instead."
+
         remote = arguments.get("remote", "origin")
         branch = arguments.get("branch", "")
         cmd = f"push {remote}" + (f" {branch}" if branch else "")
