@@ -2338,64 +2338,29 @@ async def execute_tool(
                         effective_action_type = tool_key
 
                     # dev_approval_mode override for dev tools
+                    skip_check = False
+                    override_policy = None
                     if tool_name in _DEV_TOOL_NAMES:
                         dev_mode = getattr(_agent, "dev_approval_mode", "confirm") or "confirm"
                         if dev_mode == "auto":
-                            # Skip autonomy check — auto-execute
+                            skip_check = True
                             logger.info(f"[Autonomy] dev_approval_mode=auto, skipping check for {tool_name}")
                         elif dev_mode == "strict":
-                            # Force L3 for all dev tools
-                            strict_policy = dict(policy)
-                            strict_policy[effective_action_type] = "L3"
-                            original_policy = _agent.autonomy_policy
-                            _agent.autonomy_policy = strict_policy
+                            override_policy = dict(policy)
+                            override_policy[effective_action_type] = "L3"
+
+                    if not skip_check:
+                        original_policy = _agent.autonomy_policy
+                        if override_policy is not None:
+                            _agent.autonomy_policy = override_policy
+                        try:
                             result_check = await autonomy_service.check_and_enforce(
                                 _adb, _agent, effective_action_type,
-                                {"tool": tool_name, "args": str(arguments)[:200], "requested_by": str(user_id)},
+                                {"tool": tool_name, "args": arguments, "requested_by": str(user_id)},
                             )
-                            _agent.autonomy_policy = original_policy
-                            await _adb.commit()
-                            if not result_check.get("allowed"):
-                                level = result_check.get("level", "L3")
-                                if level == "L3":
-                                    await _broadcast_approval_event(
-                                        agent_id, session_id,
-                                        {
-                                            "approval_id": result_check.get("approval_id"),
-                                            "action_type": effective_action_type,
-                                            "tool": tool_name,
-                                            "args": str(arguments)[:200],
-                                        },
-                                    )
-                                    return f"⏳ This action requires approval. An approval request has been sent. Please wait for approval before retrying. (Approval ID: {result_check.get('approval_id', 'N/A')})"
-                                return f"❌ Action denied: {result_check.get('message', 'unknown reason')}"
-                        else:
-                            # "confirm" mode — use normal autonomy check with effective_action_type
-                            result_check = await autonomy_service.check_and_enforce(
-                                _adb, _agent, effective_action_type,
-                                {"tool": tool_name, "args": str(arguments)[:200], "requested_by": str(user_id)},
-                            )
-                            await _adb.commit()
-                            if not result_check.get("allowed"):
-                                level = result_check.get("level", "L3")
-                                if level == "L3":
-                                    await _broadcast_approval_event(
-                                        agent_id, session_id,
-                                        {
-                                            "approval_id": result_check.get("approval_id"),
-                                            "action_type": effective_action_type,
-                                            "tool": tool_name,
-                                            "args": str(arguments)[:200],
-                                        },
-                                    )
-                                    return f"⏳ This action requires approval. An approval request has been sent. Please wait for approval before retrying. (Approval ID: {result_check.get('approval_id', 'N/A')})"
-                                return f"❌ Action denied: {result_check.get('message', 'unknown reason')}"
-                    else:
-                        # Non-dev tool — standard autonomy check
-                        result_check = await autonomy_service.check_and_enforce(
-                            _adb, _agent, effective_action_type,
-                            {"tool": tool_name, "args": str(arguments)[:200], "requested_by": str(user_id)},
-                        )
+                        finally:
+                            if override_policy is not None:
+                                _agent.autonomy_policy = original_policy
                         await _adb.commit()
                         if not result_check.get("allowed"):
                             level = result_check.get("level", "L3")
