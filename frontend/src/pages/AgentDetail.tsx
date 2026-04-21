@@ -5621,6 +5621,56 @@ function AgentDetailInner() {
                                     </div>
                                 </div>
 
+                                {/* 开发工具权限等级 */}
+                                <div className="card" style={{ padding: '20px', marginTop: '16px' }}>
+                                  <h4 style={{ marginBottom: '16px', fontSize: '15px', fontWeight: 600 }}>
+                                    {t('agent.devToolAutonomy', '开发工具权限等级')}
+                                  </h4>
+                                  <small style={{ display: 'block', marginBottom: '12px', fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                    {t('agent.devToolAutonomyHint', '为每个开发工具单独设置权限等级。未设置的工具使用通用策略。')}
+                                  </small>
+
+                                  {[
+                                    { name: 'execute_command', label: 'execute_command', defaultLevel: 'L2' },
+                                    { name: 'git_clone', label: 'git_clone', defaultLevel: 'L2' },
+                                    { name: 'git_commit', label: 'git_commit', defaultLevel: 'L2' },
+                                    { name: 'git_push', label: 'git_push', defaultLevel: 'L3' },
+                                    { name: 'git_pull', label: 'git_pull', defaultLevel: 'L2' },
+                                    { name: 'git_create_pr', label: 'git_create_pr', defaultLevel: 'L3' },
+                                  ].map(tool => {
+                                    const toolKey = `tool:${tool.name}`;
+                                    const policy = agent?.autonomy_policy || {};
+                                    const currentLevel = (policy as any)[toolKey] || tool.defaultLevel;
+                                    return (
+                                      <div key={tool.name} style={{
+                                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                        padding: '10px 14px', marginBottom: '6px',
+                                        background: 'var(--bg-elevated)', borderRadius: '8px',
+                                        border: '1px solid var(--border-subtle)',
+                                      }}>
+                                        <code style={{ fontSize: '13px' }}>{tool.label}</code>
+                                        <select
+                                          className="input"
+                                          style={{
+                                            width: '160px',
+                                            color: currentLevel === 'L1' ? 'var(--success)' : currentLevel === 'L2' ? 'var(--warning)' : 'var(--error)',
+                                          }}
+                                          value={currentLevel}
+                                          onChange={async (e) => {
+                                            const newPolicy = { ...policy, [toolKey]: e.target.value };
+                                            await agentApi.update(id!, { autonomy_policy: newPolicy } as any);
+                                            queryClient.invalidateQueries({ queryKey: ['agent', id] });
+                                          }}
+                                        >
+                                          <option value="L1">{t('agent.settings.autonomy.l1Auto', 'L1 — 自动执行')}</option>
+                                          <option value="L2">{t('agent.settings.autonomy.l2Notify', 'L2 — 执行后通知')}</option>
+                                          <option value="L3">{t('agent.settings.autonomy.l3Approve', 'L3 — 需要审批')}</option>
+                                        </select>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+
                                 {/* Credentials Management — for AgentBay cookie injection */}
                                 <div style={{ marginBottom: '12px' }}>
                                     <AgentCredentials agentId={id!} />
