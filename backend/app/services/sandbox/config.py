@@ -46,6 +46,10 @@ class SandboxConfig(BaseModel):
         "javascript": "javascript",
     })
 
+    # Dev container options (docker mode)
+    idle_timeout: int = Field(default=1800, ge=60, le=7200)  # seconds, default 30min
+    dev_image: str = "clawith-dev:base"
+
     class Config:
         use_enum_values = True
 
@@ -106,5 +110,7 @@ class SandboxConfig(BaseModel):
             allow_network=get_value("allow_network", False),
             default_timeout=get_value("default_timeout", 30),
             max_timeout=get_value("max_timeout", 60),
+            idle_timeout=int(get_value("idle_timeout", 1800)),
+            dev_image=get_value("dev_image", "clawith-dev:base"),
         )
         return result
