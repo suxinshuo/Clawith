@@ -1,6 +1,7 @@
 """Local docker-based sandbox backend."""
 
 import hashlib
+import os
 import time
 from pathlib import Path
 
@@ -41,6 +42,30 @@ _DOCKER_COMMANDS = {
     "bash": ["bash", "-c"],
     "node": ["node", "-e"],
 }
+
+
+def _to_host_path(container_path: str) -> str:
+    """Convert a container-internal path to the corresponding host path.
+
+    When Clawith itself runs inside Docker, bind-mount sources must reference
+    the *host* filesystem.  Two environment variables control the mapping:
+
+      CLAWITH_HOST_WORKSPACE_ROOT      – the path on the host
+      CLAWITH_CONTAINER_WORKSPACE_ROOT  – the matching path inside Clawith's container
+
+    If neither is set the path is returned unchanged (native / host execution).
+    """
+    host_root = os.environ.get("CLAWITH_HOST_WORKSPACE_ROOT")
+    container_root = os.environ.get("CLAWITH_CONTAINER_WORKSPACE_ROOT")
+    if not host_root or not container_root:
+        return container_path
+
+    container_root = container_root.rstrip("/")
+    host_root = host_root.rstrip("/")
+
+    if container_path.startswith(container_root):
+        return host_root + container_path[len(container_root):]
+    return container_path
 
 
 def _dev_container_name(agent_id: str) -> str:
@@ -250,7 +275,7 @@ class DockerBackend(BaseSandboxBackend):
                 # Create new dev container
                 volumes = {}
                 if work_dir:
-                    volumes[work_dir] = {"bind": "/workspace", "mode": "rw"}
+                    volumes[_to_host_path(work_dir)] = {"bind": "/workspace", "mode": "rw"}
 
                 try:
                     container = client.containers.run(

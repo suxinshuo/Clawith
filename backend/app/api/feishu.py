@@ -843,12 +843,9 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                     })
                 # Tool call summary panel
                 if _tool_call_records:
-                    detail_lines = []
-                    for rec in _tool_call_records:
-                        label = rec["name"]
-                        if rec.get("result_summary"):
-                            label += f" — {rec['result_summary']}"
-                        detail_lines.append(label)
+                    from collections import Counter
+                    tool_counts = Counter(rec["name"] for rec in _tool_call_records)
+                    detail_lines = [f"{name} x{cnt}" if cnt > 1 else name for name, cnt in tool_counts.items()]
                     elements.append({
                         "tag": "collapsible_panel",
                         "expanded": False,
