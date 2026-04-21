@@ -6225,7 +6225,7 @@ def _get_repos_dir(agent_id: uuid.UUID) -> str:
     return repos_dir
 
 
-async def _resolve_git_credential(agent_id: uuid.UUID, user_id: uuid.UUID, repo_url: str) -> tuple[dict[str, str], list[str]]:
+async def _resolve_git_credential(agent_id: uuid.UUID, user_id: uuid.UUID, repo_url: str, tenant_id: uuid.UUID | None = None) -> tuple[dict[str, str], list[str]]:
     """Resolve git credentials for a repo URL.
 
     Returns:
@@ -6233,14 +6233,15 @@ async def _resolve_git_credential(agent_id: uuid.UUID, user_id: uuid.UUID, repo_
     """
     from app.services.git_credential_helper import build_git_auth_env, get_credential_provider
 
-    provider = get_credential_provider(repo_url)
     try:
+        provider = get_credential_provider(repo_url)
         from app.services.credential_resolver import CredentialResolver
         resolver = CredentialResolver()
-        # Get tenant_id from agent
-        async with async_session() as db:
-            r = await db.execute(select(AgentModel.tenant_id).where(AgentModel.id == agent_id))
-            tenant_id = r.scalar_one_or_none()
+        # Get tenant_id from agent if not provided
+        if tenant_id is None:
+            async with async_session() as db:
+                r = await db.execute(select(AgentModel.tenant_id).where(AgentModel.id == agent_id))
+                tenant_id = r.scalar_one_or_none()
 
         if not tenant_id:
             return {}, []
@@ -6308,8 +6309,9 @@ async def _handle_git_clone(arguments: dict, agent_id: uuid.UUID, user_id: uuid.
     repos_dir = _get_repos_dir(agent_id)
     config = await _get_dev_sandbox_config(agent_id)
 
-    # Resolve git credentials
-    git_env, secrets = await _resolve_git_credential(agent_id, user_id, repo_url)
+    # Resolve git credentials — pass tenant_id from already-fetched agent to avoid a second DB query
+    agent_tenant_id = getattr(agent, "tenant_id", None) if agent else None
+    git_env, secrets = await _resolve_git_credential(agent_id, user_id, repo_url, tenant_id=agent_tenant_id)
 
     from app.services.dev_tools import git_tool
     sub_command = f"clone {repo_url}"
@@ -6344,7 +6346,7 @@ async def _handle_git_tool(tool_name: str, arguments: dict, agent_id: uuid.UUID,
 
     config = await _get_dev_sandbox_config(agent_id)
 
-    # Resolve credentials for auth-requiring operations (push, pull, fetch)
+    # Resolve credentials for auth-requiring operations (push, pull)
     git_env: dict[str, str] | None = None
     secrets: list[str] = []
     if tool_name in ("git_push", "git_pull"):
