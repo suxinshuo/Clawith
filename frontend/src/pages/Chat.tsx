@@ -241,7 +241,24 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                                         {JSON.stringify(tc.args, null, 2)}
                                     </div>
                                 )}
-                                {tc.result && (
+                                {/* Dev tool renderers - terminal style */}
+                                {(tc.name === 'execute_command' || tc.name?.startsWith('git_')) && tc.result && (
+                                    <div style={{
+                                        fontFamily: 'monospace',
+                                        fontSize: '12px',
+                                        background: 'var(--bg-tertiary)',
+                                        borderRadius: '6px',
+                                        padding: '8px 12px',
+                                        maxHeight: '300px',
+                                        overflow: 'auto',
+                                        whiteSpace: 'pre-wrap',
+                                        wordBreak: 'break-all',
+                                    }}>
+                                        {tc.result}
+                                    </div>
+                                )}
+                                {/* Generic result renderer for non-dev tools */}
+                                {tc.result && tc.name !== 'execute_command' && !tc.name?.startsWith('git_') && (
                                     <div style={{
                                         fontSize: '10px', color: 'var(--text-secondary)',
                                         whiteSpace: 'pre-wrap', wordBreak: 'break-all',

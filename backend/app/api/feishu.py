@@ -843,9 +843,12 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                     })
                 # Tool call summary panel
                 if _tool_call_records:
-                    from collections import Counter
-                    tool_counts = Counter(rec["name"] for rec in _tool_call_records)
-                    detail_lines = [f"{name} x{cnt}" if cnt > 1 else name for name, cnt in tool_counts.items()]
+                    detail_lines = []
+                    for rec in _tool_call_records:
+                        label = rec["name"]
+                        if rec.get("result_summary"):
+                            label += f" — {rec['result_summary']}"
+                        detail_lines.append(label)
                     elements.append({
                         "tag": "collapsible_panel",
                         "expanded": False,
@@ -981,10 +984,19 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                     _tool_status_running[call_id] = f"⏳ {tool_name}"
                 elif status == "done":
                     _tool_status_running.pop(call_id, None)
-                    _tool_status_done.append(f"✅ {tool_name}")
+                    # Build a descriptive summary for dev tools
+                    args = evt.get("args") or {}
+                    if tool_name == "execute_command":
+                        summary = f"$ {str(args.get('command', ''))[:60]}"
+                    elif tool_name.startswith("git_"):
+                        summary = f"git {tool_name[4:]} ({args.get('repo_dir', '')})"
+                    else:
+                        summary = ""
+                    done_label = f"✅ {tool_name}" + (f" — {summary}" if summary else "")
+                    _tool_status_done.append(done_label)
                     _tool_call_records.append({
                         "name": tool_name,
-                        "result_summary": (str(evt.get("result") or ""))[:80],
+                        "result_summary": summary or (str(evt.get("result") or ""))[:80],
                     })
                 else:
                     _tool_status_running.pop(call_id, None)
