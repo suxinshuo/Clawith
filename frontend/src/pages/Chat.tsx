@@ -277,6 +277,92 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
     );
 }
 
+function ApprovalCard({ approvalId, toolName, toolArgs, agentId, onResolved }: {
+  approvalId: string;
+  toolName: string;
+  toolArgs: string;
+  agentId: string;
+  onResolved: (id: string, action: string) => void;
+}) {
+  const [resolving, setResolving] = useState(false);
+  const [resolved, setResolved] = useState<string | null>(null);
+  const { t } = useTranslation();
+
+  const handleResolve = async (action: 'approve' | 'reject') => {
+    setResolving(true);
+    try {
+      const API_BASE = import.meta.env.VITE_API_BASE || '';
+      const token = localStorage.getItem('token') || '';
+      await fetch(`${API_BASE}/api/agents/${agentId}/approvals/${approvalId}/resolve`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+      setResolved(action);
+      onResolved(approvalId, action);
+    } catch (e) {
+      console.error('Failed to resolve approval:', e);
+    } finally {
+      setResolving(false);
+    }
+  };
+
+  return (
+    <div style={{
+      border: '1px solid var(--warning)',
+      borderRadius: '8px',
+      padding: '12px 16px',
+      margin: '8px 0',
+      background: 'var(--bg-elevated)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+        <span style={{ fontSize: '16px' }}>&#x26A0;&#xFE0F;</span>
+        <strong style={{ fontSize: '13px' }}>{t('chat.approvalRequired', 'Approval Required')}</strong>
+      </div>
+
+      <div style={{
+        fontFamily: 'monospace', fontSize: '12px',
+        background: 'var(--bg-tertiary)', borderRadius: '4px',
+        padding: '8px', marginBottom: '10px',
+      }}>
+        <div><strong>{toolName}</strong></div>
+        <div style={{ color: 'var(--text-secondary)', marginTop: '4px' }}>{toolArgs}</div>
+      </div>
+
+      {resolved ? (
+        <div style={{
+          fontSize: '13px',
+          color: resolved === 'approve' ? 'var(--success)' : 'var(--error)',
+          fontWeight: 500,
+        }}>
+          {resolved === 'approve'
+            ? `\u2705 ${t('chat.approved', 'Approved')}`
+            : `\u274C ${t('chat.rejected', 'Rejected')}`}
+        </div>
+      ) : (
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button
+            className="btn btn-primary"
+            style={{ fontSize: '12px', padding: '4px 12px' }}
+            onClick={() => handleResolve('approve')}
+            disabled={resolving}
+          >
+            {t('chat.approve', 'Approve')}
+          </button>
+          <button
+            className="btn"
+            style={{ fontSize: '12px', padding: '4px 12px', background: 'var(--error)', color: 'white' }}
+            onClick={() => handleResolve('reject')}
+            disabled={resolving}
+          >
+            {t('chat.reject', 'Reject')}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Chat() {
     const { t } = useTranslation();
     const { id } = useParams<{ id: string }>();
@@ -296,6 +382,7 @@ export default function Chat() {
     const [liveState, setLiveState] = useState<LivePreviewState>({});
     const [livePanelVisible, setLivePanelVisible] = useState(false);
     const [wsSessionId, setWsSessionId] = useState<string>('');
+    const [approvals, setApprovals] = useState<Record<string, { status: string; tool_name: string; tool_args: string }>>({});
     const wsRef = useRef<WebSocket | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -479,6 +566,19 @@ export default function Chat() {
                     });
                     // Auto-expand the live panel on first data
                     setLivePanelVisible(true);
+                    return;
+                }
+
+                // ── Approval request events ──
+                if (data.type === 'approval_request') {
+                    setApprovals(prev => ({
+                        ...prev,
+                        [data.approval_id]: {
+                            status: data.status,
+                            tool_name: data.tool_name,
+                            tool_args: data.tool_args,
+                        },
+                    }));
                     return;
                 }
 
@@ -885,6 +985,29 @@ export default function Chat() {
                                 ) : (
                                     <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
                                 )}
+                                {/* Inline approval card */}
+                                {msg.role === 'assistant' && msg.content?.includes('Approval ID:') && (() => {
+                                  const match = msg.content.match(/Approval ID:\s*([a-f0-9-]+)/i);
+                                  if (match && approvals[match[1]]) {
+                                    const approvalId = match[1];
+                                    const approval = approvals[approvalId];
+                                    return (
+                                      <ApprovalCard
+                                        approvalId={approvalId}
+                                        toolName={approval.tool_name}
+                                        toolArgs={approval.tool_args}
+                                        agentId={String(agent?.id || '')}
+                                        onResolved={(aid, action) => {
+                                          setApprovals(prev => ({
+                                            ...prev,
+                                            [aid]: { ...prev[aid], status: action === 'approve' ? 'approved' : 'rejected' },
+                                          }));
+                                        }}
+                                      />
+                                    );
+                                  }
+                                  return null;
+                                })()}
                                 {msg.timestamp && (
                                     <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px', opacity: 0.7 }}>
                                         {new Date(msg.timestamp).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}

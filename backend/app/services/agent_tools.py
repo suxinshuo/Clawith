@@ -2362,6 +2362,15 @@ async def execute_tool(
                             if not result_check.get("allowed"):
                                 level = result_check.get("level", "L3")
                                 if level == "L3":
+                                    await _broadcast_approval_event(
+                                        agent_id, session_id,
+                                        {
+                                            "approval_id": result_check.get("approval_id"),
+                                            "action_type": effective_action_type,
+                                            "tool": tool_name,
+                                            "args": str(arguments)[:200],
+                                        },
+                                    )
                                     return f"⏳ This action requires approval. An approval request has been sent. Please wait for approval before retrying. (Approval ID: {result_check.get('approval_id', 'N/A')})"
                                 return f"❌ Action denied: {result_check.get('message', 'unknown reason')}"
                         else:
@@ -2374,6 +2383,15 @@ async def execute_tool(
                             if not result_check.get("allowed"):
                                 level = result_check.get("level", "L3")
                                 if level == "L3":
+                                    await _broadcast_approval_event(
+                                        agent_id, session_id,
+                                        {
+                                            "approval_id": result_check.get("approval_id"),
+                                            "action_type": effective_action_type,
+                                            "tool": tool_name,
+                                            "args": str(arguments)[:200],
+                                        },
+                                    )
                                     return f"⏳ This action requires approval. An approval request has been sent. Please wait for approval before retrying. (Approval ID: {result_check.get('approval_id', 'N/A')})"
                                 return f"❌ Action denied: {result_check.get('message', 'unknown reason')}"
                     else:
@@ -2386,6 +2404,15 @@ async def execute_tool(
                         if not result_check.get("allowed"):
                             level = result_check.get("level", "L3")
                             if level == "L3":
+                                await _broadcast_approval_event(
+                                    agent_id, session_id,
+                                    {
+                                        "approval_id": result_check.get("approval_id"),
+                                        "action_type": effective_action_type,
+                                        "tool": tool_name,
+                                        "args": str(arguments)[:200],
+                                    },
+                                )
                                 return f"⏳ This action requires approval. An approval request has been sent. Please wait for approval before retrying. (Approval ID: {result_check.get('approval_id', 'N/A')})"
                             return f"❌ Action denied: {result_check.get('message', 'unknown reason')}"
         except Exception as e:
@@ -6310,6 +6337,28 @@ async def _check_dev_permission(agent, user_id: uuid.UUID) -> bool:
     except Exception as e:
         logger.warning(f"[DevPermission] Check failed: {e}")
         return False
+
+
+# ── Approval Broadcast Helper ──
+
+async def _broadcast_approval_event(agent_id: uuid.UUID, session_id: str | None, approval_data: dict):
+    """Send an approval request event to connected WebSocket clients."""
+    try:
+        from app.api.websocket import manager
+        message = {
+            "type": "approval_request",
+            "approval_id": str(approval_data.get("approval_id", "")),
+            "action_type": approval_data.get("action_type", ""),
+            "tool_name": approval_data.get("tool", ""),
+            "tool_args": approval_data.get("args", ""),
+            "status": "pending",
+        }
+        if session_id:
+            await manager.send_to_session(str(agent_id), session_id, message)
+        else:
+            await manager.send_message(str(agent_id), message)
+    except Exception as e:
+        logger.warning(f"[WS] Failed to broadcast approval event: {e}")
 
 
 # ── Dev Tool Handlers ──
