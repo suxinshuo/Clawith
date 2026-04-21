@@ -2,8 +2,6 @@ services:
   postgres:
     image: postgres:15-alpine
     restart: unless-stopped
-    networks:
-      - clawith_dev
     environment:
       POSTGRES_USER: clawith
       POSTGRES_PASSWORD: clawith
@@ -19,8 +17,6 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    networks:
-      - clawith_dev
     volumes:
       - redisdata:/data
     healthcheck:
@@ -60,8 +56,6 @@ services:
       - ./backend/agent_data:/data/agents
       - /var/run/docker.sock:/var/run/docker.sock
       - ./ss-nodes.json:/data/ss-nodes.json:ro
-    networks:
-      - clawith_dev
     depends_on:
       postgres:
         condition: service_healthy
@@ -82,8 +76,6 @@ services:
     volumes:
       - ./frontend/src:/app/src
       - ./frontend/public:/app/public
-    networks:
-      - clawith_dev
     depends_on:
       - backend
 
@@ -93,5 +85,5 @@ volumes:
 
 
 networks:
-  clawith_dev:
+  default:
     name: clawith_network
