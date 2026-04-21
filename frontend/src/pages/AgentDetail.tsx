@@ -2007,6 +2007,13 @@ function AgentDetailInner() {
         max_triggers: 20,
         min_poll_interval_min: 5,
         webhook_rate_limit: 5,
+        sandbox_type: 'subprocess',
+        sandbox_idle_timeout: 30,
+        sandbox_dev_image: 'clawith-dev:base',
+        sandbox_memory_limit: '500m',
+        sandbox_cpu_limit: '0.5',
+        allowed_repos: '' as string,
+        dev_approval_mode: 'confirm',
     });
     const [settingsSaving, setSettingsSaving] = useState(false);
     const [settingsSaved, setSettingsSaved] = useState(false);
@@ -2026,6 +2033,13 @@ function AgentDetailInner() {
                 max_triggers: (agent as any).max_triggers ?? 20,
                 min_poll_interval_min: (agent as any).min_poll_interval_min ?? 5,
                 webhook_rate_limit: (agent as any).webhook_rate_limit ?? 5,
+                sandbox_type: (agent as any).sandbox_type || 'subprocess',
+                sandbox_idle_timeout: ((agent as any).sandbox_idle_timeout || 1800) / 60,
+                sandbox_dev_image: (agent as any).sandbox_dev_image || 'clawith-dev:base',
+                sandbox_memory_limit: (agent as any).sandbox_memory_limit || '500m',
+                sandbox_cpu_limit: (agent as any).sandbox_cpu_limit || '0.5',
+                allowed_repos: ((agent as any).allowed_repos || []).join(', '),
+                dev_approval_mode: (agent as any).dev_approval_mode || 'confirm',
             });
             settingsInitRef.current = true;
         }
@@ -5212,7 +5226,14 @@ function AgentDetailInner() {
                             String(settingsForm.max_tokens_per_month) !== String(agent?.max_tokens_per_month || '') ||
                             settingsForm.max_triggers !== ((agent as any)?.max_triggers ?? 20) ||
                             settingsForm.min_poll_interval_min !== ((agent as any)?.min_poll_interval_min ?? 5) ||
-                            settingsForm.webhook_rate_limit !== ((agent as any)?.webhook_rate_limit ?? 5)
+                            settingsForm.webhook_rate_limit !== ((agent as any)?.webhook_rate_limit ?? 5) ||
+                            settingsForm.sandbox_type !== ((agent as any)?.sandbox_type || 'subprocess') ||
+                            settingsForm.sandbox_idle_timeout !== (((agent as any)?.sandbox_idle_timeout || 1800) / 60) ||
+                            settingsForm.sandbox_dev_image !== ((agent as any)?.sandbox_dev_image || 'clawith-dev:base') ||
+                            settingsForm.sandbox_memory_limit !== ((agent as any)?.sandbox_memory_limit || '500m') ||
+                            settingsForm.sandbox_cpu_limit !== ((agent as any)?.sandbox_cpu_limit || '0.5') ||
+                            settingsForm.allowed_repos !== ((agent as any)?.allowed_repos || []).join(', ') ||
+                            settingsForm.dev_approval_mode !== ((agent as any)?.dev_approval_mode || 'confirm')
                         );
 
                         const handleSaveSettings = async () => {
@@ -5229,6 +5250,13 @@ function AgentDetailInner() {
                                     max_triggers: settingsForm.max_triggers,
                                     min_poll_interval_min: settingsForm.min_poll_interval_min,
                                     webhook_rate_limit: settingsForm.webhook_rate_limit,
+                                    sandbox_type: settingsForm.sandbox_type,
+                                    sandbox_idle_timeout: settingsForm.sandbox_idle_timeout * 60,
+                                    sandbox_dev_image: settingsForm.sandbox_dev_image,
+                                    sandbox_memory_limit: settingsForm.sandbox_memory_limit,
+                                    sandbox_cpu_limit: settingsForm.sandbox_cpu_limit,
+                                    allowed_repos: settingsForm.allowed_repos.split(',').map(s => s.trim()).filter(Boolean),
+                                    dev_approval_mode: settingsForm.dev_approval_mode,
                                 } as any);
                                 queryClient.invalidateQueries({ queryKey: ['agent', id] });
                                 settingsInitRef.current = false;
@@ -5472,6 +5500,99 @@ function AgentDetailInner() {
                                         </div>
                                     );
                                 })()}
+
+                                {/* 开发环境设置 */}
+                                <div className="card" style={{ padding: '20px', marginBottom: '12px' }}>
+                                    <h4 style={{ marginBottom: '16px' }}>{t('agent.devEnvironment', '开发环境设置')}</h4>
+
+                                    {/* 沙箱类型 */}
+                                    <div style={{ marginBottom: '12px' }}>
+                                        <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>{t('agent.sandboxType', '沙箱类型')}</label>
+                                        <select
+                                            className="input"
+                                            value={settingsForm.sandbox_type}
+                                            onChange={e => setSettingsForm(f => ({ ...f, sandbox_type: e.target.value }))}
+                                        >
+                                            <option value="subprocess">Subprocess ({t('agent.sandboxLocal', '本地')})</option>
+                                            <option value="docker">Docker</option>
+                                        </select>
+                                    </div>
+
+                                    {/* Docker-specific settings */}
+                                    {settingsForm.sandbox_type === 'docker' && (
+                                        <div style={{ padding: '12px', background: 'var(--bg-secondary)', borderRadius: '8px', marginBottom: '12px' }}>
+                                            <div style={{ marginBottom: '8px' }}>
+                                                <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>{t('agent.devImage', '开发镜像')}</label>
+                                                <input
+                                                    className="input"
+                                                    type="text"
+                                                    value={settingsForm.sandbox_dev_image}
+                                                    onChange={e => setSettingsForm(f => ({ ...f, sandbox_dev_image: e.target.value }))}
+                                                />
+                                            </div>
+                                            <div style={{ marginBottom: '8px' }}>
+                                                <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>{t('agent.idleTimeout', '空闲回收 (分钟)')}</label>
+                                                <input
+                                                    className="input"
+                                                    type="number" min={1} max={120}
+                                                    value={settingsForm.sandbox_idle_timeout}
+                                                    onChange={e => setSettingsForm(f => ({ ...f, sandbox_idle_timeout: Number(e.target.value) }))}
+                                                    style={{ width: '120px' }}
+                                                />
+                                            </div>
+                                            <div style={{ display: 'flex', gap: '12px' }}>
+                                                <div style={{ flex: 1 }}>
+                                                    <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>{t('agent.memoryLimit', '内存限制')}</label>
+                                                    <input
+                                                        className="input"
+                                                        type="text"
+                                                        value={settingsForm.sandbox_memory_limit}
+                                                        onChange={e => setSettingsForm(f => ({ ...f, sandbox_memory_limit: e.target.value }))}
+                                                    />
+                                                </div>
+                                                <div style={{ flex: 1 }}>
+                                                    <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>{t('agent.cpuLimit', 'CPU 限制')}</label>
+                                                    <input
+                                                        className="input"
+                                                        type="text"
+                                                        value={settingsForm.sandbox_cpu_limit}
+                                                        onChange={e => setSettingsForm(f => ({ ...f, sandbox_cpu_limit: e.target.value }))}
+                                                    />
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* 仓库白名单 */}
+                                    <div style={{ marginBottom: '12px' }}>
+                                        <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>{t('agent.allowedRepos', '允许操作的仓库')}</label>
+                                        <textarea
+                                            className="input"
+                                            rows={3}
+                                            placeholder="github.com/org/repo, github.com/org/*"
+                                            value={settingsForm.allowed_repos}
+                                            onChange={e => setSettingsForm(f => ({ ...f, allowed_repos: e.target.value }))}
+                                            style={{ width: '100%', fontFamily: 'inherit', fontSize: '13px', resize: 'vertical' }}
+                                        />
+                                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
+                                            {t('agent.allowedReposHint', '逗号分隔，支持通配符。未配置时 git_clone 不可用。')}
+                                        </div>
+                                    </div>
+
+                                    {/* 审批模式 */}
+                                    <div>
+                                        <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>{t('agent.devApprovalMode', '开发任务审批模式')}</label>
+                                        <select
+                                            className="input"
+                                            value={settingsForm.dev_approval_mode}
+                                            onChange={e => setSettingsForm(f => ({ ...f, dev_approval_mode: e.target.value }))}
+                                        >
+                                            <option value="auto">{t('agent.approvalAuto', '自动执行（无需确认）')}</option>
+                                            <option value="confirm">{t('agent.approvalConfirm', '聊天中确认后执行')}</option>
+                                            <option value="strict">{t('agent.approvalStrict', '需审批人批准')}</option>
+                                        </select>
+                                    </div>
+                                </div>
 
                                 {/* Credentials Management — for AgentBay cookie injection */}
                                 <div style={{ marginBottom: '12px' }}>
