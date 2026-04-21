@@ -6225,6 +6225,45 @@ def _get_repos_dir(agent_id: uuid.UUID) -> str:
     return repos_dir
 
 
+async def _resolve_git_credential(agent_id: uuid.UUID, user_id: uuid.UUID, repo_url: str) -> tuple[dict[str, str], list[str]]:
+    """Resolve git credentials for a repo URL.
+
+    Returns:
+        (env_vars, secrets) — env vars to pass to git command, list of secret strings to sanitize.
+    """
+    from app.services.git_credential_helper import build_git_auth_env, get_credential_provider
+
+    provider = get_credential_provider(repo_url)
+    try:
+        from app.services.credential_resolver import CredentialResolver
+        resolver = CredentialResolver()
+        # Get tenant_id from agent
+        async with async_session() as db:
+            r = await db.execute(select(AgentModel.tenant_id).where(AgentModel.id == agent_id))
+            tenant_id = r.scalar_one_or_none()
+
+        if not tenant_id:
+            return {}, []
+
+        cred = await resolver.resolve(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            provider=provider,
+            agent_id=agent_id,
+        )
+        if not cred:
+            logger.info(f"[GitCred] No {provider} credential found for agent {agent_id}")
+            return {}, []
+
+        env = build_git_auth_env(repo_url, cred.access_token)
+        secrets = [cred.access_token] if cred.access_token else []
+        return env, secrets
+
+    except Exception as e:
+        logger.warning(f"[GitCred] Credential resolution failed: {e}")
+        return {}, []
+
+
 async def _handle_execute_command(arguments: dict, agent_id: uuid.UUID, user_id: uuid.UUID) -> str:
     command = arguments.get("command", "")
     cwd_rel = arguments.get("cwd", ".")
@@ -6269,10 +6308,24 @@ async def _handle_git_clone(arguments: dict, agent_id: uuid.UUID, user_id: uuid.
     repos_dir = _get_repos_dir(agent_id)
     config = await _get_dev_sandbox_config(agent_id)
 
+    # Resolve git credentials
+    git_env, secrets = await _resolve_git_credential(agent_id, user_id, repo_url)
+
     from app.services.dev_tools import git_tool
+    sub_command = f"clone {repo_url}"
+    if branch:
+        sub_command += f" -b {branch}"
+    if dir_name:
+        sub_command += f" {dir_name}"
+
     return await git_tool(
-        sub_command=f"clone {repo_url}" + (f" -b {branch}" if branch else "") + (f" {dir_name}" if dir_name else ""),
-        cwd=repos_dir, agent_id=agent_id, sandbox_config=config, timeout=120,
+        sub_command=sub_command,
+        cwd=repos_dir,
+        agent_id=agent_id,
+        sandbox_config=config,
+        env=git_env or None,
+        timeout=120,
+        secrets=secrets,
     )
 
 
@@ -6284,7 +6337,6 @@ async def _handle_git_tool(tool_name: str, arguments: dict, agent_id: uuid.UUID,
     repos_dir = _get_repos_dir(agent_id)
     repo_path = os.path.normpath(os.path.join(repos_dir, repo_dir_name))
 
-    # Prevent path escape
     if not repo_path.startswith(repos_dir):
         return "❌ repo_dir must be within the repos directory"
     if not os.path.isdir(repo_path):
@@ -6292,56 +6344,72 @@ async def _handle_git_tool(tool_name: str, arguments: dict, agent_id: uuid.UUID,
 
     config = await _get_dev_sandbox_config(agent_id)
 
+    # Resolve credentials for auth-requiring operations (push, pull, fetch)
+    git_env: dict[str, str] | None = None
+    secrets: list[str] = []
+    if tool_name in ("git_push", "git_pull"):
+        try:
+            from app.services.sandbox.registry import get_sandbox_backend
+            _backend = get_sandbox_backend(config)
+            _remote_result = await _backend.execute_command(
+                "git remote get-url origin",
+                cwd=repo_path, timeout=5,
+                agent_id=str(agent_id), work_dir=repo_path,
+            )
+            if _remote_result.success and _remote_result.stdout.strip():
+                remote_url = _remote_result.stdout.strip()
+                git_env, secrets = await _resolve_git_credential(agent_id, user_id, remote_url)
+        except Exception as e:
+            logger.warning(f"[GitTool] Could not resolve remote URL for credential: {e}")
+
     from app.services.dev_tools import git_tool
 
     if tool_name == "git_status":
-        return await git_tool("status", cwd=repo_path, agent_id=agent_id, sandbox_config=config)
+        return await git_tool("status", cwd=repo_path, agent_id=agent_id, sandbox_config=config, secrets=secrets)
 
     elif tool_name == "git_diff":
         args = arguments.get("args", "")
-        return await git_tool(f"diff {args}".strip(), cwd=repo_path, agent_id=agent_id, sandbox_config=config)
+        return await git_tool(f"diff {args}".strip(), cwd=repo_path, agent_id=agent_id, sandbox_config=config, secrets=secrets)
 
     elif tool_name == "git_log":
         count = int(arguments.get("count", 10))
         args = arguments.get("args", "")
-        return await git_tool(f"log -n {count} {args}".strip(), cwd=repo_path, agent_id=agent_id, sandbox_config=config)
+        return await git_tool(f"log -n {count} {args}".strip(), cwd=repo_path, agent_id=agent_id, sandbox_config=config, secrets=secrets)
 
     elif tool_name == "git_commit":
         message = arguments.get("message", "")
         files = arguments.get("files", [])
         if not message:
             return "❌ Missing required argument: message"
-        # Stage files
         if files:
             stage_cmd = "add " + " ".join(f'"{f}"' for f in files)
         else:
             stage_cmd = "add -A"
-        await git_tool(stage_cmd, cwd=repo_path, agent_id=agent_id, sandbox_config=config)
-        # Commit
-        return await git_tool(f'commit -m "{message}"', cwd=repo_path, agent_id=agent_id, sandbox_config=config)
+        await git_tool(stage_cmd, cwd=repo_path, agent_id=agent_id, sandbox_config=config, secrets=secrets)
+        return await git_tool(f'commit -m "{message}"', cwd=repo_path, agent_id=agent_id, sandbox_config=config, secrets=secrets)
 
     elif tool_name == "git_push":
         remote = arguments.get("remote", "origin")
         branch = arguments.get("branch", "")
         cmd = f"push {remote}" + (f" {branch}" if branch else "")
-        return await git_tool(cmd, cwd=repo_path, agent_id=agent_id, sandbox_config=config)
+        return await git_tool(cmd, cwd=repo_path, agent_id=agent_id, sandbox_config=config, env=git_env, secrets=secrets)
 
     elif tool_name == "git_pull":
-        return await git_tool("pull", cwd=repo_path, agent_id=agent_id, sandbox_config=config)
+        return await git_tool("pull", cwd=repo_path, agent_id=agent_id, sandbox_config=config, env=git_env, secrets=secrets)
 
     elif tool_name == "git_branch":
         action = arguments.get("action", "list")
         branch_name = arguments.get("branch_name", "")
         if action == "list":
-            return await git_tool("branch -a", cwd=repo_path, agent_id=agent_id, sandbox_config=config)
+            return await git_tool("branch -a", cwd=repo_path, agent_id=agent_id, sandbox_config=config, secrets=secrets)
         elif action == "create":
             if not branch_name:
                 return "❌ branch_name is required for create action"
-            return await git_tool(f"checkout -b {branch_name}", cwd=repo_path, agent_id=agent_id, sandbox_config=config)
+            return await git_tool(f"checkout -b {branch_name}", cwd=repo_path, agent_id=agent_id, sandbox_config=config, secrets=secrets)
         elif action == "switch":
             if not branch_name:
                 return "❌ branch_name is required for switch action"
-            return await git_tool(f"checkout {branch_name}", cwd=repo_path, agent_id=agent_id, sandbox_config=config)
+            return await git_tool(f"checkout {branch_name}", cwd=repo_path, agent_id=agent_id, sandbox_config=config, secrets=secrets)
         else:
             return f"❌ Unknown action: {action}. Use: list, create, switch"
 
