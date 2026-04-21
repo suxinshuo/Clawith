@@ -75,8 +75,6 @@ _SENSITIVE_PATTERNS = [
     re.compile(r"Bearer\s+[A-Za-z0-9\-_\.]{20,}"),
     # Basic auth in URLs: https://user:token@host
     re.compile(r"(https?://[^:]+:)[^@\s]{8,}(@)"),
-    # Generic long hex/base64 strings that look like tokens (40+ chars)
-    re.compile(r"(?<=[=:\s])[A-Za-z0-9+/\-_]{40,}(?=[&\s\n]|$)"),
 ]
 
 
@@ -166,7 +164,7 @@ def _format_command_result(command: str, result: ExecutionResult, secrets: list[
     if stderr:
         parts.append(f"stderr: {sanitize_output(stderr, secrets=secrets)}")
     if result.error and result.exit_code != 0:
-        parts.append(f"❌ {result.error}")
+        parts.append(f"❌ {sanitize_output(result.error, secrets=secrets)}")
     elif result.exit_code == 0 and not stdout:
         parts.append("✅ Command executed successfully (no output)")
 
