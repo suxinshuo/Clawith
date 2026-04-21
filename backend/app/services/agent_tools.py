@@ -6492,6 +6492,11 @@ async def _handle_git_create_pr(arguments: dict, agent_id: uuid.UUID, user_id: u
     # Resolve credential
     git_env, secrets = await _resolve_git_credential(agent_id, user_id, remote_url)
 
+    # Check token before attempting push
+    token = secrets[0] if secrets else ""
+    if not token:
+        return f"❌ No credentials found for {remote_url}. Configure a GitHub/GitLab credential for this agent."
+
     # Push the branch first
     from app.services.dev_tools import git_tool
     push_result = await git_tool(
@@ -6499,11 +6504,6 @@ async def _handle_git_create_pr(arguments: dict, agent_id: uuid.UUID, user_id: u
         cwd=repo_path, agent_id=agent_id, sandbox_config=config,
         env=git_env, secrets=secrets, timeout=60,
     )
-
-    # Get token for API call
-    token = secrets[0] if secrets else ""
-    if not token:
-        return f"❌ No credentials found for {remote_url}. Configure a GitHub/GitLab credential for this agent."
 
     from app.services.git_platform import create_pull_request
     pr_result = await create_pull_request(
