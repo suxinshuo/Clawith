@@ -851,8 +851,8 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                     })
                     elements.append({"tag": "hr"})
 
-                body = answer_text + ("▌" if streaming and answer_text else ("..." if streaming else ""))
-                elements.append({"tag": "markdown", "content": body or "..."})
+                card_body = answer_text + ("▌" if streaming and answer_text else ("..." if streaming else ""))
+                elements.append({"tag": "markdown", "content": card_body or "..."})
                 return {
                     "config": {"update_multi": True},
                     "header": {
@@ -1410,6 +1410,19 @@ async def _handle_feishu_file(
         _img_llm_done = False
         _img_last_flushed_hash: int = 0  # Content hash to skip no-op heartbeat patches
 
+        def _build_image_card(answer_text: str, streaming: bool = False, agent_name: str | None = None) -> dict:
+            """Build a simple Feishu card for the image streaming path."""
+            _name = agent_name or "AI"
+            body = answer_text + ("▌" if streaming and answer_text else ("..." if streaming else ""))
+            return {
+                "config": {"update_multi": True},
+                "header": {
+                    "template": "blue",
+                    "title": {"content": _name, "tag": "plain_text"},
+                },
+                "elements": [{"tag": "markdown", "content": body or "..."}],
+            }
+
         async def _queue_image_patch(_card: dict, _stage: str):
             """Enqueue a serialized PATCH request for the image streaming card."""
             if not _patch_msg_id:
@@ -1433,17 +1446,13 @@ async def _handle_feishu_file(
         async def _flush_image_stream(reason: str, force: bool = False):
             """Build and enqueue an image streaming card update.
 
-            Reuses _build_card so the image path supports the same thinking
-            and tool-status sections as the text streaming path.
             Skips the patch on heartbeat ticks when content has not changed.
             """
             nonlocal _img_last_flush, _img_last_flushed_hash
             now = time.time()
             if not force and now - _img_last_flush < _img_flush_interval:
                 return
-            # Reuse the shared card builder (no tool_status for image path yet,
-            # but the builder is ready to accept them in the future).
-            _card = _build_card(
+            _card = _build_image_card(
                 "".join(_img_stream_buf),
                 streaming=True,
                 agent_name=_agent_name,
@@ -1494,8 +1503,7 @@ async def _handle_feishu_file(
                 await _img_patch_queue.drain()
             except Exception as _e_drain:
                 logger.warning(f"[Feishu] Image patch queue drain failed: {_e_drain}")
-            # Build final card via shared builder (consistent with text streaming path).
-            _final_card = _build_card(
+            _final_card = _build_image_card(
                 reply_text or "...",
                 streaming=False,
                 agent_name=_agent_name,
