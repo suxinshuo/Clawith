@@ -159,11 +159,16 @@ async def process_dingtalk_message(
     from app.api.feishu import _call_agent_llm
 
     async with async_session() as db:
+        sender_staff_id = (sender_staff_id or "").strip()
+
         # Load agent
         agent_r = await db.execute(_select(AgentModel).where(AgentModel.id == agent_id))
         agent_obj = agent_r.scalar_one_or_none()
         if not agent_obj:
             logger.warning(f"[DingTalk] Agent {agent_id} not found")
+            return
+        if not sender_staff_id:
+            logger.warning("[DingTalk] Skip message attribution because sender_staff_id is empty")
             return
         creator_id = agent_obj.creator_id
         from app.models.agent import DEFAULT_CONTEXT_WINDOW_SIZE
@@ -183,7 +188,7 @@ async def process_dingtalk_message(
             agent=agent_obj,
             channel_type="dingtalk",
             external_user_id=sender_staff_id,
-            extra_info={"unionid": sender_staff_id},
+            extra_info={},
         )
         platform_user_id = platform_user.id
 

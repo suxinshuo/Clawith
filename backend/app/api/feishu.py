@@ -30,6 +30,11 @@ _LLM_TIMEOUT_SECONDS_DEFAULT = 180.0
 _TOOL_STATUS_KEEP_LINES = 20
 
 
+_USER_RESOLUTION_ERROR_TIP = (
+    "抱歉，我暂时无法稳定识别你的飞书账号，已停止本次处理以避免重复创建账号。"
+    "请稍后重试，或联系管理员检查飞书 Contact API 权限。"
+)
+
 def _get_llm_timeout(model) -> float:
     """Get effective LLM timeout for the Feishu channel.
 
@@ -470,7 +475,10 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
 
             sender_name = ""
             sender_user_id_feishu = sender_user_id_from_event  # tenant-level user_id, pre-filled from event body
-            extra_info: dict | None = None
+            extra_info: dict | None = {
+                "open_id": sender_open_id,
+                "external_id": sender_user_id_feishu or None,
+            }
 
             try:
                 async with _httpx.AsyncClient() as _client:
@@ -553,13 +561,32 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
 
             # Resolve channel user via unified service (uses OrgMember + SSO patterns)
             from app.services.channel_user_service import channel_user_service
-            platform_user = await channel_user_service.resolve_channel_user(
-                db=db,
-                agent=agent_obj,
-                channel_type="feishu",
-                external_user_id=sender_open_id,
-                extra_info=extra_info,
-            )
+            try:
+                platform_user = await channel_user_service.resolve_channel_user(
+                    db=db,
+                    agent=agent_obj,
+                    channel_type="feishu",
+                    # For Feishu, external_user_id is strictly user_id.
+                    external_user_id=sender_user_id_feishu or None,
+                    extra_info=extra_info,
+                )
+            except Exception as e:
+                from app.services.channel_user_service import ChannelUserResolutionError
+
+                if isinstance(e, ChannelUserResolutionError):
+                    logger.warning(f"[Feishu] Sender resolution refused: {e}")
+                    _reply_to = chat_id if chat_type == "group" else sender_open_id
+                    _rid_type = "chat_id" if chat_type == "group" else "open_id"
+                    await feishu_service.send_message(
+                        config.app_id,
+                        config.app_secret,
+                        _reply_to,
+                        "text",
+                        json.dumps({"text": _USER_RESOLUTION_ERROR_TIP}),
+                        receive_id_type=_rid_type,
+                    )
+                    return {"code": 0, "msg": "user_resolution_skipped"}
+                raise
             platform_user_id = platform_user.id
 
             # ── Find-or-create a ChatSession via external_conv_id (DB-based, no cache needed) ──
@@ -1210,8 +1237,11 @@ async def _handle_feishu_file(db, agent_id, config, message, sender_open_id, cha
         agent_obj = agent_r.scalar_one_or_none()
 
         # Resolve sender's Feishu user_id (more stable than open_id)
-        sender_user_id_feishu = ""
-        extra_info: dict | None = None
+        sender_user_id_feishu = sender_user_id_from_event or ""
+        extra_info: dict | None = {
+            "open_id": sender_open_id,
+            "external_id": sender_user_id_feishu or None,
+        }
         try:
             import httpx as _hx
             async with _hx.AsyncClient() as _fc:
@@ -1256,13 +1286,32 @@ async def _handle_feishu_file(db, agent_id, config, message, sender_open_id, cha
 
         # Resolve channel user via unified service (uses OrgMember + SSO patterns)
         from app.services.channel_user_service import channel_user_service
-        platform_user = await channel_user_service.resolve_channel_user(
-            db=db,
-            agent=agent_obj,
-            channel_type="feishu",
-            external_user_id=sender_open_id,
-            extra_info=extra_info,
-        )
+        try:
+            platform_user = await channel_user_service.resolve_channel_user(
+                db=db,
+                agent=agent_obj,
+                channel_type="feishu",
+                # For Feishu, external_user_id is strictly user_id.
+                external_user_id=sender_user_id_feishu or None,
+                extra_info=extra_info,
+            )
+        except Exception as e:
+            from app.services.channel_user_service import ChannelUserResolutionError
+
+            if isinstance(e, ChannelUserResolutionError):
+                logger.warning(f"[Feishu] File sender resolution refused: {e}")
+                _reply_to = chat_id if chat_type == "group" else sender_open_id
+                _rid_type = "chat_id" if chat_type == "group" else "open_id"
+                await feishu_service.send_message(
+                    config.app_id,
+                    config.app_secret,
+                    _reply_to,
+                    "text",
+                    json.dumps({"text": _USER_RESOLUTION_ERROR_TIP}),
+                    receive_id_type=_rid_type,
+                )
+                return
+            raise
         platform_user_id = platform_user.id
 
         # Conv ID — prefer user_id for session continuity
