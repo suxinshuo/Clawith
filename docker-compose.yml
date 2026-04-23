@@ -37,6 +37,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://clawith:clawith@postgres:5432/clawith
       REDIS_URL: redis://redis:6379/0
       AGENT_DATA_DIR: /data/agents
+      AGENT_DATA_HOST_DIR: ${AGENT_DATA_HOST_DIR:-}
       AGENT_TEMPLATE_DIR: /app/agent_template
       SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-jwt-secret}
