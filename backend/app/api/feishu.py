@@ -5,9 +5,9 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from loguru import logger
-from sqlalchemy import select, or_
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import check_agent_access, is_agent_creator, is_agent_expired
@@ -15,7 +15,6 @@ from app.core.security import get_current_user
 from app.database import get_db
 from app.models.channel_config import ChannelConfig
 from app.models.user import User
-from app.models.identity import IdentityProvider
 from app.schemas.schemas import ChannelConfigCreate, ChannelConfigOut, TokenResponse, UserOut
 from app.services.feishu_service import feishu_service
 
@@ -29,6 +28,11 @@ _LLM_TIMEOUT_SECONDS_DEFAULT = 180.0
 # Shows the last N non-running lines plus any active "running" entry.
 _TOOL_STATUS_KEEP_LINES = 20
 
+
+_USER_RESOLUTION_ERROR_TIP = (
+    "抱歉，我暂时无法稳定识别你的飞书账号，已停止本次处理以避免重复创建账号。"
+    "请稍后重试，或联系管理员检查飞书 Contact API 权限。"
+)
 
 def _get_llm_timeout(model) -> float:
     """Get effective LLM timeout for the Feishu channel.
@@ -69,7 +73,8 @@ class _SerialPatchQueue:
 
 # ─── OAuth ──────────────────────────────────────────────
 
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse
+
 
 @router.get("/auth/feishu/callback")
 @router.post("/auth/feishu/callback", response_model=TokenResponse)
@@ -408,7 +413,18 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
 
         if msg_type in ("file", "image"):
             import asyncio as _asyncio
-            _asyncio.create_task(_handle_feishu_file(db, agent_id, config, message, sender_open_id, chat_type, chat_id))
+            _asyncio.create_task(
+                _handle_feishu_file(
+                    db,
+                    agent_id,
+                    config,
+                    message,
+                    sender_open_id,
+                    sender_user_id_from_event,
+                    chat_type,
+                    chat_id,
+                )
+            )
             return {"code": 0, "msg": "ok"}
 
         if msg_type == "text":
@@ -465,12 +481,14 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
             history = [{"role": m.role, "content": m.content} for m in reversed(history_msgs)]
 
             # --- Resolve Feishu sender identity & find/create platform user ---
-            import uuid as _uuid
             import httpx as _httpx
 
             sender_name = ""
             sender_user_id_feishu = sender_user_id_from_event  # tenant-level user_id, pre-filled from event body
-            extra_info: dict | None = None
+            extra_info: dict | None = {
+                "open_id": sender_open_id,
+                "external_id": sender_user_id_feishu or None,
+            }
 
             try:
                 async with _httpx.AsyncClient() as _client:
@@ -553,13 +571,32 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
 
             # Resolve channel user via unified service (uses OrgMember + SSO patterns)
             from app.services.channel_user_service import channel_user_service
-            platform_user = await channel_user_service.resolve_channel_user(
-                db=db,
-                agent=agent_obj,
-                channel_type="feishu",
-                external_user_id=sender_open_id,
-                extra_info=extra_info,
-            )
+            try:
+                platform_user = await channel_user_service.resolve_channel_user(
+                    db=db,
+                    agent=agent_obj,
+                    channel_type="feishu",
+                    # For Feishu, external_user_id is strictly user_id.
+                    external_user_id=sender_user_id_feishu or None,
+                    extra_info=extra_info,
+                )
+            except Exception as e:
+                from app.services.channel_user_service import ChannelUserResolutionError
+
+                if isinstance(e, ChannelUserResolutionError):
+                    logger.warning(f"[Feishu] Sender resolution refused: {e}")
+                    _reply_to = chat_id if chat_type == "group" else sender_open_id
+                    _rid_type = "chat_id" if chat_type == "group" else "open_id"
+                    await feishu_service.send_message(
+                        config.app_id,
+                        config.app_secret,
+                        _reply_to,
+                        "text",
+                        json.dumps({"text": _USER_RESOLUTION_ERROR_TIP}),
+                        receive_id_type=_rid_type,
+                    )
+                    return {"code": 0, "msg": "user_resolution_skipped"}
+                raise
             platform_user_id = platform_user.id
 
             # ── Find-or-create a ChatSession via external_conv_id (DB-based, no cache needed) ──
@@ -814,8 +851,8 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                     })
                     elements.append({"tag": "hr"})
 
-                body = answer_text + ("▌" if streaming and answer_text else ("..." if streaming else ""))
-                elements.append({"tag": "markdown", "content": body or "..."})
+                card_body = answer_text + ("▌" if streaming and answer_text else ("..." if streaming else ""))
+                elements.append({"tag": "markdown", "content": card_body or "..."})
                 return {
                     "config": {"update_multi": True},
                     "header": {
@@ -1145,19 +1182,25 @@ _FILE_ACK_MESSAGES = [
 ]
 
 
-async def _handle_feishu_file(db, agent_id, config, message, sender_open_id, chat_type, chat_id):
+async def _handle_feishu_file(
+    db,
+    agent_id,
+    config,
+    message,
+    sender_open_id,
+    sender_user_id_from_event,
+    chat_type,
+    chat_id,
+):
     """Handle incoming file or image messages from Feishu (runs as a background task)."""
     import asyncio, random, json
     from pathlib import Path
     from app.config import get_settings
     from app.models.audit import ChatMessage
     from app.models.agent import Agent as AgentModel
-    from app.models.user import User as UserModel
     from app.services.channel_session import find_or_create_channel_session
-    from app.core.security import hash_password
     from app.database import async_session as _async_session
     from datetime import datetime as _dt, timezone as _tz
-    import uuid as _uuid
     from sqlalchemy import select as _select
 
     msg_type = message.get("message_type", "file")
@@ -1210,8 +1253,11 @@ async def _handle_feishu_file(db, agent_id, config, message, sender_open_id, cha
         agent_obj = agent_r.scalar_one_or_none()
 
         # Resolve sender's Feishu user_id (more stable than open_id)
-        sender_user_id_feishu = ""
-        extra_info: dict | None = None
+        sender_user_id_feishu = sender_user_id_from_event or ""
+        extra_info: dict | None = {
+            "open_id": sender_open_id,
+            "external_id": sender_user_id_feishu or None,
+        }
         try:
             import httpx as _hx
             async with _hx.AsyncClient() as _fc:
@@ -1256,13 +1302,32 @@ async def _handle_feishu_file(db, agent_id, config, message, sender_open_id, cha
 
         # Resolve channel user via unified service (uses OrgMember + SSO patterns)
         from app.services.channel_user_service import channel_user_service
-        platform_user = await channel_user_service.resolve_channel_user(
-            db=db,
-            agent=agent_obj,
-            channel_type="feishu",
-            external_user_id=sender_open_id,
-            extra_info=extra_info,
-        )
+        try:
+            platform_user = await channel_user_service.resolve_channel_user(
+                db=db,
+                agent=agent_obj,
+                channel_type="feishu",
+                # For Feishu, external_user_id is strictly user_id.
+                external_user_id=sender_user_id_feishu or None,
+                extra_info=extra_info,
+            )
+        except Exception as e:
+            from app.services.channel_user_service import ChannelUserResolutionError
+
+            if isinstance(e, ChannelUserResolutionError):
+                logger.warning(f"[Feishu] File sender resolution refused: {e}")
+                _reply_to = chat_id if chat_type == "group" else sender_open_id
+                _rid_type = "chat_id" if chat_type == "group" else "open_id"
+                await feishu_service.send_message(
+                    config.app_id,
+                    config.app_secret,
+                    _reply_to,
+                    "text",
+                    json.dumps({"text": _USER_RESOLUTION_ERROR_TIP}),
+                    receive_id_type=_rid_type,
+                )
+                return
+            raise
         platform_user_id = platform_user.id
 
         # Conv ID — prefer user_id for session continuity
@@ -1345,6 +1410,19 @@ async def _handle_feishu_file(db, agent_id, config, message, sender_open_id, cha
         _img_llm_done = False
         _img_last_flushed_hash: int = 0  # Content hash to skip no-op heartbeat patches
 
+        def _build_image_card(answer_text: str, streaming: bool = False, agent_name: str | None = None) -> dict:
+            """Build a simple Feishu card for the image streaming path."""
+            _name = agent_name or "AI"
+            body = answer_text + ("▌" if streaming and answer_text else ("..." if streaming else ""))
+            return {
+                "config": {"update_multi": True},
+                "header": {
+                    "template": "blue",
+                    "title": {"content": _name, "tag": "plain_text"},
+                },
+                "elements": [{"tag": "markdown", "content": body or "..."}],
+            }
+
         async def _queue_image_patch(_card: dict, _stage: str):
             """Enqueue a serialized PATCH request for the image streaming card."""
             if not _patch_msg_id:
@@ -1368,17 +1446,13 @@ async def _handle_feishu_file(db, agent_id, config, message, sender_open_id, cha
         async def _flush_image_stream(reason: str, force: bool = False):
             """Build and enqueue an image streaming card update.
 
-            Reuses _build_card so the image path supports the same thinking
-            and tool-status sections as the text streaming path.
             Skips the patch on heartbeat ticks when content has not changed.
             """
             nonlocal _img_last_flush, _img_last_flushed_hash
             now = time.time()
             if not force and now - _img_last_flush < _img_flush_interval:
                 return
-            # Reuse the shared card builder (no tool_status for image path yet,
-            # but the builder is ready to accept them in the future).
-            _card = _build_card(
+            _card = _build_image_card(
                 "".join(_img_stream_buf),
                 streaming=True,
                 agent_name=_agent_name,
@@ -1429,8 +1503,7 @@ async def _handle_feishu_file(db, agent_id, config, message, sender_open_id, cha
                 await _img_patch_queue.drain()
             except Exception as _e_drain:
                 logger.warning(f"[Feishu] Image patch queue drain failed: {_e_drain}")
-            # Build final card via shared builder (consistent with text streaming path).
-            _final_card = _build_card(
+            _final_card = _build_image_card(
                 reply_text or "...",
                 streaming=False,
                 agent_name=_agent_name,
