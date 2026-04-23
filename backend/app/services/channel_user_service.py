@@ -388,8 +388,31 @@ class ChannelUserService:
             password=uuid.uuid4().hex,
         )
 
+        # Step 2: Check if a User already exists for this identity + tenant
+        # This prevents duplicate User records when OrgMember lookup misses
+        # (e.g. uncommitted transaction from a concurrent request).
+        if tenant_id:
+            existing_q = select(User).where(
+                User.identity_id == identity.id,
+                User.tenant_id == tenant_id,
+            )
+        else:
+            existing_q = select(User).where(
+                User.identity_id == identity.id,
+                User.tenant_id.is_(None),
+            )
+        existing_result = await db.execute(
+            existing_q.order_by(User.created_at.asc()).limit(1)
+        )
+        existing_user = existing_result.scalar_one_or_none()
+        if existing_user:
+            logger.info(
+                f"[{channel_type}] Found existing user {existing_user.id} "
+                f"for identity {identity.id}, skipping duplicate creation"
+            )
+            return existing_user
 
-        # Step 2: Create tenant-scoped User linked to Identity
+        # Step 3: Create tenant-scoped User linked to Identity
         user = User(
             identity_id=identity.id,
             display_name=name,
@@ -490,6 +513,29 @@ async def get_platform_user_by_org_member(
         password=uuid.uuid4().hex,
     )
 
+    # Check if a User already exists for this identity + tenant before creating
+    if agent_tenant_id:
+        dup_q = select(User).where(
+            User.identity_id == identity.id,
+            User.tenant_id == agent_tenant_id,
+        )
+    else:
+        dup_q = select(User).where(
+            User.identity_id == identity.id,
+            User.tenant_id.is_(None),
+        )
+    dup_result = await db.execute(
+        dup_q.order_by(User.created_at.asc()).limit(1)
+    )
+    existing_user = dup_result.scalar_one_or_none()
+    if existing_user:
+        logger.info(
+            f"[channel_user_service] Found existing User {existing_user.id} "
+            f"for identity {identity.id}, reusing instead of creating duplicate"
+        )
+        org_member.user_id = existing_user.id
+        await db.flush()
+        return existing_user
 
     user = User(
         identity_id=identity.id,
