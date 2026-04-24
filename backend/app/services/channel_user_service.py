@@ -274,7 +274,7 @@ class ChannelUserService:
                 return None
 
             query = select(OrgMember).where(*conditions).order_by(
-                OrgMember.created_at.asc()
+                OrgMember.synced_at.asc()
             ).limit(1)
             result = await db.execute(query)
             return result.scalar_one_or_none()
