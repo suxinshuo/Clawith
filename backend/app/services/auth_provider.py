@@ -318,11 +318,20 @@ class FeishuAuthProvider(BaseAuthProvider):
             info_data = info_resp.json().get("data", {})
             logger.info(f"Feishu user info: {info_data}")
 
+            email = info_data.get("email") or None
+            open_id = info_data.get("open_id", "")
+
+            # Feishu may not return email/mobile depending on app permissions.
+            # Generate a placeholder email from open_id so Identity creation
+            # doesn't violate the unique constraint with an empty string.
+            if not email and open_id:
+                email = f"feishu_{open_id}@feishu.local"
+
             return ExternalUserInfo(
                 provider_type=self.provider_type,
                 provider_union_id=info_data.get("union_id"),
                 name=info_data.get("name", ""),
-                email=info_data.get("email", ""),
+                email=email,
                 avatar_url=info_data.get("avatar_url", ""),
                 mobile=info_data.get("mobile", ""),
                 raw_data=info_data,
