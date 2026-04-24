@@ -237,11 +237,15 @@ class ChannelUserService:
             if channel_type == "feishu":
                 # Feishu identifiers have distinct semantics:
                 # unionid and open_id come from extra_info; external_id is user_id only.
+                # open_id is app-specific but stable within the same app, used as
+                # last-resort fallback to find shell OrgMembers created earlier.
                 lookup_conditions = []
                 if unionid:
                     lookup_conditions.append(OrgMember.unionid == unionid)
                 if external_id:
                     lookup_conditions.append(OrgMember.external_id == external_id)
+                if open_id:
+                    lookup_conditions.append(OrgMember.open_id == open_id)
                 if not lookup_conditions:
                     return None
                 conditions.append(lookup_conditions[0])
@@ -269,7 +273,9 @@ class ChannelUserService:
                 # These channels don't have OrgMember, return None immediately
                 return None
 
-            query = select(OrgMember).where(*conditions)
+            query = select(OrgMember).where(*conditions).order_by(
+                OrgMember.created_at.asc()
+            ).limit(1)
             result = await db.execute(query)
             return result.scalar_one_or_none()
         except Exception as e:
