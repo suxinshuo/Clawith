@@ -1,14 +1,14 @@
 {
   "app": {
-    "name": "Clawith",
+    "name": "DataAgent",
     "tagline": "企业数字员工平台"
   },
   "login": {
     "hero": {
       "badge": "开源 · 多智能体协作",
-      "title": "Clawith",
+      "title": "DataAgent",
       "subtitle": "OpenClaw for Teams",
-      "description": "OpenClaw 赋能个人。<br>Clawith 将其扩展到前沿组织。",
+      "description": "OpenClaw 赋能个人。<br>DataAgent 将其扩展到前沿组织。",
       "features": {
         "multiAgent": {
           "title": "多智能体团队",
@@ -1279,7 +1279,7 @@
         "list_triggers": "列出所有活动触发器的详细信息。",
         "send_file_to_agent": "将文件发送给特定人员或返回当前对话。",
         "send_feishu_message": "向飞书用户或群组发送消息。",
-        "send_web_message": "在 Clawith 网页平台上向用户发送主动消息。",
+        "send_web_message": "在 DataAgent 网页平台上向用户发送主动消息。",
         "send_message_to_agent": "向数字员工同事发送消息并接收回复。",
         "web_search": "使用可配置的搜索引擎搜索互联网。",
         "jina_search": "使用 Jina AI 搜索互联网。",
@@ -1446,16 +1446,16 @@
       "saved": "邮件模板已保存",
       "emailVerification": "邮箱验证码",
       "emailVerificationDesc": "用户注册并需要验证邮箱地址时发送。",
-      "emailVerificationSubject": "验证您的 Clawith 邮箱地址",
-      "emailVerificationBody": "您好 {{display_name}}，\n\n欢迎来到 Clawith！请使用以下 6 位数字验证码验证您的邮箱地址：\n\n验证码：{{verification_code}}\n\n此验证码将在 {{expiry_minutes}} 分钟后过期。如果您没有创建账号，可以忽略此邮件。",
+      "emailVerificationSubject": "验证您的 DataAgent 邮箱地址",
+      "emailVerificationBody": "您好 {{display_name}}，\n\n欢迎来到 DataAgent！请使用以下 6 位数字验证码验证您的邮箱地址：\n\n验证码：{{verification_code}}\n\n此验证码将在 {{expiry_minutes}} 分钟后过期。如果您没有创建账号，可以忽略此邮件。",
       "passwordReset": "密码重置",
       "passwordResetDesc": "用户请求重置密码时发送。",
-      "passwordResetSubject": "重置您的 Clawith 密码",
-      "passwordResetBody": "您好 {{display_name}}，\n\n我们收到了重置您 Clawith 密码的请求。\n\n重置链接：{{reset_url}}\n\n此链接将在 {{expiry_minutes}} 分钟后过期。如果您没有提出此请求，可以忽略此邮件。",
+      "passwordResetSubject": "重置您的 DataAgent 密码",
+      "passwordResetBody": "您好 {{display_name}}，\n\n我们收到了重置您 DataAgent 密码的请求。\n\n重置链接：{{reset_url}}\n\n此链接将在 {{expiry_minutes}} 分钟后过期。如果您没有提出此请求，可以忽略此邮件。",
       "companyInvitation": "公司邀请",
       "companyInvitationDesc": "管理员邀请用户加入公司时发送。",
-      "companyInvitationSubject": "{{inviter_name}} 邀请您加入 {{company_name}} 的 Clawith 团队",
-      "companyInvitationBody": "您好，\n\n{{inviter_name}} 邀请您加入他们在 Clawith 的团队\"{{company_name}}\"。\n\n要接受邀请并创建您的账号，请点击以下链接：\n\n{{invite_url}}\n\n如果您不想加入此团队或没有预期此邀请，可以忽略此邮件。"
+      "companyInvitationSubject": "{{inviter_name}} 邀请您加入 {{company_name}} 的 DataAgent 团队",
+      "companyInvitationBody": "您好，\n\n{{inviter_name}} 邀请您加入他们在 DataAgent 的团队\"{{company_name}}\"。\n\n要接受邀请并创建您的账号，请点击以下链接：\n\n{{invite_url}}\n\n如果您不想加入此团队或没有预期此邀请，可以忽略此邮件。"
     },
     "users": {
       "user": "用户",
@@ -1666,7 +1666,7 @@
     "keyNote": "API Key 已嵌入在上方指令中。如需手动配置可单独保存。",
     "goToAgent": "前往 Agent 页面",
     "nativeTitle": "平台托管",
-    "nativeDesc": "在 Clawith 平台上运行的完整 Agent",
+    "nativeDesc": "在 DataAgent 平台上运行的完整 Agent",
     "openclawTitle": "连接 OpenClaw",
     "openclawDesc": "连接你现有的 OpenClaw Agent",
     "basicTitle": "连接 OpenClaw Agent",

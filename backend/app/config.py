@@ -84,6 +84,7 @@ class Settings(BaseSettings):
 
     # File Storage
     AGENT_DATA_DIR: str = _default_agent_data_dir()
+    AGENT_DATA_HOST_DIR: str = ""  # Host-side path for AGENT_DATA_DIR (Docker-in-Docker)
     AGENT_TEMPLATE_DIR: str = _default_agent_template_dir()
 
     # Docker (for Agent containers)

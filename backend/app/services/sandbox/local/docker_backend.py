@@ -3,6 +3,7 @@
 import time
 from pathlib import Path
 
+from app.config import get_settings
 from app.services.sandbox.base import BaseSandboxBackend, ExecutionResult, SandboxCapabilities
 from app.services.sandbox.config import SandboxConfig
 from loguru import logger
@@ -53,6 +54,24 @@ class DockerBackend(BaseSandboxBackend):
     def __init__(self, config: SandboxConfig):
         self.config = config
         self._client = None
+
+    def _resolve_host_path(self, work_dir: str) -> str:
+        """Translate a container-internal work_dir to a host-side path.
+
+        When Clawith runs inside Docker and talks to the host daemon via
+        /var/run/docker.sock, bind-mount source paths must be host paths.
+        AGENT_DATA_HOST_DIR provides the host-side equivalent of AGENT_DATA_DIR.
+        """
+        settings = get_settings()
+        host_dir = settings.AGENT_DATA_HOST_DIR
+        if not host_dir:
+            return work_dir
+        agent_data_dir = settings.AGENT_DATA_DIR
+        try:
+            relative = Path(work_dir).relative_to(agent_data_dir)
+            return str(Path(host_dir) / relative)
+        except ValueError:
+            return work_dir
 
     @property
     def client(self):
@@ -127,6 +146,14 @@ class DockerBackend(BaseSandboxBackend):
                 error=f"Unsupported language: {language}"
             )
 
+        # Volume mount for agent root
+        volumes = {}
+        container_workdir = None
+        if work_dir:
+            host_path = self._resolve_host_path(str(Path(work_dir).resolve()))
+            volumes[host_path] = {"bind": "/workspace", "mode": "ro"}
+            container_workdir = "/workspace"
+
         # Resource limits
         cpu_limit = self.config.cpu_limit
         memory_limit = self.config.memory_limit
@@ -147,6 +174,8 @@ class DockerBackend(BaseSandboxBackend):
                 image,
                 cmd,
                 detach=True,
+                volumes=volumes if volumes else None,
+                working_dir=container_workdir,
                 mem_limit=memory_limit,
                 cpu_period=100000,  # Docker default
                 cpu_quota=int(float(cpu_limit) * 100000),
