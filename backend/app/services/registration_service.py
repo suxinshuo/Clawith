@@ -161,9 +161,10 @@ class RegistrationService:
                 )
 
         # Create new identity
+        # Normalise empty strings to None so unique constraints are not violated
         normalized_phone = re.sub(r"[\s\-\+]", "", phone) if phone else None
         identity = Identity(
-            email=email,
+            email=email or None,
             phone=normalized_phone,
             username=final_username,
             password_hash=hash_password(password) if password else None,
