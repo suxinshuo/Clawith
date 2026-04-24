@@ -3,7 +3,6 @@
 import time
 from pathlib import Path
 
-from app.config import get_settings
 from app.services.sandbox.base import BaseSandboxBackend, ExecutionResult, SandboxCapabilities
 from app.services.sandbox.config import SandboxConfig
 from loguru import logger
@@ -62,6 +61,7 @@ class DockerBackend(BaseSandboxBackend):
         /var/run/docker.sock, bind-mount source paths must be host paths.
         AGENT_DATA_HOST_DIR provides the host-side equivalent of AGENT_DATA_DIR.
         """
+        from app.config import get_settings
         settings = get_settings()
         host_dir = settings.AGENT_DATA_HOST_DIR
         if not host_dir:
