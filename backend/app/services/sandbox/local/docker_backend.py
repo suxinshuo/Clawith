@@ -151,6 +151,7 @@ class DockerBackend(BaseSandboxBackend):
         container_workdir = None
         if work_dir:
             host_path = self._resolve_host_path(str(Path(work_dir).resolve()))
+            logger.info(f"docker volume host_path: {host_path}")
             volumes[host_path] = {"bind": "/workspace", "mode": "ro"}
             container_workdir = "/workspace"
 
