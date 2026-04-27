@@ -1,11 +1,18 @@
 """Local docker-based sandbox backend."""
 
+import asyncio
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from app.services.sandbox.base import BaseSandboxBackend, ExecutionResult, SandboxCapabilities
 from app.services.sandbox.config import SandboxConfig
 from loguru import logger
+
+# Dedicated thread pool for blocking Docker SDK calls so they don't stall the
+# async event loop.  4 workers is enough — each call is I/O-bound (waiting for
+# the Docker daemon), not CPU-bound.
+_docker_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="docker-sandbox")
 
 # Lazy import docker to make it optional
 _docker = None
@@ -98,15 +105,18 @@ class DockerBackend(BaseSandboxBackend):
         except Exception:
             return False
 
-    async def execute(
+    def _execute_sync(
         self,
         code: str,
         language: str,
-        timeout: int = 30,
-        work_dir: str | None = None,
-        **kwargs
+        timeout: int,
+        work_dir: str | None,
     ) -> ExecutionResult:
-        """Execute code inside a docker container."""
+        """Run all blocking Docker SDK calls in a worker thread.
+
+        This method is intentionally synchronous — it is invoked via
+        ``asyncio.run_in_executor`` so the event loop stays free.
+        """
         start_time = time.time()
 
         # Validate language
@@ -210,7 +220,7 @@ class DockerBackend(BaseSandboxBackend):
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
             error_msg = str(e)
-            logger.exception(f"[Docker] Execution error")
+            logger.exception("[Docker] Execution error")
 
             # Handle timeout specifically
             if "timeout" in error_msg.lower():
@@ -237,3 +247,26 @@ class DockerBackend(BaseSandboxBackend):
                     container.remove(force=True)
                 except Exception as e:
                     logger.warning(f"[Docker] Failed to remove container: {e}")
+
+    async def execute(
+        self,
+        code: str,
+        language: str,
+        timeout: int = 30,
+        work_dir: str | None = None,
+        **kwargs
+    ) -> ExecutionResult:
+        """Execute code inside a docker container.
+
+        All blocking Docker SDK calls are offloaded to a dedicated thread pool
+        so the async event loop is never stalled.
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            _docker_executor,
+            self._execute_sync,
+            code,
+            language,
+            timeout,
+            work_dir,
+        )
