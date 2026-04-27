@@ -162,6 +162,7 @@ class DockerBackend(BaseSandboxBackend):
         # Network config
         network = None if not self.config.allow_network else "bridge"
 
+        container = None
         try:
             # Pull image if needed
             try:
@@ -193,12 +194,6 @@ class DockerBackend(BaseSandboxBackend):
             # Get output
             stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")[:10000]
             stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")[:5000]
-
-            # Clean up container
-            try:
-                container.remove(force=True)
-            except Exception as e:
-                logger.warning(f"[Docker] Failed to remove container: {e}")
 
             duration_ms = int((time.time() - start_time) * 1000)
             exit_code = result.get("StatusCode", 1)
@@ -236,3 +231,9 @@ class DockerBackend(BaseSandboxBackend):
                 duration_ms=duration_ms,
                 error=f"Docker execution error: {error_msg[:200]}"
             )
+        finally:
+            if container is not None:
+                try:
+                    container.remove(force=True)
+                except Exception as e:
+                    logger.warning(f"[Docker] Failed to remove container: {e}")

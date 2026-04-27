@@ -860,18 +860,14 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
         - Scopes API failure: fall back to root "0" (backward compatible).
         """
         token = await self.get_access_token()
-        all_depts: list[ExternalDepartment] = []
-
         # Virtual root, consistent with DingTalk root behavior
-        all_depts.append(
-            ExternalDepartment(
+        all_depts: list[ExternalDepartment] = [ExternalDepartment(
                 external_id="0",
                 name="Root",
                 parent_external_id=None,
                 member_count=0,
                 raw_data={"department_id": "0", "name": "Root"},
-            )
-        )
+            )]
 
         async with httpx.AsyncClient() as client:
             sem = asyncio.Semaphore(15)

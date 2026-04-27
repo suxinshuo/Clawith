@@ -2206,8 +2206,15 @@ async def execute_tool(
                 _ar = await _adb.execute(select(AgentModel).where(AgentModel.id == agent_id))
                 _agent = _ar.scalar_one_or_none()
                 if _agent:
+                    # Ensure args are JSON-serializable for the audit JSON column.
+                    # Use default=str to handle UUID, bytes, etc. gracefully.
+                    try:
+                        import json
+                        _safe_args = json.loads(json.dumps(arguments, default=str))
+                    except (TypeError, ValueError):
+                        _safe_args = str(arguments)[:500]
                     result_check = await autonomy_service.check_and_enforce(
-                        _adb, _agent, action_type, {"tool": tool_name, "args": arguments, "requested_by": str(user_id)}
+                        _adb, _agent, action_type, {"tool": tool_name, "args": _safe_args, "requested_by": str(user_id)}
                     )
                     await _adb.commit()
                     if not result_check.get("allowed"):
@@ -3465,10 +3472,11 @@ async def _feishu_with_user_fallback(
     if session_id:
         try:
             from app.models.chat_session import ChatSession
+            _sid = uuid.UUID(session_id)
             async with async_session() as db:
                 r = await db.execute(
                     select(ChatSession.source_channel, ChatSession.external_conv_id)
-                    .where(ChatSession.id == session_id)
+                    .where(ChatSession.id == _sid)
                 )
                 row = r.one_or_none()
                 if row:
@@ -3515,6 +3523,7 @@ async def _build_credential_guidance(provider: str, user_id, tenant_id, session_
     if session_id:
         try:
             from app.models.chat_session import ChatSession
+            _sid = uuid.UUID(session_id)
             # Single DB session for both channel lookup and OAuth config check
             async with async_session() as db:
                 r = await db.execute(
@@ -3522,7 +3531,7 @@ async def _build_credential_guidance(provider: str, user_id, tenant_id, session_
                         ChatSession.source_channel,
                         ChatSession.agent_id,
                         ChatSession.external_conv_id,
-                    ).where(ChatSession.id == session_id)
+                    ).where(ChatSession.id == _sid)
                 )
                 row = r.one_or_none()
                 if row:

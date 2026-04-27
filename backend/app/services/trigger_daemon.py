@@ -528,7 +528,7 @@ async def _check_new_agent_messages(trigger: AgentTrigger) -> bool:
 
 # ── Agent Invocation ────────────────────────────────────────────────
 
-async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTrigger], acting_user_id: uuid.UUID | None = None):
+async def _resolve_trigger_delivery_target(agent: Agent, triggers: list[AgentTrigger]) -> dict | None:
     """Resolve where a trigger result should be delivered.
 
     Priority:
@@ -608,7 +608,7 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
 
     return None
 
-async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTrigger]):
+async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTrigger], acting_user_id: uuid.UUID | None = None):
     """Invoke an agent with context from one or more fired triggers.
 
     Creates a Reflection Session and calls the LLM.

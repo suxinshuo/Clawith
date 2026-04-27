@@ -1071,7 +1071,7 @@ async def create_agent_credential(
     from app.config import get_settings
 
     agent = await db.get(Agent, agent_id)
-    if not agent:
+    if not agent or (current_user.tenant_id and agent.tenant_id != current_user.tenant_id):
         raise HTTPException(status_code=404, detail="Agent not found")
     if agent.creator_id != current_user.id and current_user.role not in ("platform_admin", "org_admin"):
         raise HTTPException(status_code=403, detail="Only agent creator or admin can manage agent credentials")
@@ -1117,7 +1117,7 @@ async def update_agent_credential(
     from app.config import get_settings
 
     agent = await db.get(Agent, agent_id)
-    if not agent:
+    if not agent or (current_user.tenant_id and agent.tenant_id != current_user.tenant_id):
         raise HTTPException(status_code=404, detail="Agent not found")
     if agent.creator_id != current_user.id and current_user.role not in ("platform_admin", "org_admin"):
         raise HTTPException(status_code=403, detail="Only agent creator or admin can manage agent credentials")
@@ -1154,7 +1154,7 @@ async def delete_agent_credential(
     from app.models.user_external_credential import AgentExternalCredential
 
     agent = await db.get(Agent, agent_id)
-    if not agent:
+    if not agent or (current_user.tenant_id and agent.tenant_id != current_user.tenant_id):
         raise HTTPException(status_code=404, detail="Agent not found")
     if agent.creator_id != current_user.id and current_user.role not in ("platform_admin", "org_admin"):
         raise HTTPException(status_code=403, detail="Only agent creator or admin can manage agent credentials")

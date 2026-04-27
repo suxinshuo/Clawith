@@ -94,10 +94,10 @@ async def update_trigger(
             trigger.reason = body.reason
         if body.is_enabled is not None:
             trigger.is_enabled = body.is_enabled
-            # When re-enabling a trigger, record the current user as the acting user
-            # so that tool calls during trigger execution use this user's credentials.
-            if body.is_enabled:
-                trigger.acting_user_id = user.id
+        # Record the current user as the acting user so that tool calls during
+        # trigger execution use this user's credentials. Set on every update
+        # (not just re-enable) to ensure the trigger always has a valid user.
+        trigger.acting_user_id = user.id
         if body.max_fires is not None:
             trigger.max_fires = body.max_fires
         if body.cooldown_seconds is not None:

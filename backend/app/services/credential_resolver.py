@@ -1,6 +1,7 @@
 """Resolve per-user or per-tenant external credentials for MCP tool execution."""
 
 import asyncio
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
@@ -14,6 +15,17 @@ from app.models.user_external_credential import AgentExternalCredential, TenantE
 _CredentialTable = type[UserExternalCredential] | type[TenantExternalCredential] | type[AgentExternalCredential]
 
 
+def _fire_and_forget(coro) -> asyncio.Task:
+    """Schedule a coroutine as a fire-and-forget task with exception suppression.
+
+    Prevents "Task exception was never retrieved" warnings by attaching a
+    done callback that consumes the exception (already logged inside the coro).
+    """
+    task = _fire_and_forget(coro)
+    task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+    return task
+
+
 def parse_credential_scopes(s: str | None) -> list[str]:
     """Normalize comma or space-separated scope strings into a list.
 
@@ -24,7 +36,9 @@ def parse_credential_scopes(s: str | None) -> list[str]:
     return [p.strip() for p in s.replace(",", " ").split() if p.strip()]
 
 # In-memory lock fallback when Redis is unavailable.
-_refresh_locks: dict[str, asyncio.Lock] = {}
+# Uses OrderedDict as a bounded LRU cache to prevent unbounded memory growth.
+_REFRESH_LOCKS_MAX_SIZE = 1024
+_refresh_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
 
 
 def async_session():
@@ -119,15 +133,19 @@ class CredentialResolver:
                     )
                     # Fire-and-forget: _update_last_used creates its own DB session,
                     # so it is safe to run detached from the current context manager.
-                    asyncio.create_task(self._update_last_used(user_cred.id, UserExternalCredential))
+                    _fire_and_forget(self._update_last_used(user_cred.id, UserExternalCredential))
                     return resolved
 
-            # 2. Fallback to agent-level credential
+            # 2. Fallback to agent-level credential (tenant_id via Agent join for defense-in-depth)
             if agent_id:
+                from app.models.agent import Agent as _AgentModel
                 result = await db.execute(
-                    select(AgentExternalCredential).where(
+                    select(AgentExternalCredential)
+                    .join(_AgentModel, AgentExternalCredential.agent_id == _AgentModel.id)
+                    .where(
                         AgentExternalCredential.agent_id == agent_id,
                         AgentExternalCredential.provider == provider,
+                        _AgentModel.tenant_id == tenant_id,
                     )
                 )
                 agent_cred = result.scalar_one_or_none()
@@ -159,7 +177,7 @@ class CredentialResolver:
                             source="agent",
                             credential_id=agent_cred.id,
                         )
-                        asyncio.create_task(self._update_last_used(agent_cred.id, AgentExternalCredential))
+                        _fire_and_forget(self._update_last_used(agent_cred.id, AgentExternalCredential))
                         return resolved
 
             # 3. Fallback to tenant-level credential
@@ -199,7 +217,7 @@ class CredentialResolver:
                         credential_id=tenant_cred.id,
                     )
                     # Fire-and-forget: _update_last_used creates its own DB session.
-                    asyncio.create_task(self._update_last_used(tenant_cred.id, TenantExternalCredential))
+                    _fire_and_forget(self._update_last_used(tenant_cred.id, TenantExternalCredential))
                     return resolved
 
         return None
@@ -219,11 +237,19 @@ class CredentialResolver:
         except Exception:
             logger.debug(f"[CredentialResolver] Failed to update last_used_at for {credential_id}")
 
-    async def _acquire_refresh_lock(self, credential_id: UUID, timeout: int = 10) -> bool:
+    async def _acquire_refresh_lock(self, credential_id: UUID, timeout: int = 10) -> bool | None:
         """Acquire a distributed lock for token refresh.
 
-        Tries Redis SET NX first; falls back to asyncio.Lock per credential_id.
-        Returns True if lock acquired.
+        Tries Redis SET NX first. The caller MUST already hold the in-memory
+        asyncio.Lock from _get_memory_lock() which provides single-process
+        safety. This method adds cross-process protection via Redis.
+
+        Returns:
+            True  — Redis lock acquired (caller must call _release_refresh_lock).
+            False — Redis lock contention (another process is refreshing).
+            None  — Redis unavailable; only the in-memory lock protects this
+                    refresh. Safe in single-worker deployments, but concurrent
+                    workers may duplicate the refresh.
         """
         lock_key = f"cred_refresh:{credential_id}"
         try:
@@ -231,12 +257,21 @@ class CredentialResolver:
             redis = await get_redis()
             return bool(await redis.set(lock_key, "1", nx=True, ex=timeout))
         except Exception:
-            # Redis unavailable — use in-memory asyncio.Lock
-            logger.debug(f"[CredentialResolver] Redis unavailable for refresh lock {lock_key}, using in-memory lock")
-            return True  # in-memory lock acquired via _get_memory_lock context
+            # Redis unavailable — in-memory asyncio.Lock (held by caller) is
+            # the only protection. Log WARNING so operators notice the gap.
+            logger.warning(
+                f"[CredentialResolver] Redis unavailable for refresh lock {lock_key}, "
+                "falling back to in-memory lock only (not safe across multiple workers)"
+            )
+            return None
 
     async def _release_refresh_lock(self, credential_id: UUID) -> None:
-        """Release the distributed refresh lock."""
+        """Release the distributed refresh lock in Redis.
+
+        Only call this when _acquire_refresh_lock returned True (i.e. Redis
+        lock was actually acquired). Skipping the call when it returned None
+        avoids a pointless Redis round-trip that would also fail.
+        """
         lock_key = f"cred_refresh:{credential_id}"
         try:
             from app.core.events import get_redis
@@ -246,11 +281,28 @@ class CredentialResolver:
             logger.debug(f"[CredentialResolver] Redis unavailable for releasing refresh lock {lock_key}")
 
     def _get_memory_lock(self, credential_id: UUID) -> asyncio.Lock:
-        """Get or create an in-memory asyncio.Lock for a credential."""
+        """Get or create an in-memory asyncio.Lock for a credential.
+
+        Uses LRU eviction: recently used locks are moved to the end,
+        and the oldest entries are evicted when the cache exceeds
+        _REFRESH_LOCKS_MAX_SIZE. Only unlocked entries are evicted to
+        avoid dropping a lock that is currently held.
+        """
         key = str(credential_id)
-        if key not in _refresh_locks:
-            _refresh_locks[key] = asyncio.Lock()
-        return _refresh_locks[key]
+        if key in _refresh_locks:
+            _refresh_locks.move_to_end(key)
+            return _refresh_locks[key]
+        # Evict oldest unlocked entries when cache is full
+        while len(_refresh_locks) >= _REFRESH_LOCKS_MAX_SIZE:
+            oldest_key, oldest_lock = next(iter(_refresh_locks.items()))
+            if oldest_lock.locked():
+                # Don't evict a lock that's currently held; break and allow
+                # the cache to temporarily exceed the limit by one entry.
+                break
+            del _refresh_locks[oldest_key]
+        lock = asyncio.Lock()
+        _refresh_locks[key] = lock
+        return lock
 
     async def _ensure_token_fresh(
         self,
@@ -308,10 +360,14 @@ class CredentialResolver:
         # Acquire lock to prevent concurrent refresh of the same credential.
         # Many OAuth providers invalidate the old refresh_token on use,
         # so a second concurrent refresh would fail and incorrectly mark needs_reauth.
+        #
+        # Two-layer locking:
+        #   Layer 1 — in-memory asyncio.Lock (protects within this process)
+        #   Layer 2 — Redis SET NX (protects across multiple worker processes)
         lock = self._get_memory_lock(credential_id)
         async with lock:
-            acquired = await self._acquire_refresh_lock(credential_id)
-            if not acquired:
+            redis_lock = await self._acquire_refresh_lock(credential_id)
+            if redis_lock is False:
                 # Another process is refreshing — return current token and let caller retry
                 logger.info(f"[CredentialResolver] Refresh lock contention for provider={provider}, returning current token")
                 try:
@@ -319,6 +375,8 @@ class CredentialResolver:
                 except Exception:
                     logger.warning(f"[CredentialResolver] Failed to decrypt token during lock contention for provider={provider}, credential_id={credential_id}")
                     return None
+            # redis_lock is True (Redis acquired) or None (Redis unavailable,
+            # in-memory lock is our only protection — safe for single-worker).
 
             try:
                 return await self._do_refresh(
@@ -330,7 +388,8 @@ class CredentialResolver:
                     table_class=table_class,
                 )
             finally:
-                await self._release_refresh_lock(credential_id)
+                if redis_lock:
+                    await self._release_refresh_lock(credential_id)
 
     async def _do_refresh(
         self,
@@ -416,7 +475,7 @@ class CredentialResolver:
 
             # Audit log
             from app.services.audit_logger import write_audit_log
-            asyncio.create_task(write_audit_log(
+            _fire_and_forget(write_audit_log(
                 action="credential_token_refresh",
                 details={"provider": provider, "credential_id": str(credential_id)},
             ))
@@ -428,7 +487,7 @@ class CredentialResolver:
             logger.exception(f"[CredentialResolver] Token refresh failed for provider={provider}")
             # Audit log refresh failure
             from app.services.audit_logger import write_audit_log
-            asyncio.create_task(write_audit_log(
+            _fire_and_forget(write_audit_log(
                 action="credential_token_refresh_fail",
                 details={"provider": provider, "error": str(e)[:200]},
             ))
@@ -533,7 +592,7 @@ class CredentialResolver:
 
             # Audit
             from app.services.audit_logger import write_audit_log
-            asyncio.create_task(write_audit_log(
+            _fire_and_forget(write_audit_log(
                 action="credential_token_refresh",
                 details={"provider": provider, "credential_id": str(credential_id), "method": "feishu_oidc"},
             ))
@@ -544,7 +603,7 @@ class CredentialResolver:
         except Exception as e:
             logger.exception(f"[CredentialResolver] Feishu token refresh failed for provider={provider}")
             from app.services.audit_logger import write_audit_log
-            asyncio.create_task(write_audit_log(
+            _fire_and_forget(write_audit_log(
                 action="credential_token_refresh_fail",
                 details={"provider": provider, "error": str(e)[:200], "method": "feishu_oidc"},
             ))
