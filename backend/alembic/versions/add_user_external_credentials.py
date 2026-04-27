@@ -35,7 +35,7 @@ def upgrade() -> None:
             last_used_at TIMESTAMPTZ,
             created_at TIMESTAMPTZ DEFAULT now(),
             updated_at TIMESTAMPTZ DEFAULT now(),
-            CONSTRAINT uq_user_external_credential_provider UNIQUE (user_id, provider)
+            CONSTRAINT uq_user_external_credential_provider UNIQUE (user_id, tenant_id, provider)
         )
     """)
     op.execute("CREATE INDEX IF NOT EXISTS ix_user_ext_cred_user_id ON user_external_credentials(user_id)")

@@ -50,7 +50,7 @@ class UserExternalCredential(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
-        UniqueConstraint("user_id", "provider", name="uq_user_external_credential_provider"),
+        UniqueConstraint("user_id", "tenant_id", "provider", name="uq_user_external_credential_provider"),
     )
 
 

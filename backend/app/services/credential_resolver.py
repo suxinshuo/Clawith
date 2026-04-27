@@ -21,7 +21,7 @@ def _fire_and_forget(coro) -> asyncio.Task:
     Prevents "Task exception was never retrieved" warnings by attaching a
     done callback that consumes the exception (already logged inside the coro).
     """
-    task = _fire_and_forget(coro)
+    task = asyncio.create_task(coro)
     task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
     return task
 
