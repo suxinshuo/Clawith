@@ -3514,6 +3514,7 @@ select:focus {
     line-height: 1.5;
     white-space: pre;
     background: none;
+    border: none;
     padding: 0;
     border-radius: 0;
 }
