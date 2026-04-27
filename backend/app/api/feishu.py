@@ -953,6 +953,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
             _FLUSH_INTERVAL_PATCH = 1.0
             _agent_name = agent_obj.name if agent_obj else "AI 回复"
             _tool_errors: list[str] = []
+            _has_pending_approval = False
             _tool_status_running: dict[str, str] = {}
             _tool_status_done: list[str] = []
             _tool_call_records: list[dict] = []
@@ -1106,6 +1107,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                 await _flush_stream("thinking")
 
             async def _ws_on_tool_call(evt: dict):
+                nonlocal _has_pending_approval
                 tool_name = evt.get("name") or "unknown_tool"
                 call_id = evt.get("call_id") or tool_name
                 tool_status = (evt.get("status") or "").lower()
@@ -1119,6 +1121,8 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                         "name": tool_name,
                         "result_summary": (str(result or ""))[:80],
                     })
+                    if "requires approval" in str(result or "").lower():
+                        _has_pending_approval = True
                     normalized_error = _normalize_tool_error(tool_name, result)
                     if normalized_error:
                         _tool_errors.append(normalized_error)
@@ -1207,7 +1211,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                         logger.error(f"[Feishu] Failed to create task: {e}")
                         reply_text += f"\n\n⚠️ 任务已识别，但写入任务面板失败：{str(e)[:150]}"
 
-            final_reply_text = _append_error_details(reply_text, _tool_errors)
+            final_reply_text = reply_text if _has_pending_approval else _append_error_details(reply_text, _tool_errors)
 
             # Send final card update or fallback text
             if cardkit_card_id:
