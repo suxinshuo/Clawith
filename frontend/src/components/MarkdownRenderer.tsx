@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
+import remarkFrontmatter from 'remark-frontmatter';
 import remarkGfm from 'remark-gfm';
 
 function injectToken(url: string): string {
@@ -49,7 +50,7 @@ const components: Components = {
     },
 };
 
-const remarkPlugins = [remarkGfm];
+const remarkPlugins = [remarkFrontmatter, remarkGfm];
 
 interface MarkdownRendererProps {
     content: string;
