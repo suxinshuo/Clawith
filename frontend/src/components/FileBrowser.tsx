@@ -44,6 +44,8 @@ export interface FileBrowserProps {
     title?: string;
     readOnly?: boolean;
     onRefresh?: () => void;
+    /** Show YAML frontmatter as a code block instead of stripping it */
+    showFrontmatter?: boolean;
 }
 
 // ─── Text file detection ───────────────────────────────
@@ -76,6 +78,7 @@ export default function FileBrowser({
     title,
     readOnly = false,
     onRefresh,
+    showFrontmatter = false,
 }: FileBrowserProps) {
     const { t } = useTranslation();
     const {
@@ -400,7 +403,7 @@ export default function FileBrowser({
                     <div style={{ padding: '20px', color: 'var(--text-tertiary)', textAlign: 'center' }}>{t('common.loading')}</div>
                 ) : content ? (
                     singleFile?.endsWith('.md') ? (
-                        <MarkdownRenderer content={content} style={{ padding: '4px 0' }} />
+                        <MarkdownRenderer content={content} style={{ padding: '4px 0' }} showFrontmatter={showFrontmatter} />
                     ) : (
                         <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'var(--font-mono)', fontSize: '13px', lineHeight: '1.6', margin: 0 }}>
                             {content}
@@ -456,7 +459,7 @@ export default function FileBrowser({
                             <textarea ref={textareaRef} className="form-textarea" value={editContent} onChange={e => setEditContent(e.target.value)}
                                 style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', lineHeight: '1.6', minHeight: '200px', resize: 'vertical', overflow: 'hidden' }} />
                         ) : viewing?.endsWith('.md') ? (
-                            <MarkdownRenderer content={content || ''} style={{ padding: '4px' }} />
+                            <MarkdownRenderer content={content || ''} style={{ padding: '4px' }} showFrontmatter={showFrontmatter} />
                         ) : (
                             <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'var(--font-mono)', fontSize: '12px', lineHeight: '1.5', margin: 0 }}>
                                 {content || t('common.noData', 'No content yet')}

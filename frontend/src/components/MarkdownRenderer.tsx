@@ -56,10 +56,20 @@ interface MarkdownRendererProps {
     content: string;
     style?: React.CSSProperties;
     className?: string;
+    /** When true, YAML frontmatter is rendered as a visible code block instead of being stripped */
+    showFrontmatter?: boolean;
 }
 
-export const MarkdownRenderer = React.memo(function MarkdownRenderer({ content, style, className }: MarkdownRendererProps) {
-    const memoContent = useMemo(() => content, [content]);
+function convertFrontmatter(content: string): string {
+    const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+    if (!match) return content;
+    const frontmatter = match[1];
+    const rest = content.slice(match[0].length);
+    return '```yaml\n' + frontmatter + '\n```\n\n' + rest;
+}
+
+export const MarkdownRenderer = React.memo(function MarkdownRenderer({ content, style, className, showFrontmatter }: MarkdownRendererProps) {
+    const memoContent = useMemo(() => showFrontmatter ? convertFrontmatter(content) : content, [content, showFrontmatter]);
     return (
         <div
             className={`markdown-body ${className || ''}`}
