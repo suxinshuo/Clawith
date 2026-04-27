@@ -28,6 +28,10 @@ def build_visible_agents_query(
     if target_tenant_id is None:
         return stmt.where(false())
 
+    # Admins see all agents in their tenant
+    if user.role in ("platform_admin", "org_admin"):
+        return stmt.where(Agent.tenant_id == target_tenant_id)
+
     permitted_ids = (
         select(AgentPermission.agent_id)
         .where(
