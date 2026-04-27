@@ -273,9 +273,21 @@ class ChannelUserService:
                 # These channels don't have OrgMember, return None immediately
                 return None
 
-            query = select(OrgMember).where(*conditions).order_by(
-                OrgMember.synced_at.asc()
-            ).limit(1)
+            # Use limit(1) + prioritize records that are already linked to a User.
+            # scalar_one_or_none() would raise MultipleResultsFound when duplicate
+            # OrgMember shells exist for the same external_user_id — which was the
+            # root cause of continuous new-user creation on every Feishu message.
+            query = (
+                select(OrgMember)
+                .where(*conditions)
+                .order_by(
+                    # Prefer rows already linked to a platform User
+                    OrgMember.user_id.isnot(None).desc(),
+                    # Among equals, pick the oldest (most likely the "canonical" one)
+                    OrgMember.synced_at.asc(),
+                )
+                .limit(1)
+            )
             result = await db.execute(query)
             return result.scalar_one_or_none()
         except Exception as e:
