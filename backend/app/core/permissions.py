@@ -68,6 +68,11 @@ async def check_agent_access(db: AsyncSession, user: User, agent_id: uuid.UUID) 
     if not agent:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
+    # Platform admins can access everything with manage
+    if user.role in ("platform_admin", "org_admin"):
+        if agent.tenant_id == user.tenant_id:
+            return agent, "manage"
+
     # Tenant isolation applies to all users.
     if agent.tenant_id != user.tenant_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this agent")
@@ -91,7 +96,7 @@ async def check_agent_access(db: AsyncSession, user: User, agent_id: uuid.UUID) 
 
 def is_agent_creator(user: User, agent: Agent) -> bool:
     """Check if the user is the creator (admin) of the agent."""
-    return agent.creator_id == user.id
+    return agent.creator_id == user.id or user.role in ("platform_admin", "org_admin")
 
 
 def is_agent_expired(agent: Agent) -> bool:
