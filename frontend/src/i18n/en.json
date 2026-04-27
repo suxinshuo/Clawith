@@ -1608,7 +1608,7 @@
     "wechat": {
       "step1": "Click Generate QR Code below to request a fresh WeChat iLink login QR.",
       "step2": "Open WeChat on your phone and scan the QR code, then confirm the bot login on the device.",
-      "step3": "After confirmation, Clawith stores the returned bot token and starts the getupdates long-poll worker automatically.",
+      "step3": "After confirmation, DataAgent stores the returned bot token and starts the getupdates long-poll worker automatically.",
       "step4": "Send a direct message to the linked WeChat iLink bot to verify inbound polling and outbound replies.",
       "note": "This channel follows the iLink Bot protocol: QR login, token-based long polling, and replies bound to the incoming context_token."
     },
