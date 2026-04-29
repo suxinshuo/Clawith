@@ -1451,7 +1451,7 @@ class AnthropicClient(LLMClient):
                     system_blocks.append({
                         "type": "text",
                         "text": msg.content,
-                        "cache_control": {"type": "ephemeral"}
+                        "cache_control": {"type": "ephemeral", "ttl": "5m"}
                     })
                 if msg.dynamic_content:
                     system_blocks.append({
@@ -1463,19 +1463,18 @@ class AnthropicClient(LLMClient):
                 if formatted:
                     anthropic_messages.append(formatted)
 
-        # In Anthropic prompt caching, we also want to cache_control the last user message
-        # So we add cache_control to the very last message in the history if it's a user message
+        # Add cache_control to the last user message for prompt caching
+        # TTL must be <= system block TTL (non-increasing order: tools 1h >= system 5m >= messages 5m)
         if anthropic_messages and anthropic_messages[-1]["role"] == "user":
             user_msg = anthropic_messages[-1]
             if isinstance(user_msg["content"], list) and user_msg["content"]:
-                # Ensure the last block of the user message has cache_control
-                user_msg["content"][-1]["cache_control"] = {"type": "ephemeral"}
+                user_msg["content"][-1]["cache_control"] = {"type": "ephemeral", "ttl": "5m"}
             elif isinstance(user_msg["content"], str):
                 user_msg["content"] = [
                     {
                         "type": "text",
                         "text": user_msg["content"],
-                        "cache_control": {"type": "ephemeral"}
+                        "cache_control": {"type": "ephemeral", "ttl": "5m"}
                     }
                 ]
 
@@ -1511,7 +1510,7 @@ class AnthropicClient(LLMClient):
                         "input_schema": func.get("parameters", {"type": "object"}),
                     })
             if anthropic_tools:
-                anthropic_tools[-1]["cache_control"] = {"type": "ephemeral"}
+                anthropic_tools[-1]["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
             payload["tools"] = anthropic_tools
 
         payload.update(kwargs)
