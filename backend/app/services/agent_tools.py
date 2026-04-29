@@ -4950,15 +4950,59 @@ async def _manage_tasks(
 
 
 async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
-    """Send a Feishu message to a person in the agent's relationship list."""
+    """Send a Feishu message to a person or group chat."""
     member_name = (args.get("member_name") or "").strip()
     direct_user_id = (args.get("user_id") or "").strip()
+    chat_id = (args.get("chat_id") or "").strip()
+    chat_name = (args.get("chat_name") or "").strip()
     message_text = (args.get("message") or "").strip()
 
     if not message_text:
         return "❌ Please provide message content"
+
+    # ── Group chat path: chat_id or chat_name ──
+    if chat_id or chat_name:
+        try:
+            from app.services.feishu_service import FeishuAPIError, feishu_service
+
+            async with async_session() as db:
+                config_result = await db.execute(
+                    select(ChannelConfig).where(ChannelConfig.agent_id == agent_id, ChannelConfig.channel_type == "feishu")
+                )
+                config = config_result.scalar_one_or_none()
+                if not config:
+                    return "❌ This agent has no Feishu channel configured"
+
+                resolved_chat_id = chat_id
+                if not resolved_chat_id and chat_name:
+                    search_resp = await feishu_service.search_chats(
+                        config.app_id, config.app_secret, chat_name, page_size=5,
+                    )
+                    items = search_resp.get("data", {}).get("items") or []
+                    if not items:
+                        return f"❌ No group found matching '{chat_name}'"
+                    resolved_chat_id = items[0].get("chat_id", "")
+                    if not resolved_chat_id:
+                        return "❌ Group found but could not get chat_id"
+
+                try:
+                    content = json.dumps({"text": message_text}, ensure_ascii=False)
+                    resp = await feishu_service.send_message(
+                        config.app_id, config.app_secret,
+                        receive_id=resolved_chat_id, msg_type="text",
+                        content=content, receive_id_type="chat_id",
+                    )
+                    if resp.get("code") == 0:
+                        return f"✅ Message sent to group (chat_id: {resolved_chat_id})"
+                    return f"❌ Send failed: {resp.get('msg')} (code {resp.get('code')})"
+                except FeishuAPIError as e:
+                    return f"❌ Feishu send failed: {e.user_message}"
+        except Exception as e:
+            return f"❌ Message send error: {str(e)[:200]}"
+
+    # ── Individual message path (original logic) ──
     if not member_name and not direct_user_id:
-        return "❌ Please provide member_name or user_id"
+        return "❌ Please provide member_name, user_id, chat_id, or chat_name"
 
     try:
         from app.services.feishu_service import FeishuAPIError, feishu_service
