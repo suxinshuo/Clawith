@@ -3372,11 +3372,13 @@ def _parse_credential_scopes(s: str) -> set[str]:
     return set(parse_credential_scopes(s))
 
 
-async def _send_feishu_credential_card(agent_id, external_conv_id: str, provider: str, link: str) -> bool:
+async def _send_feishu_credential_card(agent_id, external_conv_id: str, provider: str, link: str, user_id: uuid.UUID | None = None) -> bool:
     """Send a credential authorization card directly via Feishu API.
 
     Returns True if the message was sent successfully, False otherwise.
     This bypasses the LLM to guarantee the auth link reaches the user.
+    In group chats, the card is sent as a private message to the triggering
+    user instead of being posted in the group (where everyone can see it).
     """
     try:
         from app.models.channel_config import ChannelConfig
@@ -3397,8 +3399,29 @@ async def _send_feishu_credential_card(agent_id, external_conv_id: str, provider
 
         # Resolve receive_id and receive_id_type from external_conv_id
         if external_conv_id.startswith("feishu_group_"):
-            receive_id = external_conv_id.removeprefix("feishu_group_")
-            receive_id_type = "chat_id"
+            # Group chat: send privately to the triggering user instead of the group
+            sender_open_id = channel_feishu_sender_open_id.get(None)
+            if not sender_open_id and user_id:
+                # Fallback: look up open_id from OrgMember table
+                from app.models.org import OrgMember
+                async with async_session() as db:
+                    r = await db.execute(
+                        select(OrgMember.open_id).where(
+                            OrgMember.user_id == user_id,
+                            OrgMember.open_id.isnot(None),
+                            OrgMember.status == "active",
+                        ).limit(1)
+                    )
+                    sender_open_id = r.scalar_one_or_none()
+
+            if sender_open_id:
+                receive_id = sender_open_id
+                receive_id_type = "open_id"
+            else:
+                # Cannot resolve user — fall back to posting in the group
+                logger.warning("[MCP] Cannot resolve user open_id for group credential card, falling back to group chat")
+                receive_id = external_conv_id.removeprefix("feishu_group_")
+                receive_id_type = "chat_id"
         elif external_conv_id.startswith("feishu_p2p_"):
             identifier = external_conv_id.removeprefix("feishu_p2p_")
             receive_id = identifier
@@ -3571,6 +3594,7 @@ async def _feishu_with_user_fallback(
             external_conv_id=_external_conv_id,
             provider="feishu",
             link=oauth_url,
+            user_id=user_id,
         )
         if sent:
             return "⏳ 需要用户飞书授权才能执行此操作。已向用户发送授权请求，请等待用户完成授权后重试。"
@@ -3659,6 +3683,7 @@ async def _build_credential_guidance(provider: str, user_id, tenant_id, session_
                     external_conv_id=_external_conv_id,
                     provider=provider,
                     link=link,
+                    user_id=user_id,
                 )
                 if sent:
                     return (
