@@ -7739,7 +7739,7 @@ async def _resolve_bitable_app_token(agent_id: uuid.UUID, parsed_url: dict) -> s
     return None
 
 # Feishu permission error codes — shared between _check_feishu_err and _feishu_with_user_fallback
-_FEISHU_PERM_CODES = {99991663, 10006, 99991661, 99991668, 91403, 1063001, 1063004}
+_FEISHU_PERM_CODES = {99991663, 10006, 99991661, 99991668, 91403, 1063001, 1063004, 230002}
 _FEISHU_PERM_KEYWORDS = ("permission", "forbidden", "no access", "access denied", "403")
 
 

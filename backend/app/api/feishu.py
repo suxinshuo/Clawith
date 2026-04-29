@@ -5,9 +5,9 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from loguru import logger
-from sqlalchemy import select, or_
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import check_agent_access, is_agent_creator, is_agent_expired
@@ -15,7 +15,6 @@ from app.core.security import get_current_user
 from app.database import get_db
 from app.models.channel_config import ChannelConfig
 from app.models.user import User
-from app.models.identity import IdentityProvider
 from app.schemas.schemas import ChannelConfigCreate, ChannelConfigOut, TokenResponse, UserOut
 from app.services.feishu_service import feishu_service
 
@@ -68,56 +67,6 @@ def _build_card(
         },
         "elements": elements,
     }
-
-
-def _looks_like_error_text(text: str) -> bool:
-    normalized = (text or "").strip().lower()
-    if not normalized:
-        return False
-    markers = (
-        "⚠️",
-        "[error]",
-        "error:",
-        "error ",
-        "failed",
-        "failure",
-        "timeout",
-        "timed out",
-        "调用模型出错",
-        "未配置 llm 模型",
-        "数字员工未找到",
-    )
-    return any(marker in normalized for marker in markers)
-
-
-def _normalize_tool_error(tool_name: str, result: object) -> str | None:
-    text = "" if result is None else str(result).strip()
-    if not text or not _looks_like_error_text(text):
-        return None
-    compact = " ".join(text.split())
-    if len(compact) > 240:
-        compact = compact[:240].rstrip() + "..."
-    return f"`{tool_name}`: {compact}"
-
-
-def _append_error_details(reply_text: str, tool_errors: list[str]) -> str:
-    base = (reply_text or "").strip()
-    unique_errors: list[str] = []
-    seen: set[str] = set()
-    for item in tool_errors:
-        normalized = item.strip()
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        unique_errors.append(normalized)
-    if not unique_errors:
-        return base
-    details = "\n".join(f"- {item}" for item in unique_errors)
-    if not base:
-        return f"执行失败，错误信息如下：\n{details}"
-    if _looks_like_error_text(base):
-        return f"{base}\n\n执行过程中出现以下错误：\n{details}"
-    return base
 
 
 def _normalize_history_messages(history: list[dict] | None) -> list[dict]:
@@ -259,7 +208,8 @@ async def _save_feishu_tool_call(
 
 # ─── OAuth ──────────────────────────────────────────────
 
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse
+
 
 @router.get("/auth/feishu/callback")
 @router.post("/auth/feishu/callback", response_model=TokenResponse)
@@ -666,7 +616,6 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
             history = _build_llm_history_from_chat_messages(list(reversed(history_msgs)))
 
             # --- Resolve Feishu sender identity & find/create platform user ---
-            import uuid as _uuid
             import httpx as _httpx
 
             sender_name = ""
@@ -952,7 +901,6 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
             _FLUSH_INTERVAL_CARDKIT = 0.5
             _FLUSH_INTERVAL_PATCH = 1.0
             _agent_name = agent_obj.name if agent_obj else "AI 回复"
-            _tool_errors: list[str] = []
             _has_pending_approval = False
             _tool_status_running: dict[str, str] = {}
             _tool_status_done: list[str] = []
@@ -1123,9 +1071,6 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                     })
                     if "requires approval" in str(result or "").lower():
                         _has_pending_approval = True
-                    normalized_error = _normalize_tool_error(tool_name, result)
-                    if normalized_error:
-                        _tool_errors.append(normalized_error)
                 else:
                     _tool_status_running.pop(call_id, None)
                     _tool_status_done.append(f"ℹ️ {tool_name} ({tool_status})")
@@ -1211,7 +1156,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                         logger.error(f"[Feishu] Failed to create task: {e}")
                         reply_text += f"\n\n⚠️ 任务已识别，但写入任务面板失败：{str(e)[:150]}"
 
-            final_reply_text = reply_text if _has_pending_approval else _append_error_details(reply_text, _tool_errors)
+            final_reply_text = reply_text
 
             # Send final card update or fallback text
             if cardkit_card_id:
@@ -1326,12 +1271,9 @@ async def _handle_feishu_file(
     from app.config import get_settings
     from app.models.audit import ChatMessage
     from app.models.agent import Agent as AgentModel
-    from app.models.user import User as UserModel
     from app.services.channel_session import find_or_create_channel_session
-    from app.core.security import hash_password
     from app.database import async_session as _async_session
     from datetime import datetime as _dt, timezone as _tz
-    import uuid as _uuid
     from sqlalchemy import select as _select
 
     msg_type = message.get("message_type", "file")
