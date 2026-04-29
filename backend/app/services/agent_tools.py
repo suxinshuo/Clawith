@@ -2471,7 +2471,7 @@ async def execute_tool(
             result = await _bitable_delete_record(agent_id, user_id, arguments, session_id=session_id)
         # ── Feishu Document Tools ──
         elif tool_name == "feishu_doc_search":
-            result = await _feishu_doc_search(agent_id, arguments)
+            result = await _feishu_doc_search(agent_id, user_id, arguments, session_id=session_id)
         elif tool_name == "feishu_wiki_list":
             result = await _feishu_wiki_list(agent_id, user_id, arguments, session_id=session_id)
         elif tool_name == "feishu_doc_read":
@@ -8068,10 +8068,8 @@ async def _feishu_wiki_get_node(token_str: str, auth_token: str) -> dict | None:
     }
 
 
-async def _feishu_doc_search(agent_id: uuid.UUID, arguments: dict) -> str:
+async def _feishu_doc_search(agent_id: uuid.UUID, user_id: uuid.UUID, arguments: dict, *, session_id: str = "") -> str:
     """Search Feishu documents by keyword using the official document search API."""
-    import httpx
-
     query = (arguments.get("query") or arguments.get("search_key") or "").strip()
     if not query:
         return "❌ Missing required argument 'query'"
@@ -8088,7 +8086,6 @@ async def _feishu_doc_search(agent_id: uuid.UUID, arguments: dict) -> str:
 
     from app.services.feishu_service import feishu_service
 
-    token = await feishu_service.get_tenant_access_token(app_id, app_secret)
     payload: dict[str, object] = {
         "search_key": query,
         "count": count,
@@ -8097,22 +8094,21 @@ async def _feishu_doc_search(agent_id: uuid.UUID, arguments: dict) -> str:
     if docs_types:
         payload["docs_types"] = docs_types
 
-    async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.post(
-            "https://open.feishu.cn/open-apis/suite/docs-api/search/object",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-        )
+    resp = await _feishu_with_user_fallback(
+        agent_id, user_id,
+        scopes=["docs:doc:readonly"],
+        app_call_fn=lambda: feishu_service.search_feishu_doc(app_id, app_secret, payload),
+        user_call_fn=lambda token: feishu_service.search_feishu_doc(app_id, app_secret, payload, access_token=token),
+        session_id=session_id,
+    )
+    if isinstance(resp, str):
+        return resp
 
-    data = resp.json()
-    err = _check_feishu_err(data)
+    err = _check_feishu_err(resp)
     if err:
         return err
 
-    result = data.get("data", {})
+    result = resp.get("data", {})
     entities = result.get("docs_entities", []) or []
     total = result.get("total", len(entities))
     has_more = bool(result.get("has_more", False))

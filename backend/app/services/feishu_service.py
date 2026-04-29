@@ -678,6 +678,20 @@ class FeishuService:
             )
             return resp.json()
 
+    async def search_feishu_doc(self, app_id: str, app_secret: str, payload: dict, *, access_token: str | None = None) -> dict:
+        """Search Feishu documents by keyword via the Docs Search API."""
+        token = access_token or await self.get_tenant_access_token(app_id, app_secret)
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                "https://open.feishu.cn/open-apis/suite/docs-api/search/object",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            return resp.json()
+
     async def create_feishu_doc(self, app_id: str, app_secret: str, folder_token: str | None = None, title: str = "Untitled Document", *, access_token: str | None = None) -> dict:
         """Create a new Feishu Doc (docx)."""
         token = access_token or await self.get_tenant_access_token(app_id, app_secret)
