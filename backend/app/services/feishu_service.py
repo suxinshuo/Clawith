@@ -786,6 +786,73 @@ class FeishuService:
             )
             return resp.json()
 
+    # --- IM Chat API ---
+
+    async def search_chats(
+        self,
+        app_id: str,
+        app_secret: str,
+        query: str,
+        page_size: int = 20,
+        page_token: str | None = None,
+        *,
+        access_token: str | None = None,
+    ) -> dict:
+        """Search for group chats visible to the bot or user.
+
+        GET /open-apis/im/v1/chats/search
+        """
+        token = access_token or await self.get_tenant_access_token(app_id, app_secret)
+        params: dict[str, str | int] = {"query": query, "page_size": page_size}
+        if page_token:
+            params["page_token"] = page_token
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                "https://open.feishu.cn/open-apis/im/v1/chats/search",
+                params=params,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            return resp.json()
+
+    async def list_chat_messages(
+        self,
+        app_id: str,
+        app_secret: str,
+        chat_id: str,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        sort_type: str = "ByCreateTimeDesc",
+        page_size: int = 50,
+        page_token: str | None = None,
+        *,
+        access_token: str | None = None,
+    ) -> dict:
+        """List messages in a chat (group or P2P).
+
+        GET /open-apis/im/v1/messages
+        start_time/end_time are Unix timestamps in seconds (string).
+        """
+        token = access_token or await self.get_tenant_access_token(app_id, app_secret)
+        params: dict[str, str | int] = {
+            "container_id_type": "chat",
+            "container_id": chat_id,
+            "sort_type": sort_type,
+            "page_size": page_size,
+        }
+        if start_time:
+            params["start_time"] = start_time
+        if end_time:
+            params["end_time"] = end_time
+        if page_token:
+            params["page_token"] = page_token
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(
+                "https://open.feishu.cn/open-apis/im/v1/messages",
+                params=params,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            return resp.json()
+
     # --- CardKit Streaming API ---
 
     def _get_lark_client(self, app_id: str, app_secret: str):
