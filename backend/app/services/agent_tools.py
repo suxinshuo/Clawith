@@ -9534,6 +9534,175 @@ async def _feishu_approval_get(agent_id: uuid.UUID, user_id: uuid.UUID, argument
     return f"✅ 审批实例查询结果:\n```json\n{json.dumps(data, ensure_ascii=False, indent=2)}\n```"
 
 
+# ─── Feishu Chat Tools ────────────────────────────────────────────────────────
+
+async def _feishu_chat_search(agent_id: uuid.UUID, user_id: uuid.UUID, arguments: dict, *, session_id: str = "") -> str:
+    """Search for visible Feishu group chats by keyword."""
+    query = (arguments.get("query") or "").strip()
+    if not query:
+        return "❌ Missing required argument 'query'"
+    if len(query) > 64:
+        return "❌ 'query' max 64 characters"
+
+    page_size = max(1, min(int(arguments.get("page_size", 20)), 100))
+
+    app_id, app_secret = await _get_feishu_credentials(agent_id)
+    if not app_id or not app_secret:
+        return "❌ Agent has no Feishu channel configured."
+
+    from app.services.feishu_service import feishu_service
+
+    resp = await _feishu_with_user_fallback(
+        agent_id, user_id,
+        scopes=["im:chat:readonly"],
+        app_call_fn=lambda: feishu_service.search_chats(app_id, app_secret, query, page_size=page_size),
+        user_call_fn=lambda token: feishu_service.search_chats(app_id, app_secret, query, page_size=page_size, access_token=token),
+        session_id=session_id,
+    )
+    if isinstance(resp, str):
+        return resp
+
+    err = _check_feishu_err(resp)
+    if err:
+        return err
+
+    items = resp.get("data", {}).get("items") or []
+    has_more = bool(resp.get("data", {}).get("has_more", False))
+    page_token = resp.get("data", {}).get("page_token", "")
+
+    if not items:
+        return f"🔎 No groups found matching '{query}'. Check the keyword or verify the bot has permission to search groups."
+
+    lines = [f"🔎 Feishu group search results for '{query}' ({len(items)} found):", ""]
+    for idx, item in enumerate(items, start=1):
+        name = item.get("name") or "(unnamed)"
+        chat_id = item.get("chat_id") or ""
+        description = item.get("description") or ""
+        member_count = item.get("user_count") or ""
+        owner_id = item.get("owner_id") or ""
+        lines.append(f"{idx}. **{name}** (chat_id: `{chat_id}`)")
+        if description:
+            lines.append(f"   Description: {description}")
+        if member_count:
+            lines.append(f"   Members: {member_count}")
+        if owner_id:
+            lines.append(f"   Owner: {owner_id}")
+
+    lines.append("")
+    lines.append("💡 Next steps:")
+    lines.append("- Get chat history: `feishu_chat_messages(chat_id=\"...\")`")
+    lines.append("- Send group message: `send_feishu_message(chat_id=\"...\", message=\"...\")`")
+    if has_more and page_token:
+        lines.append("- More results available (has_more=true)")
+
+    return "\n".join(lines)
+
+
+async def _feishu_chat_messages(agent_id: uuid.UUID, user_id: uuid.UUID, arguments: dict, *, session_id: str = "") -> str:
+    """Retrieve historical messages from a Feishu group chat."""
+    chat_id = (arguments.get("chat_id") or "").strip()
+    if not chat_id:
+        return "❌ Missing required argument 'chat_id'. Use feishu_chat_search to get one first."
+
+    page_size = max(1, min(int(arguments.get("page_size", 50)), 50))
+    sort_type = arguments.get("sort_type", "ByCreateTimeDesc")
+    if sort_type not in ("ByCreateTimeAsc", "ByCreateTimeDesc"):
+        sort_type = "ByCreateTimeDesc"
+
+    # Parse optional time range (ISO 8601 → Unix seconds string)
+    start_time_str: str | None = None
+    end_time_str: str | None = None
+    raw_start = (arguments.get("start_time") or "").strip()
+    raw_end = (arguments.get("end_time") or "").strip()
+    if raw_start:
+        try:
+            start_time_str = str(int(_iso_to_ts(raw_start)))
+        except ValueError:
+            return f"❌ Invalid start_time: {raw_start}. Use ISO 8601 format, e.g. 2024-01-15T09:00:00+08:00"
+    if raw_end:
+        try:
+            end_time_str = str(int(_iso_to_ts(raw_end)))
+        except ValueError:
+            return f"❌ Invalid end_time: {raw_end}. Use ISO 8601 format, e.g. 2024-01-15T18:00:00+08:00"
+
+    app_id, app_secret = await _get_feishu_credentials(agent_id)
+    if not app_id or not app_secret:
+        return "❌ Agent has no Feishu channel configured."
+
+    from app.services.feishu_service import feishu_service
+
+    resp = await _feishu_with_user_fallback(
+        agent_id, user_id,
+        scopes=["im:message:readonly"],
+        app_call_fn=lambda: feishu_service.list_chat_messages(
+            app_id, app_secret, chat_id,
+            start_time=start_time_str, end_time=end_time_str,
+            sort_type=sort_type, page_size=page_size,
+        ),
+        user_call_fn=lambda token: feishu_service.list_chat_messages(
+            app_id, app_secret, chat_id,
+            start_time=start_time_str, end_time=end_time_str,
+            sort_type=sort_type, page_size=page_size,
+            access_token=token,
+        ),
+        session_id=session_id,
+    )
+    if isinstance(resp, str):
+        return resp
+
+    err = _check_feishu_err(resp)
+    if err:
+        return err
+
+    items = resp.get("data", {}).get("items") or []
+    has_more = bool(resp.get("data", {}).get("has_more", False))
+    page_token = resp.get("data", {}).get("page_token", "")
+
+    if not items:
+        return "📭 No messages found in this group for the specified time range."
+
+    from datetime import datetime as _dt, timezone as _tz
+
+    lines = [f"📨 Chat messages ({len(items)} messages):", ""]
+    for item in items:
+        msg_type = item.get("msg_type", "unknown")
+        sender = item.get("sender", {})
+        sender_id = sender.get("id", "unknown")
+        sender_type = sender.get("sender_type", "")
+        create_time = item.get("create_time", "")
+
+        # Format timestamp
+        time_display = create_time
+        if create_time:
+            try:
+                ts = int(create_time) / 1000  # Feishu returns milliseconds
+                dt = _dt.fromtimestamp(ts, tz=_tz.utc)
+                time_display = dt.strftime("%m-%d %H:%M")
+            except (ValueError, OSError):
+                pass
+
+        # Extract message content
+        if msg_type == "text":
+            body = item.get("body", {})
+            content_str = body.get("content", "")
+            try:
+                content_data = json.loads(content_str)
+                text = content_data.get("text", content_str)
+            except (json.JSONDecodeError, TypeError):
+                text = content_str
+        else:
+            text = f"[{msg_type}]"
+
+        sender_label = f"{'🤖 ' if sender_type == 'app' else ''}{sender_id}"
+        lines.append(f"{sender_label} | {time_display} | {text}")
+
+    if has_more:
+        lines.append("")
+        lines.append(f"📄 More messages available (has_more=true, page_token={page_token})")
+
+    return "\n".join(lines)
+
+
 # ─── Feishu User Search ───────────────────────────────────────────────────────
 
 async def _feishu_user_search(agent_id: uuid.UUID, arguments: dict) -> str:
