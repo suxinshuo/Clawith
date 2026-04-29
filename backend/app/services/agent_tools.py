@@ -454,9 +454,9 @@ AGENT_TOOLS = [
         "function": {
             "name": "send_feishu_message",
             "description": (
-                "Send a Feishu IM message to a colleague. "
-                "You can provide either the colleague's name "
-                "or their Feishu user_id directly. "
+                "Send a Feishu IM message to a colleague or a group chat. "
+                "For individuals: provide member_name or user_id. "
+                "For groups: provide chat_id (from feishu_chat_search) or chat_name (auto-searched). "
                 "To contact digital employees use send_message_to_agent instead."
             ),
             "parameters": {
@@ -464,11 +464,19 @@ AGENT_TOOLS = [
                 "properties": {
                     "member_name": {
                         "type": "string",
-                        "description": "Recipient's name, e.g. '覃睿'. Will be looked up automatically.",
+                        "description": "Recipient's name, e.g. '张三'. Will be looked up automatically.",
                     },
                     "user_id": {
                         "type": "string",
                         "description": "Recipient's Feishu user_id (preferred, tenant-stable). Get from feishu_user_search.",
+                    },
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Group chat_id (from feishu_chat_search). Mutually exclusive with member_name/user_id.",
+                    },
+                    "chat_name": {
+                        "type": "string",
+                        "description": "Group name to search for. The tool auto-resolves it to a chat_id.",
                     },
                     "message": {
                         "type": "string",
@@ -1335,6 +1343,71 @@ AGENT_TOOLS = [
             },
         },
     },
+    # ── Feishu Chat Tools ─────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "feishu_chat_search",
+            "description": (
+                "Search for Feishu group chats visible to the bot or user. "
+                "Returns chat_id, name, description, and member count for each matching group. "
+                "Use this to find a group before retrieving its messages or sending to it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search keyword (group name, member name, or pinyin). Max 64 characters.",
+                    },
+                    "page_size": {
+                        "type": "integer",
+                        "description": "Results per page, default 20, max 100.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "feishu_chat_messages",
+            "description": (
+                "Retrieve historical messages from a Feishu group chat. "
+                "Requires chat_id (get it from feishu_chat_search first). "
+                "Only text message content is returned; other types are shown as placeholders like [image], [file]. "
+                "Supports time range filtering and pagination."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Group chat ID (obtained from feishu_chat_search).",
+                    },
+                    "start_time": {
+                        "type": "string",
+                        "description": "Start time in ISO 8601 format (e.g. 2024-01-15T09:00:00+08:00). Optional.",
+                    },
+                    "end_time": {
+                        "type": "string",
+                        "description": "End time in ISO 8601 format. Optional.",
+                    },
+                    "page_size": {
+                        "type": "integer",
+                        "description": "Messages per page, default 50, max 50.",
+                    },
+                    "sort_type": {
+                        "type": "string",
+                        "enum": ["ByCreateTimeAsc", "ByCreateTimeDesc"],
+                        "description": "Sort order. Default ByCreateTimeDesc (newest first).",
+                    },
+                },
+                "required": ["chat_id"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -1696,6 +1769,8 @@ _FEISHU_TOOL_NAMES = {
     "feishu_approval_create",
     "feishu_approval_query",
     "feishu_approval_get",
+    "feishu_chat_search",
+    "feishu_chat_messages",
 }
 _always_core_tools = [t for t in AGENT_TOOLS if t["function"]["name"] in _ALWAYS_INCLUDE_CORE]
 _feishu_tools = [t for t in AGENT_TOOLS if t["function"]["name"] in _FEISHU_TOOL_NAMES]
@@ -2504,6 +2579,11 @@ async def execute_tool(
             result = await _feishu_approval_query(agent_id, user_id, arguments, session_id=session_id)
         elif tool_name == "feishu_approval_get":
             result = await _feishu_approval_get(agent_id, user_id, arguments, session_id=session_id)
+        # ── Feishu Chat Tools ──
+        elif tool_name == "feishu_chat_search":
+            result = await _feishu_chat_search(agent_id, user_id, arguments, session_id=session_id)
+        elif tool_name == "feishu_chat_messages":
+            result = await _feishu_chat_messages(agent_id, user_id, arguments, session_id=session_id)
         # ── Email Tools ──
         elif tool_name in ("send_email", "read_emails", "reply_email"):
             result = await _handle_email_tool(tool_name, agent_id, ws, arguments)
