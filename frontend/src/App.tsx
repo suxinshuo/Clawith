@@ -1,6 +1,7 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from './stores';
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useLayoutEffect, useState, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import { authApi } from './services/api';
 import Login from './pages/Login';
 import ForgotPassword from './pages/ForgotPassword';
@@ -34,13 +35,35 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     return <>{children}</>;
 }
 
+function CompanyAdminRoute({ children }: { children: React.ReactNode }) {
+    const user = useAuthStore((s) => s.user);
+    const canAccessCompanySettings = user?.role === 'platform_admin' || user?.role === 'org_admin' || !!(user as any)?.is_platform_admin;
+    if (!canAccessCompanySettings) return <Navigate to="/" replace />;
+    return <>{children}</>;
+}
+
 /* ─── Notification Bar ─── */
+type NotificationBarConfig = { enabled: boolean; text: string; updated_at?: string | null };
+type NotificationBarUpdateEvent = CustomEvent<NotificationBarConfig>;
+
+const notificationBarClass = 'has-notification-bar';
+const notificationBarRevisionKey = (config: Pick<NotificationBarConfig, 'text' | 'updated_at'>) =>
+    btoa(encodeURIComponent(`${config.text}::${config.updated_at || ''}`));
+const notificationBarSessionDismissKey = (config: Pick<NotificationBarConfig, 'text' | 'updated_at'>) =>
+    `notification_bar_dismissed_session_${notificationBarRevisionKey(config)}`;
+const notificationBarPersistentDismissKey = (config: Pick<NotificationBarConfig, 'text' | 'updated_at'>) =>
+    `notification_bar_dismissed_persistent_${notificationBarRevisionKey(config)}`;
+
 function NotificationBar() {
-    const [config, setConfig] = useState<{ enabled: boolean; text: string } | null>(null);
+    const { i18n } = useTranslation();
+    const isChinese = i18n.language?.startsWith('zh');
+    const [config, setConfig] = useState<NotificationBarConfig | null>(null);
     const [dismissed, setDismissed] = useState(false);
+    const [showDismissMenu, setShowDismissMenu] = useState(false);
     
     const textRef = useRef<HTMLSpanElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
+    const dismissMenuRef = useRef<HTMLDivElement>(null);
     const [isMarquee, setIsMarquee] = useState(false);
 
     useEffect(() => {
@@ -50,23 +73,61 @@ function NotificationBar() {
             .catch(() => { });
     }, []);
 
+    useEffect(() => {
+        const handleUpdate = (event: Event) => {
+            const next = (event as NotificationBarUpdateEvent).detail;
+            if (!next) return;
+            setConfig(next);
+            setShowDismissMenu(false);
+            if (next.text) {
+                const persistentKey = notificationBarPersistentDismissKey(next);
+                const sessionKey = notificationBarSessionDismissKey(next);
+                setDismissed(!!localStorage.getItem(persistentKey) || !!sessionStorage.getItem(sessionKey));
+            } else {
+                setDismissed(false);
+            }
+            if (!next.enabled || !next.text) {
+                document.body.classList.remove(notificationBarClass);
+            }
+        };
+
+        window.addEventListener('notification-bar-updated', handleUpdate);
+        return () => window.removeEventListener('notification-bar-updated', handleUpdate);
+    }, []);
+
     // Check sessionStorage for dismissal (keyed by text so new messages re-show)
     useEffect(() => {
         if (config?.text) {
-            const key = `notification_bar_dismissed_${btoa(encodeURIComponent(config.text))}`;
-            if (sessionStorage.getItem(key)) setDismissed(true);
+            const persistentKey = notificationBarPersistentDismissKey(config);
+            const sessionKey = notificationBarSessionDismissKey(config);
+            setDismissed(!!localStorage.getItem(persistentKey) || !!sessionStorage.getItem(sessionKey));
         }
-    }, [config?.text]);
+    }, [config?.text, config?.updated_at]);
+
+    useEffect(() => {
+        if (!showDismissMenu) return;
+        const handleClickOutside = (event: MouseEvent) => {
+            const target = event.target as Node;
+            if (dismissMenuRef.current?.contains(target)) return;
+            setShowDismissMenu(false);
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, [showDismissMenu]);
 
     // Manage body class: add when visible, remove when hidden or dismissed
     const isVisible = !!config?.enabled && !!config?.text && !dismissed;
-    useEffect(() => {
+    useLayoutEffect(() => {
+        document.documentElement.style.setProperty('--notification-bar-height', isVisible ? '32px' : '0px');
         if (isVisible) {
-            document.body.classList.add('has-notification-bar');
+            document.body.classList.add(notificationBarClass);
         } else {
-            document.body.classList.remove('has-notification-bar');
+            document.body.classList.remove(notificationBarClass);
         }
-        return () => { document.body.classList.remove('has-notification-bar'); };
+        return () => {
+            document.body.classList.remove(notificationBarClass);
+            document.documentElement.style.setProperty('--notification-bar-height', '0px');
+        };
     }, [isVisible]);
 
     // Dynamic marquee if text is too wide
@@ -89,10 +150,22 @@ function NotificationBar() {
 
     if (!isVisible) return null;
 
-    const handleDismiss = () => {
-        const key = `notification_bar_dismissed_${btoa(encodeURIComponent(config!.text))}`;
+    const dismissForSession = () => {
+        if (!config) return;
+        const key = notificationBarSessionDismissKey(config);
         sessionStorage.setItem(key, '1');
+        document.body.classList.remove(notificationBarClass);
         setDismissed(true);
+        setShowDismissMenu(false);
+    };
+
+    const dismissPersistently = () => {
+        if (!config) return;
+        const key = notificationBarPersistentDismissKey(config);
+        localStorage.setItem(key, '1');
+        document.body.classList.remove(notificationBarClass);
+        setDismissed(true);
+        setShowDismissMenu(false);
     };
 
     // Calculate dynamic duration: longer text = longer animation so speed is consistent
@@ -110,7 +183,26 @@ function NotificationBar() {
                     {config!.text}
                 </span>
             </div>
-            <button className="notification-bar-close" onClick={handleDismiss} aria-label="Close">✕</button>
+            <div className="notification-bar-close-wrap" ref={dismissMenuRef}>
+                <button
+                    className="notification-bar-close"
+                    onClick={() => setShowDismissMenu(v => !v)}
+                    aria-label="Close"
+                    aria-expanded={showDismissMenu}
+                >
+                    ✕
+                </button>
+                {showDismissMenu && (
+                    <div className="notification-bar-dismiss-menu">
+                        <button type="button" onClick={dismissForSession}>
+                            {isChinese ? '仅本次关闭' : 'Close for now'}
+                        </button>
+                        <button type="button" onClick={dismissPersistently}>
+                            {isChinese ? '不再显示' : 'Do not show again'}
+                        </button>
+                    </div>
+                )}
+            </div>
         </div>
     );
 }
@@ -190,11 +282,11 @@ export default function App() {
                     <Route path="dashboard" element={<Dashboard />} />
                     <Route path="plaza" element={<Plaza />} />
                     <Route path="agents/new" element={<AgentCreate />} />
-                    <Route path="agents/:id" element={<AgentDetail />} />
-                    {/* NOTE: Chat is a tab inside AgentDetail (#chat), not a separate route.
-                        The deprecated /agents/:id/chat path is intentionally removed. */}
+                    <Route path="agents/:id" element={<Navigate to="chat" replace />} />
+                    <Route path="agents/:id/chat" element={<AgentDetail />} />
+                    <Route path="agents/:id/settings" element={<AgentDetail />} />
                     <Route path="messages" element={<Messages />} />
-                    <Route path="enterprise" element={<EnterpriseSettings />} />
+                    <Route path="enterprise" element={<CompanyAdminRoute><EnterpriseSettings /></CompanyAdminRoute>} />
                     <Route path="okr" element={<OKR />} />
                     <Route path="external-connections" element={<ExternalConnections />} />
                     <Route path="invitations" element={<InvitationCodes />} />

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { IconAlertTriangle, IconWorld } from '@tabler/icons-react';
 import { useAuthStore } from '../stores';
 import { tenantApi, authApi } from '../services/api';
 
@@ -53,19 +54,35 @@ export default function CompanySetup() {
         } catch { return null; }
     };
 
+    const applyTenantSetupResult = async (result: any) => {
+        const nextTenantId = result?.tenant?.id ? String(result.tenant.id) : '';
+        if (result?.access_token) {
+            localStorage.setItem('token', result.access_token);
+            if (nextTenantId) {
+                localStorage.setItem('current_tenant_id', nextTenantId);
+                window.dispatchEvent(new StorageEvent('storage', { key: 'current_tenant_id', newValue: nextTenantId }));
+            }
+            const me = await authApi.me();
+            setAuth(me, result.access_token);
+            return me;
+        }
+        if (nextTenantId) {
+            localStorage.setItem('current_tenant_id', nextTenantId);
+            window.dispatchEvent(new StorageEvent('storage', { key: 'current_tenant_id', newValue: nextTenantId }));
+        }
+        return refreshUser();
+    };
+
     const handleJoin = async (e: React.FormEvent) => {
         e.preventDefault();
         setError('');
         setLoading(true);
         try {
-            await tenantApi.join(inviteCode);
+            const result = await tenantApi.join(inviteCode);
+            await applyTenantSetupResult(result);
             if (fromRegister) {
-                // In registration flow: refresh user then go to verify email
-                await refreshUser();
                 navigate('/verify-email', { state: { email: registerEmail || user?.email, fromRegister: true } });
             } else {
-                // Normal flow: refresh user and go home
-                await refreshUser();
                 navigate('/');
             }
         } catch (err: any) {
@@ -80,14 +97,11 @@ export default function CompanySetup() {
         setError('');
         setLoading(true);
         try {
-            await tenantApi.selfCreate({ name: companyName });
+            const result = await tenantApi.selfCreate({ name: companyName });
+            await applyTenantSetupResult(result);
             if (fromRegister) {
-                // In registration flow: refresh user then go to verify email
-                await refreshUser();
                 navigate('/verify-email', { state: { email: registerEmail || user?.email, fromRegister: true } });
             } else {
-                // Normal flow: refresh user and go to Enterprise Settings
-                await refreshUser();
                 navigate('/enterprise');
             }
         } catch (err: any) {
@@ -120,7 +134,7 @@ export default function CompanySetup() {
                 background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)',
                 zIndex: 101,
             }} onClick={toggleLang}>
-                🌐
+                <IconWorld size={44} stroke={1.6} />
             </div>
 
             <div className="company-setup-container">
@@ -134,7 +148,7 @@ export default function CompanySetup() {
 
                 {error && (
                     <div className="login-error" style={{ marginBottom: 16 }}>
-                        <span>⚠</span> {error}
+                        <span><IconAlertTriangle size={14} stroke={1.8} /></span> {error}
                     </div>
                 )}
 

@@ -14,13 +14,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.permissions import build_visible_agents_query, check_agent_access, is_agent_creator
 from app.core.security import get_current_user
 from app.database import get_db
-from app.models.agent import Agent, AgentPermission
+from app.models.agent import Agent, AgentPermission, AgentTemplate
 from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.user import User
 from app.schemas.schemas import AgentCreate, AgentOut, AgentUpdate
+from app.services.access_relationships import ensure_access_granted_platform_relationships
 
 router = APIRouter(prefix="/agents", tags=["agents"])
+
+
+async def _get_active_admin_users(db: AsyncSession, tenant_id: uuid.UUID | None) -> list[User]:
+    if not tenant_id:
+        return []
+    result = await db.execute(
+        select(User).where(
+            User.tenant_id == tenant_id,
+            User.is_active == True,  # noqa: E712
+            User.role.in_(["platform_admin", "org_admin"]),
+        )
+    )
+    return result.scalars().all()
 
 
 def _serialize_dt(value: datetime | None) -> str | None:
@@ -95,12 +109,16 @@ async def _lazy_reset_token_counters(agent: Agent, db: AsyncSession) -> bool:
     last_daily = agent.last_daily_reset
     if last_daily is None or last_daily.date() < now.date():
         agent.tokens_used_today = 0
+        agent.cache_read_tokens_today = 0
+        agent.cache_creation_tokens_today = 0
         agent.last_daily_reset = now
         changed = True
 
     last_monthly = agent.last_monthly_reset
     if last_monthly is None or (last_monthly.year, last_monthly.month) < (now.year, now.month):
         agent.tokens_used_month = 0
+        agent.cache_read_tokens_month = 0
+        agent.cache_creation_tokens_month = 0
         agent.last_monthly_reset = now
         changed = True
 
@@ -169,9 +187,39 @@ async def list_templates(
             "soul_template": t.soul_template,
             "default_skills": t.default_skills,
             "default_autonomy_policy": t.default_autonomy_policy,
+            "capability_bullets": t.capability_bullets or [],
+            "has_bootstrap": bool(t.bootstrap_content),
         }
         for t in templates
     ]
+
+
+async def _agent_to_out(
+    db: AsyncSession,
+    agent: Agent,
+    viewer_id: uuid.UUID,
+) -> AgentOut:
+    """Serialize one agent with ``onboarded_for_me`` for the given viewer."""
+    from app.services.onboarding import is_onboarded
+    model = AgentOut.model_validate(agent)
+    model.onboarded_for_me = await is_onboarded(db, agent.id, viewer_id)
+    return model
+
+
+async def _agents_to_out(
+    db: AsyncSession,
+    agents: list[Agent],
+    viewer_id: uuid.UUID,
+) -> list[AgentOut]:
+    """List variant that fetches all junction rows in one query."""
+    from app.services.onboarding import onboarded_agent_ids
+    onboarded = await onboarded_agent_ids(db, viewer_id, [a.id for a in agents])
+    out: list[AgentOut] = []
+    for a in agents:
+        model = AgentOut.model_validate(a)
+        model.onboarded_for_me = a.id in onboarded
+        out.append(model)
+    return out
 
 
 @router.get("/", response_model=list[AgentOut])
@@ -204,7 +252,14 @@ async def list_agents(
     if needs_flush:
         await db.commit()
     unread_by_agent = await _build_unread_count_by_agent(db, agents, current_user)
-    return [_serialize_agent_out(a, unread_by_agent.get(str(a.id), 0)) for a in agents]
+    from app.services.onboarding import onboarded_agent_ids
+    onboarded = await onboarded_agent_ids(db, current_user.id, [a.id for a in agents])
+    out: list[AgentOut] = []
+    for a in agents:
+        model = _serialize_agent_out(a, unread_by_agent.get(str(a.id), 0))
+        model.onboarded_for_me = a.id in onboarded
+        out.append(model)
+    return out
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
@@ -221,9 +276,9 @@ async def create_agent(
     except QuotaExceeded as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=e.message)
 
-    # Calculate expiry time
+    # A TTL of 0 or less means the agent never expires.
     from datetime import datetime, timedelta, timezone as tz
-    expires_at = datetime.now(tz.utc) + timedelta(hours=current_user.quota_agent_ttl_hours or 48)
+    ttl_hours = current_user.quota_agent_ttl_hours
 
     # Determine target tenant: normally user's tenant; admins can override via payload
     target_tenant_id = current_user.tenant_id
@@ -231,23 +286,30 @@ async def create_agent(
         target_tenant_id = data.tenant_id
 
     # Get default limits from target tenant
-    max_llm_calls = 100
+    max_llm_calls = 1000
     default_max_triggers = 20
     default_min_poll = 5
     default_webhook_rate = 5
     default_heartbeat_interval = 240  # model default
+    tenant_default_model_id = None
     if target_tenant_id:
         from app.models.tenant import Tenant
         tenant_result = await db.execute(select(Tenant).where(Tenant.id == target_tenant_id))
         tenant = tenant_result.scalar_one_or_none()
         if tenant:
-            max_llm_calls = tenant.default_max_llm_calls_per_day or 100
+            ttl_hours = tenant.default_agent_ttl_hours
+            max_llm_calls = tenant.default_max_llm_calls_per_day or 1000
             default_max_triggers = tenant.default_max_triggers or 20
             default_min_poll = tenant.min_poll_interval_floor or 5
             default_webhook_rate = tenant.max_webhook_rate_ceiling or 5
+            tenant_default_model_id = tenant.default_model_id
             # Enforce heartbeat floor: new agents must respect company minimum
             if tenant.min_heartbeat_interval_minutes and tenant.min_heartbeat_interval_minutes > default_heartbeat_interval:
                 default_heartbeat_interval = tenant.min_heartbeat_interval_minutes
+
+    # If the caller didn't pick a model, fall back to the tenant's default.
+    effective_primary_model_id = data.primary_model_id or tenant_default_model_id
+    expires_at = datetime.now(tz.utc) + timedelta(hours=ttl_hours) if ttl_hours and ttl_hours > 0 else None
 
     agent = Agent(
         name=data.name,
@@ -257,7 +319,7 @@ async def create_agent(
         creator_id=current_user.id,
         tenant_id=target_tenant_id,
         agent_type=data.agent_type or "native",
-        primary_model_id=data.primary_model_id,
+        primary_model_id=effective_primary_model_id,
         fallback_model_id=data.fallback_model_id,
         max_tokens_per_day=data.max_tokens_per_day,
         max_tokens_per_month=data.max_tokens_per_month,
@@ -286,19 +348,28 @@ async def create_agent(
 
     # Set permissions
     access_level = data.permission_access_level if data.permission_access_level in ("use", "manage") else "use"
-    if data.permission_scope_type not in ("company", "user"):
+    if data.permission_scope_type not in ("company", "user", "custom"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported permission_scope_type")
     if data.permission_scope_type == "company":
+        agent.access_mode = "company"
+        agent.company_access_level = access_level
         db.add(AgentPermission(agent_id=agent.id, scope_type="company", access_level=access_level))
     elif data.permission_scope_type == "user":
+        agent.access_mode = "private"
+        agent.company_access_level = access_level
         if data.permission_scope_ids:
             for scope_id in data.permission_scope_ids:
                 db.add(AgentPermission(agent_id=agent.id, scope_type="user", scope_id=scope_id, access_level=access_level))
         else:
             # "仅自己" — insert creator as the only permitted user
             db.add(AgentPermission(agent_id=agent.id, scope_type="user", scope_id=current_user.id, access_level="manage"))
+    elif data.permission_scope_type == "custom":
+        agent.access_mode = "custom"
+        agent.company_access_level = access_level
+        db.add(AgentPermission(agent_id=agent.id, scope_type="user", scope_id=current_user.id, access_level="manage"))
 
     await db.flush()
+    await ensure_access_granted_platform_relationships(db, agent, created_by_user_id=current_user.id)
 
     # For OpenClaw agents: skip file system and container setup, generate API key
     if agent.agent_type == "openclaw":
@@ -312,7 +383,8 @@ async def create_agent(
             await hook_new_agent(db, agent.id, agent.tenant_id)
             await db.commit()
 
-        out = AgentOut.model_validate(agent).model_dump()
+        out_model = await _agent_to_out(db, agent, current_user.id)
+        out = out_model.model_dump()
         out["api_key"] = raw_key  # Return once on creation
         return out
 
@@ -323,19 +395,40 @@ async def create_agent(
         personality=data.personality,
         boundaries=data.boundaries,
     )
+    from app.api.relationships import _regenerate_relationships_file
+    await _regenerate_relationships_file(db, agent.id)
 
     # Copy selected skills + mandatory default skills into agent workspace
     from app.models.skill import Skill
     from sqlalchemy.orm import selectinload
 
-    # Always include default skills
+    # Always include global default skills (mcp-installer, skill-creator,
+    # complex-task-executor)
     default_result = await db.execute(
         select(Skill).where(Skill.is_default)
     )
     default_ids = {s.id for s in default_result.scalars().all()}
 
-    # Merge user-selected + default skill IDs
-    all_skill_ids = set(data.skill_ids or []) | default_ids
+    # Include the template's declared default skills (e.g. trading templates
+    # ship with `market-data` / `financial-calendar` in their meta.yaml).
+    # Without this, the SKILL.md never reaches `<agent_dir>/skills/<folder>/`,
+    # so the agent has no idea those MCP-backed skills exist and silently
+    # falls back to web search.
+    template_skill_ids: set = set()
+    if data.template_id:
+        tpl_r = await db.execute(
+            select(AgentTemplate).where(AgentTemplate.id == data.template_id)
+        )
+        tpl = tpl_r.scalar_one_or_none()
+        folder_names = list((tpl.default_skills if tpl else None) or [])
+        if folder_names:
+            tpl_skills_r = await db.execute(
+                select(Skill).where(Skill.folder_name.in_(folder_names))
+            )
+            template_skill_ids = {s.id for s in tpl_skills_r.scalars().all()}
+
+    # Merge user-selected + global default + template-default skill IDs
+    all_skill_ids = set(data.skill_ids or []) | default_ids | template_skill_ids
 
     if all_skill_ids:
         agent_dir = agent_manager._agent_dir(agent.id)
@@ -358,11 +451,51 @@ async def create_agent(
                 file_path.parent.mkdir(parents=True, exist_ok=True)
                 file_path.write_text(sf.content, encoding="utf-8")
 
+    # Auto-install template-declared MCP servers using the system Smithery key.
+    # For trading agents, this means shibui/finance lands in the agent's tool
+    # list at creation time rather than relying on the agent to install it on
+    # first use via the MCP_INSTALLER skill (which depends on LLM compliance).
+    # Failures are logged and swallowed — agent creation must not fail because
+    # an external Smithery call did.
+    template_mcp_servers = list((tpl.default_mcp_servers if data.template_id and tpl else None) or [])
+    if template_mcp_servers:
+        # Commit the in-flight transaction first so the agent row exists in
+        # the database when import_mcp_from_smithery opens its own session
+        # to insert AgentTool rows. Without this commit the FK to agents.id
+        # is invisible to the parallel session and we get a FK violation.
+        await db.commit()
+        await db.refresh(agent)
+
+        from loguru import logger
+        from app.services.resource_discovery import import_mcp_from_smithery
+        for server_id in template_mcp_servers:
+            try:
+                result_msg = await import_mcp_from_smithery(
+                    server_id=server_id,
+                    agent_id=agent.id,
+                    config={},  # falls back to system Smithery key
+                )
+                if result_msg.startswith("❌"):
+                    logger.warning(
+                        f"[create_agent] MCP pre-install for '{server_id}' "
+                        f"on agent {agent.id} reported error: {result_msg[:200]}"
+                    )
+                else:
+                    logger.info(
+                        f"[create_agent] MCP pre-install '{server_id}' "
+                        f"succeeded for agent {agent.id}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"[create_agent] MCP pre-install for '{server_id}' "
+                    f"on agent {agent.id} raised: {e}"
+                )
+
     if agent.agent_type == "openclaw":
-        # Start container
+        # Start container for OpenClaw edge node
         await agent_manager.start_container(db, agent)
     else:
-        # Native Agent. No container needs to be started
+        # Native Agent. No container needs to be started.
         agent.status = "idle"
         agent.last_active_at = datetime.now(timezone.utc)
     await db.flush()
@@ -372,7 +505,7 @@ async def create_agent(
         await hook_new_agent(db, agent.id, agent.tenant_id)
         await db.commit()
 
-    return AgentOut.model_validate(agent)
+    return await _agent_to_out(db, agent, current_user.id)
 
 
 @router.get("/{agent_id}")
@@ -386,7 +519,8 @@ async def get_agent(
     # Lazy reset token counters
     if await _lazy_reset_token_counters(agent, db):
         await db.commit()
-    out = AgentOut.model_validate(agent).model_dump()
+    out_model = await _agent_to_out(db, agent, current_user.id)
+    out = out_model.model_dump()
     out["access_level"] = access_level
 
     # Resolve creator username (one extra query, only on detail page).
@@ -424,32 +558,88 @@ async def get_agent_permissions(
     db: AsyncSession = Depends(get_db),
 ):
     """Get agent permission scope."""
-    agent, _access = await check_agent_access(db, current_user, agent_id)
+    agent, access_level = await check_agent_access(db, current_user, agent_id)
     result = await db.execute(select(AgentPermission).where(AgentPermission.agent_id == agent_id))
     perms = result.scalars().all()
+    can_manage = access_level == "manage"
+    is_owner = is_agent_creator(current_user, agent)
+    access_mode = getattr(agent, "access_mode", None) or "company"
 
     if not perms:
-        return {"scope_type": "user", "scope_ids": [], "access_level": "manage" if is_agent_creator(current_user, agent) else "use", "is_owner": is_agent_creator(current_user, agent)}
+        return {
+            "scope_type": access_mode,
+            "scope_ids": [],
+            "user_access": [],
+            "access_level": "manage" if is_owner else "use",
+            "effective_access_level": access_level,
+            "can_manage": can_manage,
+            "is_owner": is_owner,
+            "creator_id": str(agent.creator_id) if agent.creator_id else None,
+        }
 
-    scope_type = perms[0].scope_type
-    scope_ids = [str(p.scope_id) for p in perms if p.scope_id]
-    perm_access_level = perms[0].access_level or "use"
+    scope_type = access_mode
+    scope_ids = [str(p.scope_id) for p in perms if p.scope_type == "user" and p.scope_id]
+    perm_access_level = getattr(agent, "company_access_level", None) or next(
+        (p.access_level for p in perms if p.scope_type == "company"),
+        "use",
+    )
 
     # Resolve names for display
     scope_names = []
-    if scope_type == "user":
-        for sid in scope_ids:
-            r = await db.execute(select(User).where(User.id == uuid.UUID(sid)))
-            u = r.scalar_one_or_none()
-            if u:
-                scope_names.append({"id": sid, "name": u.display_name or u.username})
+    user_access = []
+    display_user_ids = {uuid.UUID(sid) for sid in scope_ids}
+    if access_mode == "custom":
+        if agent.creator_id:
+            display_user_ids.add(agent.creator_id)
+        display_user_ids.update(admin.id for admin in await _get_active_admin_users(db, agent.tenant_id))
+
+    if display_user_ids:
+        users_result = await db.execute(select(User).where(User.id.in_(display_user_ids)))
+        users_by_id = {str(u.id): u for u in users_result.scalars().all()}
+        access_by_user_id = {
+            str(perm.scope_id): (perm.access_level or "use")
+            for perm in perms
+            if perm.scope_type == "user" and perm.scope_id
+        }
+        ordered_user_ids = [str(uid) for uid in display_user_ids]
+        ordered_user_ids.sort(key=lambda sid: (users_by_id.get(sid).display_name or users_by_id.get(sid).username or "") if users_by_id.get(sid) else "")
+        for perm in perms:
+            if perm.scope_type != "user" or not perm.scope_id:
+                continue
+            sid = str(perm.scope_id)
+            if sid not in ordered_user_ids:
+                ordered_user_ids.append(sid)
+
+        for sid in ordered_user_ids:
+            u = users_by_id.get(sid)
+            if not u:
+                continue
+            is_creator = agent.creator_id == u.id
+            is_admin = u.role in ("platform_admin", "org_admin")
+            is_required = access_mode == "custom" and (is_creator or is_admin)
+            item = {
+                "id": sid,
+                "name": u.display_name or u.username,
+                "username": u.username,
+                "email": u.email,
+                "role": u.role,
+                "access_level": "manage" if is_required else access_by_user_id.get(sid, "use"),
+                "is_required": is_required,
+                "required_reason": "creator" if is_creator else "company_admin" if is_admin else None,
+            }
+            scope_names.append({"id": sid, "name": item["name"]})
+            user_access.append(item)
 
     return {
         "scope_type": scope_type,
         "scope_ids": scope_ids,
         "scope_names": scope_names,
+        "user_access": user_access,
         "access_level": perm_access_level,
-        "is_owner": is_agent_creator(current_user, agent),
+        "effective_access_level": access_level,
+        "can_manage": can_manage,
+        "is_owner": is_owner,
+        "creator_id": str(agent.creator_id) if agent.creator_id else None,
     }
 
 
@@ -461,17 +651,20 @@ async def update_agent_permissions(
     db: AsyncSession = Depends(get_db),
 ):
     """Update agent permission scope (owner or platform_admin only)."""
-    agent, _access = await check_agent_access(db, current_user, agent_id)
-    if not is_agent_creator(current_user, agent):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only owner or admin can change permissions")
+    agent, access_level = await check_agent_access(db, current_user, agent_id)
+    if access_level != "manage":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only manager can change permissions")
 
     scope_type = data.get("scope_type", "company")
     scope_ids = data.get("scope_ids", [])
+    user_access = data.get("user_access", [])
     access_level = data.get("access_level", "use")
     if access_level not in ("use", "manage"):
         access_level = "use"
-    if scope_type not in ("company", "user"):
+    if scope_type not in ("company", "user", "private", "custom"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported scope_type")
+    if scope_type == "user":
+        scope_type = "private"
 
     # Delete existing permissions
     from sqlalchemy import delete as sql_delete
@@ -479,17 +672,99 @@ async def update_agent_permissions(
 
     # Insert new permissions
     if scope_type == "company":
+        agent.access_mode = "company"
+        agent.company_access_level = access_level
         db.add(AgentPermission(agent_id=agent_id, scope_type="company", access_level=access_level))
-    elif scope_type == "user":
-        if scope_ids:
-            for sid in scope_ids:
-                db.add(AgentPermission(agent_id=agent_id, scope_type="user", scope_id=uuid.UUID(sid), access_level=access_level))
-        else:
-            # "仅自己"
-            db.add(AgentPermission(agent_id=agent_id, scope_type="user", scope_id=current_user.id, access_level="manage"))
+    elif scope_type == "private":
+        agent.access_mode = "private"
+        agent.company_access_level = access_level
+        # "Only me" means private to the agent creator, even when an org admin
+        # is managing a company-visible agent created by someone else.
+        db.add(AgentPermission(agent_id=agent_id, scope_type="user", scope_id=agent.creator_id or current_user.id, access_level="manage"))
+    elif scope_type == "custom":
+        agent.access_mode = "custom"
+        agent.company_access_level = access_level
+        seen_user_ids: set[uuid.UUID] = set()
+        creator_id = agent.creator_id or current_user.id
+        required_manager_ids = {creator_id}
+        required_manager_ids.update(admin.id for admin in await _get_active_admin_users(db, agent.tenant_id))
+        for item in user_access:
+            sid = item.get("id") or item.get("user_id")
+            if not sid:
+                continue
+            uid = uuid.UUID(str(sid))
+            if uid in seen_user_ids:
+                continue
+            lvl = item.get("access_level", "use")
+            if lvl not in ("use", "manage"):
+                lvl = "use"
+            if uid in required_manager_ids:
+                lvl = "manage"
+            seen_user_ids.add(uid)
+            db.add(AgentPermission(agent_id=agent_id, scope_type="user", scope_id=uid, access_level=lvl))
+        for sid in scope_ids:
+            uid = uuid.UUID(str(sid))
+            if uid not in seen_user_ids:
+                seen_user_ids.add(uid)
+                db.add(AgentPermission(
+                    agent_id=agent_id,
+                    scope_type="user",
+                    scope_id=uid,
+                    access_level="manage" if uid in required_manager_ids else access_level,
+                ))
+        for uid in required_manager_ids:
+            if uid not in seen_user_ids:
+                db.add(AgentPermission(agent_id=agent_id, scope_type="user", scope_id=uid, access_level="manage"))
+
+    await db.flush()
+    relationships_changed = await ensure_access_granted_platform_relationships(
+        db,
+        agent,
+        created_by_user_id=current_user.id,
+    )
+    if relationships_changed:
+        from app.api.relationships import _regenerate_relationships_file
+        await _regenerate_relationships_file(db, agent_id)
 
     await db.commit()
     return {"status": "ok"}
+
+
+@router.get("/{agent_id}/permissions/candidates")
+async def get_agent_permission_candidates(
+    agent_id: uuid.UUID,
+    search: str | None = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return platform users that can be granted custom access."""
+    agent, access_level = await check_agent_access(db, current_user, agent_id)
+    if access_level != "manage":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only manager can change permissions")
+
+    user_query = select(User).where(User.tenant_id == agent.tenant_id, User.is_active == True)
+    if search:
+        pattern = f"%{search}%"
+        user_query = user_query.where(
+            (User.username.ilike(pattern)) |
+            (User.display_name.ilike(pattern)) |
+            (User.email.ilike(pattern))
+        )
+
+    users_result = await db.execute(user_query.order_by(User.created_at.asc()).limit(50))
+    users = users_result.scalars().all()
+    return {
+        "users": [
+            {
+                "id": str(u.id),
+                "name": u.display_name or u.username,
+                "username": u.username,
+                "email": u.email,
+            }
+            for u in users
+        ],
+        "agents": [],
+    }
 
 
 @router.patch("/{agent_id}", response_model=AgentOut)
@@ -581,7 +856,8 @@ async def update_agent(
                 p.avatar_url = agent.avatar_url
             await db.flush()
 
-    out = AgentOut.model_validate(agent).model_dump()
+    out_model = await _agent_to_out(db, agent, current_user.id)
+    out = out_model.model_dump()
     if clamped_fields:
         out["_clamped_fields"] = clamped_fields
     return out
@@ -705,14 +981,14 @@ async def start_agent(
     db: AsyncSession = Depends(get_db),
 ):
     """Start an agent's container."""
-    agent, _access = await check_agent_access(db, current_user, agent_id)
-    if not is_agent_creator(current_user, agent):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only creator can start agent")
+    agent, access_level = await check_agent_access(db, current_user, agent_id)
+    if access_level != "manage":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only manager can start agent")
 
     from app.services.agent_manager import agent_manager
     await agent_manager.start_container(db, agent)
     await db.flush()
-    return AgentOut.model_validate(agent)
+    return await _agent_to_out(db, agent, current_user.id)
 
 
 @router.post("/{agent_id}/stop", response_model=AgentOut)
@@ -722,14 +998,14 @@ async def stop_agent(
     db: AsyncSession = Depends(get_db),
 ):
     """Stop an agent's container."""
-    agent, _access = await check_agent_access(db, current_user, agent_id)
-    if not is_agent_creator(current_user, agent):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only creator can stop agent")
+    agent, access_level = await check_agent_access(db, current_user, agent_id)
+    if access_level != "manage":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only manager can stop agent")
 
     from app.services.agent_manager import agent_manager
     await agent_manager.stop_container(agent)
     await db.flush()
-    return AgentOut.model_validate(agent)
+    return await _agent_to_out(db, agent, current_user.id)
 
 
 # ─── Agent-Level Approvals ──────────────────────────────

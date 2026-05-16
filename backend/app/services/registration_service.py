@@ -552,7 +552,7 @@ class RegistrationService:
         return None
 
     async def ensure_web_org_member(self, db: AsyncSession, user: User):
-        """Ensure the user has a dedicated Web OrgMember record in their tenant."""
+        """Ensure the user has a dedicated platform OrgMember record in their tenant."""
         if not user.tenant_id:
             return None
 
@@ -562,8 +562,10 @@ class RegistrationService:
             db,
             "web",
             user.tenant_id,
-            name="Web",
+            name="Platform",
         )
+        if web_provider.name == "Web":
+            web_provider.name = "Platform"
 
         result = await db.execute(
             select(OrgMember).where(
@@ -607,7 +609,7 @@ class RegistrationService:
                 email=user.email,
                 phone=user.primary_mobile,
                 provider_id=web_provider.id,
-                title="Web User",
+                title="Platform User",
                 tenant_id=user.tenant_id,
                 user_id=user.id,
                 status="active",
@@ -622,8 +624,8 @@ class RegistrationService:
             member.email = user.email
         if member.phone != user.primary_mobile:
             member.phone = user.primary_mobile
-        if member.title != "Web User":
-            member.title = "Web User"
+        if member.title in (None, "", "Web User"):
+            member.title = "Platform User"
 
         await db.flush()
 
@@ -646,7 +648,9 @@ class RegistrationService:
             return
 
         from app.models.org import OrgMember
-        web_provider = await self.ensure_identity_provider(db, "web", user.tenant_id, name="Web")
+        web_provider = await self.ensure_identity_provider(db, "web", user.tenant_id, name="Platform")
+        if web_provider.name == "Web":
+            web_provider.name = "Platform"
 
         result = await db.execute(
             select(OrgMember).where(

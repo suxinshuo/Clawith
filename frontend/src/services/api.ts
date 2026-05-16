@@ -198,6 +198,12 @@ export const tenantApi = {
 
     resolveByDomain: (domain: string) =>
         request<any>(`/tenants/resolve-by-domain?domain=${encodeURIComponent(domain)}`),
+
+    me: () =>
+        request<{ id: string; name: string; default_model_id: string | null; [k: string]: any }>('/tenants/me'),
+
+    tokenUsage: () =>
+        request<any>('/tenants/me/token-usage'),
 };
 
 export const adminApi = {
@@ -347,6 +353,33 @@ export const fileApi = {
     },
 };
 
+export type FocusApiItem = {
+    id: string;
+    agent_id: string;
+    key: string;
+    description: string;
+    status: 'in_progress' | 'completed';
+    kind: 'normal' | 'system';
+    source: string;
+    metadata?: Record<string, any>;
+    sort_order: number;
+    completed_at?: string | null;
+    created_at?: string | null;
+    updated_at?: string | null;
+};
+
+// ─── Focus ───────────────────────────────────────────
+export const focusApi = {
+    list: (agentId: string, includeCompleted = true) =>
+        request<FocusApiItem[]>(`/agents/${agentId}/focus/?include_completed=${includeCompleted ? 'true' : 'false'}`),
+
+    upsert: (agentId: string, data: { key?: string; description: string; status?: string; kind?: string; source?: string; metadata?: Record<string, any> }) =>
+        request<FocusApiItem>(`/agents/${agentId}/focus/`, { method: 'POST', body: JSON.stringify(data) }),
+
+    complete: (agentId: string, key: string) =>
+        request<FocusApiItem>(`/agents/${agentId}/focus/${encodeURIComponent(key)}/complete`, { method: 'POST' }),
+};
+
 // ─── Channel Config ───────────────────────────────────
 export const channelApi = {
     get: (agentId: string) =>
@@ -371,6 +404,9 @@ export const enterpriseApi = {
         const tid = localStorage.getItem('current_tenant_id');
         return request<any[]>(`/enterprise/llm-models${tid ? `?tenant_id=${tid}` : ''}`);
     },
+
+    setDefaultModel: (modelId: string) =>
+        request<void>(`/enterprise/llm-models/${modelId}/set-default`, { method: 'POST' }),
     templates: () => request<any[]>('/agents/templates'),
 
     // Enterprise Knowledge Base

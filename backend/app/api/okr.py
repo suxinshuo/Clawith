@@ -88,13 +88,14 @@ async def _sync_okr_agent_relationships(db, tenant_id: uuid.UUID, okr_agent_id: 
             description="OKR tracking — auto-linked via Sync Relationships",
         ))
 
-    # 3. Link all company-visible non-system agents as collaborators
+    # 3. Link all company-visible non-system agents as collaborators.
     agent_result = await db.execute(
         select(Agent.id).where(
             Agent.tenant_id == tenant_id,
             Agent.id != okr_agent_id,
             Agent.is_system == False,  # noqa: E712
             Agent.status.notin_(["stopped", "error"]),
+            Agent.access_mode == "company",
         )
     )
     for (agent_id,) in agent_result.fetchall():
@@ -131,6 +132,14 @@ async def _sync_okr_report_triggers(db, settings: OKRSettings) -> None:
         return
 
     from app.models.trigger import AgentTrigger
+    from app.services.focus_service import ensure_focus_item
+
+    system_focus_ref = await ensure_focus_item(
+        settings.okr_agent_id,
+        focus_ref="system:okr_reports",
+        description="OKR 自动汇总、日报收集与周期报告",
+        system=True,
+    )
 
     daily_hour, daily_minute = 18, 0
     try:
@@ -167,6 +176,7 @@ async def _sync_okr_report_triggers(db, settings: OKRSettings) -> None:
                 reason=reason,
                 cooldown_seconds=3600,
                 is_system=True,
+                focus_ref=system_focus_ref,
                 is_enabled=is_enabled,
             )
             db.add(trigger)
@@ -175,6 +185,7 @@ async def _sync_okr_report_triggers(db, settings: OKRSettings) -> None:
         trigger.config = config
         trigger.reason = reason
         trigger.is_enabled = is_enabled
+        trigger.focus_ref = trigger.focus_ref or system_focus_ref
         return trigger
 
     _ensure_trigger(

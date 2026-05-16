@@ -26,6 +26,8 @@ from app.services.channel_user_service import channel_user_service
 WECHAT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"
 WECHAT_CHANNEL_VERSION = "1.0.0"
 WECHAT_TEXT_LIMIT = 2000
+WECHAT_CONTEXT_CACHE_KEY = "recent_context_tokens"
+WECHAT_CONTEXT_CACHE_LIMIT = 100
 
 
 class WeChatSessionExpiredError(RuntimeError):
@@ -104,8 +106,73 @@ async def send_wechat_text_message(
                     },
                 },
             )
+            data = resp.json()
             if resp.status_code >= 400:
                 raise RuntimeError(f"WeChat sendmessage failed: {resp.text[:300]}")
+            ret = data.get("ret", 0)
+            errcode = data.get("errcode", 0)
+            if ret not in (0, None) or errcode not in (0, None):
+                raise RuntimeError(data.get("errmsg") or f"WeChat sendmessage failed: ret={ret}, errcode={errcode}")
+
+
+def update_wechat_context_cache(
+    extra_config: dict[str, Any] | None,
+    *,
+    from_user_id: str,
+    context_token: str,
+    conv_id: str,
+) -> dict[str, Any]:
+    extra = dict(extra_config or {})
+    cache = dict(extra.get(WECHAT_CONTEXT_CACHE_KEY) or {})
+    cache[from_user_id] = {
+        "context_token": context_token,
+        "conv_id": conv_id,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if len(cache) > WECHAT_CONTEXT_CACHE_LIMIT:
+        ordered = sorted(
+            cache.items(),
+            key=lambda item: str((item[1] or {}).get("updated_at") or ""),
+            reverse=True,
+        )
+        cache = dict(ordered[:WECHAT_CONTEXT_CACHE_LIMIT])
+    extra[WECHAT_CONTEXT_CACHE_KEY] = cache
+    return extra
+
+
+def get_wechat_context_entry(
+    extra_config: dict[str, Any] | None,
+    *,
+    from_user_id: str,
+) -> dict[str, Any] | None:
+    cache = dict((extra_config or {}).get(WECHAT_CONTEXT_CACHE_KEY) or {})
+    entry = cache.get(from_user_id)
+    return entry if isinstance(entry, dict) else None
+
+
+async def remember_wechat_context(
+    db,
+    *,
+    agent_id: uuid.UUID,
+    from_user_id: str,
+    context_token: str,
+    conv_id: str,
+) -> None:
+    config_result = await db.execute(
+        select(ChannelConfig).where(
+            ChannelConfig.agent_id == agent_id,
+            ChannelConfig.channel_type == "wechat",
+        )
+    )
+    config = config_result.scalar_one_or_none()
+    if not config:
+        return
+    config.extra_config = update_wechat_context_cache(
+        config.extra_config,
+        from_user_id=from_user_id,
+        context_token=context_token,
+        conv_id=conv_id,
+    )
 
 
 def _extract_wechat_text(item_list: list[dict[str, Any]] | None) -> str:
@@ -165,6 +232,13 @@ async def _process_wechat_message(agent_id: uuid.UUID, msg: dict[str, Any], conf
             first_message_title=user_text,
         )
         session_conv_id = str(sess.id)
+        await remember_wechat_context(
+            db,
+            agent_id=agent_id,
+            from_user_id=from_user_id,
+            context_token=context_token,
+            conv_id=conv_id,
+        )
 
         history_r = await db.execute(
             select(ChatMessage)

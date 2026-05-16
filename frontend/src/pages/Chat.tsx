@@ -1,14 +1,16 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useParams } from 'react-router-dom';
 import MarkdownRenderer from '../components/MarkdownRenderer';
 import AgentBayLivePanel, { LivePreviewState } from '../components/AgentBayLivePanel';
-import { agentApi, enterpriseApi, uploadFileWithProgress } from '../services/api';
+import ModelSwitcher from '../components/ModelSwitcher';
+import { agentApi, enterpriseApi, tenantApi, uploadFileWithProgress } from '../services/api';
 import { IconPaperclip, IconSend } from '@tabler/icons-react';
 import { formatFileSize } from '../utils/formatFileSize';
 import { useAuthStore } from '../stores';
 import { useDropZone } from '../hooks/useDropZone';
+import { useToast } from '../components/Toast/ToastProvider';
 
 /* ── Inline SVG Icons ── */
 const Icons = {
@@ -63,8 +65,8 @@ if (typeof document !== 'undefined' && !document.getElementById(PULSE_STYLE_ID))
     s.id = PULSE_STYLE_ID;
     s.textContent = `
         @keyframes cw-pulse-led {
-            0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 0 0 rgba(99,102,241,0.6); }
-            50%       { opacity: 0.55; transform: scale(1.5); box-shadow: 0 0 0 4px rgba(99,102,241,0); }
+            0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 0 0 rgba(107,114,128,0.45); }
+            50%       { opacity: 0.55; transform: scale(1.5); box-shadow: 0 0 0 4px rgba(107,114,128,0); }
         }
         .cw-running-led { animation: cw-pulse-led 1.4s ease-in-out infinite; }
     `;
@@ -89,8 +91,8 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
     return (
         <div style={{
             borderRadius: '8px',
-            background: 'rgba(99,102,241,0.06)',
-            border: `1px solid ${isRunning ? 'rgba(99,102,241,0.32)' : 'rgba(99,102,241,0.18)'}`,
+            background: isRunning ? 'color-mix(in srgb, var(--bg-secondary) 72%, var(--bg-primary))' : 'var(--bg-primary)',
+            border: `1px solid ${isRunning ? 'var(--border-default)' : 'var(--border-subtle)'}`,
             fontSize: '12px',
             overflow: 'hidden',
             marginBottom: '6px',
@@ -103,13 +105,13 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                     background: 'none', border: 'none', cursor: 'pointer',
                     width: '100%', display: 'flex', alignItems: 'center', gap: '6px',
                     padding: '7px 10px',
-                    color: 'var(--accent-text, #818cf8)',
+                    color: 'var(--text-secondary)',
                 }}
             >
                 {/* Left label: title + running-tool indicator */}
                 <span style={{ flex: 1, textAlign: 'left', display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
-                    <span style={{ fontWeight: 500, flexShrink: 0 }}>{t('agent.chat.toolCallChain')}</span>
-                    <span style={{ color: 'rgba(99,102,241,0.4)', flexShrink: 0 }}>·</span>
+                    <span style={{ fontWeight: 500, flexShrink: 0, color: 'var(--text-primary)' }}>{t('agent.chat.toolCallChain')}</span>
+                    <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>·</span>
                     {isRunning && activeTool ? (
                         <>
                             {/* Pulse LED: breathing dot while a tool runs */}
@@ -119,7 +121,7 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                                     display: 'inline-block',
                                     width: '6px', height: '6px',
                                     borderRadius: '50%',
-                                    background: '#818cf8',
+                                    background: 'var(--text-tertiary)',
                                     flexShrink: 0,
                                 }}
                             />
@@ -127,7 +129,7 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                             <span style={{
                                 fontFamily: 'var(--font-mono)',
                                 fontSize: '11px',
-                                color: '#a5b4fc',
+                                color: 'var(--text-secondary)',
                                 overflow: 'hidden',
                                 textOverflow: 'ellipsis',
                                 whiteSpace: 'nowrap',
@@ -150,7 +152,7 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
 
                 {/* Count badge */}
                 <span style={{
-                    background: 'rgba(99,102,241,0.18)', color: '#818cf8',
+                    background: 'var(--bg-secondary)', color: 'var(--text-secondary)',
                     borderRadius: '10px', padding: '1px 7px',
                     fontSize: '10px', fontWeight: 600, flexShrink: 0,
                 }}>
@@ -173,10 +175,10 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                         const running = !tc.result;
                         return (
                             <span key={i} style={{
-                                background: running ? 'rgba(99,102,241,0.14)' : 'rgba(99,102,241,0.08)',
-                                border: `1px solid ${running ? 'rgba(99,102,241,0.28)' : 'rgba(99,102,241,0.14)'}`,
+                                background: running ? 'var(--bg-secondary)' : 'var(--bg-primary)',
+                                border: '1px solid var(--border-subtle)',
                                 borderRadius: '4px', padding: '1px 6px',
-                                fontSize: '10px', color: running ? '#818cf8' : '#a5b4fc',
+                                fontSize: '10px', color: 'var(--text-secondary)',
                                 fontFamily: 'var(--font-mono)',
                                 display: 'inline-flex', alignItems: 'center', gap: '4px',
                             }}>
@@ -187,7 +189,7 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                                             display: 'inline-block',
                                             width: '4px', height: '4px',
                                             borderRadius: '50%',
-                                            background: '#818cf8',
+                                            background: 'var(--text-tertiary)',
                                             flexShrink: 0,
                                         }}
                                     />
@@ -201,13 +203,13 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
 
             {/* ── Expanded: each tool's full detail row ── */}
             {expanded && (
-                <div style={{ borderTop: '1px solid rgba(99,102,241,0.15)' }}>
+                <div style={{ borderTop: '1px solid var(--border-subtle)' }}>
                     {toolCalls.map((tc, i) => {
                         const running = !tc.result;
                         return (
                             <div key={i} style={{
                                 padding: '7px 10px',
-                                borderBottom: i < toolCalls.length - 1 ? '1px solid rgba(99,102,241,0.10)' : 'none',
+                                borderBottom: i < toolCalls.length - 1 ? '1px solid var(--border-subtle)' : 'none',
                             }}>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '4px' }}>
                                     {/* Status dot: amber + pulse = running; green = done */}
@@ -221,7 +223,7 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                                             flexShrink: 0,
                                         }}
                                     />
-                                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: '#818cf8', fontWeight: 600 }}>
+                                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text-secondary)', fontWeight: 600 }}>
                                         {tc.name}
                                     </span>
                                     {running && (
@@ -235,7 +237,7 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                                         fontFamily: 'var(--font-mono)', fontSize: '10px',
                                         color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap',
                                         wordBreak: 'break-all', maxHeight: '80px', overflowY: 'auto',
-                                        background: 'rgba(0,0,0,0.12)', borderRadius: '4px',
+                                        background: 'var(--bg-secondary)', borderRadius: '4px',
                                         padding: '4px 6px', marginBottom: tc.result ? '4px' : 0,
                                     }}>
                                         {JSON.stringify(tc.args, null, 2)}
@@ -246,7 +248,7 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                                         fontSize: '10px', color: 'var(--text-secondary)',
                                         whiteSpace: 'pre-wrap', wordBreak: 'break-all',
                                         maxHeight: '80px', overflowY: 'auto',
-                                        borderTop: '1px solid rgba(99,102,241,0.10)', paddingTop: '4px',
+                                        borderTop: '1px solid var(--border-subtle)', paddingTop: '4px',
                                     }}>
                                         {tc.result.length > 500 ? tc.result.slice(0, 500) + '…' : tc.result}
                                     </div>
@@ -261,7 +263,8 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
 }
 
 export default function Chat() {
-    const { t } = useTranslation();
+    const { t, i18n } = useTranslation();
+    const toast = useToast();
     const { id } = useParams<{ id: string }>();
     const token = useAuthStore((s) => s.token);
     const [messages, setMessages] = useState<Message[]>([]);
@@ -281,18 +284,63 @@ export default function Chat() {
     const [wsSessionId, setWsSessionId] = useState<string>('');
     const wsRef = useRef<WebSocket | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const messagesContainerRef = useRef<HTMLDivElement>(null);
+    const isNearBottomRef = useRef(true);
+    const userPinnedAwayFromBottomRef = useRef(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
     // Ref to the chat textarea for direct DOM height manipulation
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const pendingToolCalls = useRef<ToolCall[]>([]);
     const streamContent = useRef('');
     const thinkingContent = useRef('');
+    // Track history load + whether we've already fired the one-shot onboarding
+    // trigger so the agent greets the user at most once per mount.
+    const historyLoaded = useRef(false);
+    const onboardingKickoffSent = useRef(false);
 
     const { data: agent } = useQuery({
         queryKey: ['agent', id],
         queryFn: () => agentApi.get(id!),
         enabled: !!id,
     });
+
+    // Tenant default model — used to render the "默认" tag and as a visual
+    // fallback when an agent has no explicit primary model.
+    const { data: myTenant } = useQuery({
+        queryKey: ['tenant', 'me'],
+        queryFn: () => tenantApi.me(),
+        staleTime: 5 * 60 * 1000,
+    });
+
+    // Chat-side selected model. Source-of-truth is agent.primary_model_id;
+    // the picker mirrors it bidirectionally:
+    //   - User picks model in chat → handleModelChange PATCHes the agent.
+    //   - Agent's saved default changes elsewhere (settings page, tenant
+    //     default migration) → useEffect below pulls the new value in.
+    // Also re-syncs when wsSessionId changes so "new conversation" lands
+    // on the agent's current default rather than a stale prior pick.
+    const queryClient = useQueryClient();
+    const [overrideModelId, setOverrideModelId] = useState<string | null>(null);
+    useEffect(() => {
+        if (agent?.primary_model_id && agent.primary_model_id !== overrideModelId) {
+            setOverrideModelId(agent.primary_model_id);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [agent?.primary_model_id, wsSessionId]);
+
+    const handleModelChange = useCallback(async (newModelId: string | null) => {
+        // Optimistic UI: update local state immediately so the dropdown
+        // closes / reflects the choice without waiting on the server.
+        setOverrideModelId(newModelId);
+        if (!id || !newModelId || newModelId === agent?.primary_model_id) return;
+        try {
+            await agentApi.update(id, { primary_model_id: newModelId });
+            queryClient.invalidateQueries({ queryKey: ['agent', id] });
+        } catch (e) {
+            // Roll back local state on failure so the picker shows reality.
+            setOverrideModelId(agent?.primary_model_id || null);
+        }
+    }, [id, agent?.primary_model_id, queryClient]);
 
     const { data: llmModels = [] } = useQuery({
         queryKey: ['llm-models'],
@@ -397,8 +445,29 @@ export default function Chat() {
                     setMessages(processed);
                 }
             })
-            .catch(() => { /* ignore */ });
+            .catch(() => { /* ignore */ })
+            .finally(() => { historyLoaded.current = true; });
     }, [id, token]);
+
+    // Per-(user, agent) onboarding kickoff: if this viewer has never been
+    // onboarded to this agent and the conversation is empty, fire a tagged
+    // trigger the backend treats as "agent greets first" — no visible user
+    // bubble, no DB write for the placeholder turn. One-shot per mount.
+    useEffect(() => {
+        if (onboardingKickoffSent.current) return;
+        if (!connected || !wsRef.current) return;
+        if (!agent || agent.onboarded_for_me !== false) return;
+        if (!historyLoaded.current) return;
+        if (messages.length > 0) return;
+        onboardingKickoffSent.current = true;
+        setIsWaiting(true);
+        setStreaming(true);
+        wsRef.current.send(JSON.stringify({
+            content: '',
+            kind: 'onboarding_trigger',
+            model_id: overrideModelId,
+        }));
+    }, [connected, agent, messages.length, overrideModelId]);
 
     useEffect(() => {
         if (!id || !token) return;
@@ -408,7 +477,8 @@ export default function Chat() {
         const connect = () => {
             if (cancelled) return;
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${window.location.host}/ws/chat/${id}?token=${token}`;
+            const lang = (i18n.language || 'en').toLowerCase().startsWith('zh') ? 'zh' : 'en';
+            const wsUrl = `${protocol}//${window.location.host}/ws/chat/${id}?token=${token}&lang=${lang}`;
             const ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
@@ -615,8 +685,31 @@ export default function Chat() {
         }
     }, [connected]);
 
+    const handleMessagesScroll = () => {
+        const el = messagesContainerRef.current;
+        if (!el) return;
+        const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+        isNearBottomRef.current = distFromBottom < 120;
+        userPinnedAwayFromBottomRef.current = distFromBottom > 220;
+    };
+
+    const handleMessagesWheelCapture = (event: React.WheelEvent<HTMLDivElement>) => {
+        const el = messagesContainerRef.current;
+        if (!el) return;
+        if (event.deltaY < 0 && el.scrollTop > 0) {
+            userPinnedAwayFromBottomRef.current = true;
+            isNearBottomRef.current = false;
+        }
+    };
+
     useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        if (userPinnedAwayFromBottomRef.current || !isNearBottomRef.current) return;
+        const el = messagesContainerRef.current;
+        if (!el) return;
+        requestAnimationFrame(() => {
+            if (userPinnedAwayFromBottomRef.current) return;
+            el.scrollTop = el.scrollHeight;
+        });
     }, [messages]);
 
     const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -646,7 +739,7 @@ export default function Chat() {
             });
         } catch (err: any) {
             if (err?.message !== 'Upload cancelled') {
-                alert(t('agent.upload.failed') + (err?.message ? `: ${err.message}` : ''));
+                toast.error(t('agent.upload.failed'), { details: String(err?.message || '') });
             }
         } finally {
             if (previewUrl) URL.revokeObjectURL(previewUrl);
@@ -663,6 +756,8 @@ export default function Chat() {
         pendingToolCalls.current = [];
         streamContent.current = '';
         thinkingContent.current = '';
+        userPinnedAwayFromBottomRef.current = false;
+        isNearBottomRef.current = true;
         setIsWaiting(true);
         setStreaming(true);
 
@@ -703,7 +798,7 @@ export default function Chat() {
             imageUrl: attachedFile?.imageUrl,
             timestamp: new Date().toISOString(),
         }]);
-        wsRef.current.send(JSON.stringify({ content: contentForLLM, display_content: userMsg, file_name: attachedFile?.name || '' }));
+        wsRef.current.send(JSON.stringify({ content: contentForLLM, display_content: userMsg, file_name: attachedFile?.name || '', model_id: overrideModelId }));
         setInput('');
         setAttachedFile(null);
     };
@@ -750,7 +845,7 @@ export default function Chat() {
             });
         } catch (err: any) {
             if (err?.message !== 'Upload cancelled') {
-                alert(t('agent.upload.failed') + (err?.message ? `: ${err.message}` : ''));
+                toast.error(t('agent.upload.failed'), { details: String(err?.message || '') });
             }
         } finally {
             if (previewUrl) URL.revokeObjectURL(previewUrl);
@@ -784,13 +879,18 @@ export default function Chat() {
                 {/* Drop overlay */}
                 {isChatDragging && (
                     <div className="drop-zone-overlay">
-                        <div className="drop-zone-overlay__icon">📎</div>
+                        <div className="drop-zone-overlay__icon"><IconPaperclip size={28} stroke={1.8} /></div>
                         <div className="drop-zone-overlay__text">{t('agent.upload.dropToAttach', 'Drop file to attach')}</div>
                     </div>
                 )}
                 {/* Wrap chat area in a column so it coexists with the live panel in flex-row */}
                 <div className="chat-main">
-                <div className="chat-messages">
+                <div
+                    ref={messagesContainerRef}
+                    className="chat-messages"
+                    onScroll={handleMessagesScroll}
+                    onWheelCapture={handleMessagesWheelCapture}
+                >
                     {messages.length === 0 && (
                         <div style={{ textAlign: 'center', padding: '60px', color: 'var(--text-tertiary)' }}>
                             <div style={{ marginBottom: '12px', display: 'flex', justifyContent: 'center' }}>{Icons.chat}</div>
@@ -824,29 +924,17 @@ export default function Chat() {
                                             <img src={msg.imageUrl} alt={msg.fileName} style={{ maxWidth: '240px', maxHeight: '180px', borderRadius: '8px', border: '1px solid var(--border-subtle)' }} />
                                         </div>);
                                     }
-                                    const fi = fe === 'pdf' ? '\uD83D\uDCC4' : (fe === 'csv' || fe === 'xlsx' || fe === 'xls') ? '\uD83D\uDCCA' : (fe === 'docx' || fe === 'doc') ? '\uD83D\uDCDD' : '\uD83D\uDCCE';
-                                    return (<div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', background: 'rgba(0,0,0,0.08)', borderRadius: '6px', padding: '4px 8px', marginBottom: msg.content ? '4px' : '0', fontSize: '11px', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}><span>{fi}</span><span style={{ fontWeight: 500, color: 'var(--text-primary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{msg.fileName}</span></div>);
+                                    return (<div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', background: 'rgba(0,0,0,0.08)', borderRadius: '6px', padding: '4px 8px', marginBottom: msg.content ? '4px' : '0', fontSize: '11px', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}><IconPaperclip size={13} stroke={1.8} /><span style={{ fontWeight: 500, color: 'var(--text-primary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{msg.fileName}</span></div>);
                                 })()}
                                 {msg.thinking && (
-                                    <details style={{
-                                        marginBottom: '8px', fontSize: '12px',
-                                        background: 'rgba(147, 130, 220, 0.08)', borderRadius: '6px',
-                                        border: '1px solid rgba(147, 130, 220, 0.15)',
-                                    }}>
-                                        <summary style={{
-                                            padding: '6px 10px', cursor: 'pointer',
-                                            color: 'rgba(147, 130, 220, 0.9)', fontWeight: 500,
-                                            userSelect: 'none', display: 'flex', alignItems: 'center', gap: '4px',
-                                        }}>
-                                            Thinking
+                                    <details className="thinking-panel">
+                                        <summary className="thinking-summary">
+                                            <span className="thinking-status-dot" />
+                                            {streaming && i === messages.length - 1 && !msg.content
+                                                ? t('agent.chat.thinkingLabel', '思考中')
+                                                : t('agent.chat.thoughtLabel', '已思考')}
                                         </summary>
-                                        <div style={{
-                                            padding: '4px 10px 8px',
-                                            fontSize: '12px', lineHeight: '1.6',
-                                            color: 'var(--text-secondary)',
-                                            whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                                            maxHeight: '300px', overflow: 'auto',
-                                        }}>
+                                        <div className="thinking-content">
                                             {msg.thinking}
                                         </div>
                                     </details>
@@ -855,7 +943,7 @@ export default function Chat() {
                                     <ChatToolChain toolCalls={msg.toolCalls} />
                                 )}
                                 {msg.role === 'assistant' ? (
-                                    streaming && !msg.content && i === messages.length - 1 ? (
+                                    streaming && !msg.content && !msg.thinking && i === messages.length - 1 ? (
                                         <div className="thinking-indicator">
                                             <div className="thinking-dots">
                                                 <span /><span /><span />
@@ -866,7 +954,7 @@ export default function Chat() {
                                         <MarkdownRenderer content={msg.content} />
                                     )
                                 ) : (
-                                    <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
+                                    <MarkdownRenderer content={msg.content} />
                                 )}
                                 {msg.timestamp && (
                                     <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px', opacity: 0.7 }}>
@@ -965,6 +1053,13 @@ export default function Chat() {
                             >
                                 <IconPaperclip size={16} stroke={1.75} />
                             </button>
+                            <ModelSwitcher
+                                value={overrideModelId}
+                                onChange={handleModelChange}
+                                tenantDefaultId={myTenant?.default_model_id || null}
+                                disabled={!connected}
+                            />
+                            <div style={{ flex: 1 }} />
                             {(streaming || isWaiting) ? (
                                 <button
                                     type="button"

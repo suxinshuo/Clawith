@@ -244,7 +244,12 @@ async def list_sessions(
                 unread_counts[str(row[0])] = int(row[1] or 0)
 
         for session in sessions:
+            # Hide truly empty / orphan sessions. Onboarding sessions have zero
+            # user messages (the agent greets first) but do have assistant
+            # turns, so count ALL messages here — not just user ones.
             count = total_counts.get(str(session.id), 0)
+            if count == 0:
+                continue
             out.append(SessionOut(
                 id=str(session.id),
                 agent_id=str(session.agent_id),
@@ -421,6 +426,7 @@ async def get_session_messages(
                 entry["toolArgs"] = data.get("args")
                 entry["toolStatus"] = data.get("status", "done")
                 entry["toolResult"] = data.get("result", "")
+                entry["toolThinking"] = data.get("reasoning_content", "")
             except Exception:
                 pass
             if sender_name:

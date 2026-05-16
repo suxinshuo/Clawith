@@ -4,6 +4,15 @@ import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '../stores';
 import { authApi, tenantApi, fetchJson } from '../services/api';
 import type { TokenResponse } from '../types';
+import {
+    IconAlertTriangle,
+    IconArrowRight,
+    IconBuildingCommunity,
+    IconCheck,
+    IconDatabase,
+    IconLanguage,
+    IconUsersGroup,
+} from '@tabler/icons-react';
 
 export default function Login() {
     const { t, i18n } = useTranslation();
@@ -282,21 +291,21 @@ export default function Login() {
                     <p className="login-hero-desc" dangerouslySetInnerHTML={{ __html: t('login.hero.description') }} />
                     <div className="login-hero-features">
                         <div className="login-hero-feature">
-                            <span className="login-hero-feature-icon">🤖</span>
+                            <span className="login-hero-feature-icon"><IconUsersGroup size={20} stroke={1.8} /></span>
                             <div>
                                 <div className="login-hero-feature-title">{t('login.hero.features.multiAgent.title')}</div>
                                 <div className="login-hero-feature-desc">{t('login.hero.features.multiAgent.description')}</div>
                             </div>
                         </div>
                         <div className="login-hero-feature">
-                            <span className="login-hero-feature-icon">🧠</span>
+                            <span className="login-hero-feature-icon"><IconDatabase size={20} stroke={1.8} /></span>
                             <div>
                                 <div className="login-hero-feature-title">{t('login.hero.features.persistentMemory.title')}</div>
                                 <div className="login-hero-feature-desc">{t('login.hero.features.persistentMemory.description')}</div>
                             </div>
                         </div>
                         <div className="login-hero-feature">
-                            <span className="login-hero-feature-icon">🏛️</span>
+                            <span className="login-hero-feature-icon"><IconBuildingCommunity size={20} stroke={1.8} /></span>
                             <div>
                                 <div className="login-hero-feature-title">{t('login.hero.features.agentPlaza.title')}</div>
                                 <div className="login-hero-feature-desc">{t('login.hero.features.agentPlaza.description')}</div>
@@ -308,19 +317,16 @@ export default function Login() {
 
             {/* ── Right: Form Panel ── */}
             <div className="login-form-panel">
-                {/* Language Switcher */}
-                <div style={{
-                    position: 'absolute', top: '16px', right: '16px',
-                    cursor: 'pointer', fontSize: '13px', color: 'var(--text-secondary)',
-                    display: 'flex', alignItems: 'center', gap: '4px',
-                    padding: '6px 12px', borderRadius: '8px',
-                    background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)',
-                    zIndex: 101,
-                }} onClick={toggleLang}>
-                    🌐
-                </div>
-
                 <div className="login-form-wrapper">
+                    <button
+                        type="button"
+                        className="login-language-switcher"
+                        onClick={toggleLang}
+                        aria-label={t('common.switchLanguage', 'Switch language')}
+                        title={t('common.switchLanguage', 'Switch language')}
+                    >
+                        <span className="login-language-switcher-icon" aria-hidden="true"><IconLanguage size={16} stroke={1.8} /></span>
+                    </button>
                     {checkingEmail ? (
                         // While resolving invitation email, show a minimal loading indicator
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '200px', gap: '16px' }}>
@@ -343,7 +349,7 @@ export default function Login() {
 
                     {error && (
                         <div className="login-error">
-                            <span>⚠</span> {error}
+                            <IconAlertTriangle size={16} stroke={1.8} /> {error}
                         </div>
                     )}
 
@@ -360,7 +366,7 @@ export default function Login() {
                             gap: '8px',
                             border: '1px solid rgba(34, 197, 94, 0.2)',
                         }}>
-                            <span>✓</span> {successMessage}
+                            <IconCheck size={16} stroke={1.8} /> {successMessage}
                         </div>
                     )}
 
@@ -476,7 +482,7 @@ export default function Login() {
                             ) : (
                                 <>
                                     {isRegister ? t('auth.register') : t('auth.login')}
-                                    <span style={{ marginLeft: '6px' }}>→</span>
+                                    <IconArrowRight size={17} stroke={1.9} style={{ marginLeft: '6px' }} />
                                 </>
                             )}
                         </button>
@@ -502,8 +508,11 @@ export default function Login() {
                                 padding: '32px',
                                 maxWidth: '400px',
                                 width: '90%',
+                                maxHeight: 'min(620px, calc(100vh - 64px))',
                                 border: '1px solid rgba(255, 255, 255, 0.12)',
                                 boxShadow: '0 0 0 1px rgba(255,255,255,0.04), 0 32px 80px rgba(0,0,0,0.7)',
+                                display: 'flex',
+                                flexDirection: 'column',
                             }}>
                                 <h3 style={{ fontSize: '18px', fontWeight: 700, marginBottom: '8px', color: 'rgba(255,255,255,0.95)' }}>
                                     {t('auth.selectOrganization', '选择公司')}
@@ -511,7 +520,15 @@ export default function Login() {
                                 <p style={{ fontSize: '13px', color: 'rgba(255,255,255,0.42)', marginBottom: '20px', lineHeight: '1.5' }}>
                                     {t('auth.multiTenantPrompt', '该邮箱对应多个公司，请选择要登录的公司：')}
                                 </p>
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                <div style={{
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: '8px',
+                                    maxHeight: '216px',
+                                    overflowY: 'auto',
+                                    paddingRight: '4px',
+                                    marginRight: '-4px',
+                                }}>
                                     {tenantSelection.map((tenant: any) => (
                                         <button
                                             key={tenant.tenant_id}
@@ -540,52 +557,53 @@ export default function Login() {
                                             {tenant.tenant_name} {tenant.tenant_slug && `(${tenant.tenant_slug})`}
                                         </button>
                                     ))}
-                                    {/* Create or Join Organization */}
-                                    <button
-                                        onClick={async () => {
-                                            // Log in with the first tenant to get a valid token, then redirect to company setup
-                                            try {
-                                                setLoading(true);
-                                                const firstTenant = tenantSelection[0];
-                                                const res = await authApi.login({
-                                                    login_identifier: form.login_identifier,
-                                                    password: form.password,
-                                                    tenant_id: firstTenant.tenant_id,
-                                                });
-                                                const tokenRes = res as TokenResponse;
-                                                setAuth(tokenRes.user, tokenRes.access_token);
-                                                setTenantSelection(null);
-                                                navigate('/setup-company?from=tenant-selection');
-                                            } catch (err: any) {
-                                                setError(err.message || 'Failed');
-                                                setTenantSelection(null);
-                                            } finally {
-                                                setLoading(false);
-                                            }
-                                        }}
-                                        style={{
-                                            padding: '12px 16px',
-                                            borderRadius: '10px',
-                                            border: '1px dashed rgba(255,255,255,0.15)',
-                                            background: 'transparent',
-                                            color: 'rgba(255,255,255,0.38)',
-                                            fontSize: '14px',
-                                            cursor: 'pointer',
-                                            textAlign: 'left',
-                                            transition: 'border-color 0.15s, color 0.15s',
-                                        }}
-                                        onMouseEnter={e => {
-                                            (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgba(255,255,255,0.28)';
-                                            (e.currentTarget as HTMLButtonElement).style.color = 'rgba(255,255,255,0.6)';
-                                        }}
-                                        onMouseLeave={e => {
-                                            (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgba(255,255,255,0.15)';
-                                            (e.currentTarget as HTMLButtonElement).style.color = 'rgba(255,255,255,0.38)';
-                                        }}
-                                    >
-                                        {t('auth.createOrJoinOrganization', 'Create or Join Organization')}
-                                    </button>
                                 </div>
+                                {/* Create or Join Organization */}
+                                <button
+                                    onClick={async () => {
+                                        // Log in with the first tenant to get a valid token, then redirect to company setup
+                                        try {
+                                            setLoading(true);
+                                            const firstTenant = tenantSelection[0];
+                                            const res = await authApi.login({
+                                                login_identifier: form.login_identifier,
+                                                password: form.password,
+                                                tenant_id: firstTenant.tenant_id,
+                                            });
+                                            const tokenRes = res as TokenResponse;
+                                            setAuth(tokenRes.user, tokenRes.access_token);
+                                            setTenantSelection(null);
+                                            navigate('/setup-company?from=tenant-selection');
+                                        } catch (err: any) {
+                                            setError(err.message || 'Failed');
+                                            setTenantSelection(null);
+                                        } finally {
+                                            setLoading(false);
+                                        }
+                                    }}
+                                    style={{
+                                        marginTop: '8px',
+                                        padding: '12px 16px',
+                                        borderRadius: '10px',
+                                        border: '1px dashed rgba(255,255,255,0.15)',
+                                        background: 'transparent',
+                                        color: 'rgba(255,255,255,0.38)',
+                                        fontSize: '14px',
+                                        cursor: 'pointer',
+                                        textAlign: 'left',
+                                        transition: 'border-color 0.15s, color 0.15s',
+                                    }}
+                                    onMouseEnter={e => {
+                                        (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgba(255,255,255,0.28)';
+                                        (e.currentTarget as HTMLButtonElement).style.color = 'rgba(255,255,255,0.6)';
+                                    }}
+                                    onMouseLeave={e => {
+                                        (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgba(255,255,255,0.15)';
+                                        (e.currentTarget as HTMLButtonElement).style.color = 'rgba(255,255,255,0.38)';
+                                    }}
+                                >
+                                    {t('auth.createOrJoinOrganization', 'Create or Join Organization')}
+                                </button>
                                 <button
                                     onClick={() => setTenantSelection(null)}
                                     style={{
