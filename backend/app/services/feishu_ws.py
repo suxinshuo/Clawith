@@ -43,6 +43,8 @@ def _make_no_proxy_connect(orig_connect):
 
         def __init__(self, *args, **kwargs):
             kwargs.setdefault("proxy", None)
+            kwargs.setdefault("ping_interval", None)
+            kwargs.setdefault("ping_timeout", None)
             self._coro = orig_connect(*args, **kwargs)
             self._ws = None
 
