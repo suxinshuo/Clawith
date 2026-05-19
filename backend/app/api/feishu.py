@@ -1704,7 +1704,12 @@ async def _call_agent_llm(
     from app.models.agent import DEFAULT_CONTEXT_WINDOW_SIZE
     ctx_size = agent.context_window_size or DEFAULT_CONTEXT_WINDOW_SIZE
     if history:
-        messages.extend(_normalize_history_messages(history)[-ctx_size:])
+        # Drop leading orphan tool messages so [-ctx_size:] never starts mid-pair
+        # (Anthropic rejects a tool_result whose tool_use was sliced off).
+        _truncated = _normalize_history_messages(history)[-ctx_size:]
+        while _truncated and _truncated[0].get("role") == "tool":
+            _truncated.pop(0)
+        messages.extend(_truncated)
     messages.append({"role": "user", "content": user_text})
 
     # Use actual user_id so the system prompt knows who it's chatting with
