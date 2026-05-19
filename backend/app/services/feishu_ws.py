@@ -250,10 +250,11 @@ class FeishuWSManager:
             app_id,
             app_secret,
             event_handler=event_handler,
-            log_level=lark.LogLevel.INFO,
+            log_level=lark.LogLevel.DEBUG,
             auto_reconnect=True,
         )
         self._clients[agent_id] = client
+        logger.info(f"===> [Feishu WS] Instantiated client for agent {agent_id}, app_id {app_id}, app_secret {app_secret}")
 
         # Build scoped proxy bypass: active only during _connect() to avoid
         # permanently replacing websockets.connect for the whole process.
@@ -262,6 +263,7 @@ class FeishuWSManager:
             if _PROXY_PATCH_AVAILABLE
             else None
         )
+        logger.info(f"===> [Feishu WS] Proxy patch available: {_PROXY_PATCH_AVAILABLE}")
 
         async def _do_full_connect():
             """Perform a single clean connect + start receive/ping loops.
@@ -271,9 +273,12 @@ class FeishuWSManager:
             """
             if _no_proxy_ctx:
                 async with _no_proxy_ctx():
+                    logger.info(f"===> [Feishu WS] _do_full_connect _no_proxy_ctx")
                     await client._connect()
             else:
+                logger.info(f"===> [Feishu WS] _do_full_connect")
                 await client._connect()
+            logger.info(f"===> [Feishu WS] _do_full_connect done")
             asyncio.create_task(client._ping_loop())
 
         async def _run_async_client():
@@ -344,6 +349,7 @@ class FeishuWSManager:
 
     async def stop_client(self, agent_id: uuid.UUID):
         """Stops an actively running WebSocket client for an agent."""
+        logger.info(f"===> [Feishu WS] Stopping client for agent {agent_id}")
         if agent_id in self._tasks:
             task = self._tasks.pop(agent_id)
             if not task.done():
