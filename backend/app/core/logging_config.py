@@ -17,9 +17,9 @@ NOISY_CONNECTION_LOGGERS = {
     # WebSocket accepted / HTTP access lines from uvicorn.
     "uvicorn.access": logging.WARNING,
     # "connection open" / "connection closed" emitted by websockets.
-    "websockets": logging.WARNING,
-    "websockets.server": logging.WARNING,
-    "websockets.client": logging.WARNING,
+    "websockets": logging.DEBUG,
+    "websockets.server": logging.DEBUG,
+    "websockets.client": logging.DEBUG,
     "uvicorn.protocols.websockets.websockets_impl": logging.WARNING,
 }
 
@@ -42,7 +42,7 @@ def configure_logging():
     # Add stdout handler with custom format and filter to ensure trace_id exists
     logger.add(
         sys.stdout,
-        level="INFO",
+        level="DEBUG",
         format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level}</level> | <cyan>{extra[trace_id]:-<12}</cyan> | <cyan>{name}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
         enqueue=True,
         backtrace=True,
