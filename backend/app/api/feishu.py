@@ -1002,7 +1002,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                         tool_text = "\n".join(parts) if parts else ""
                         combined = tool_text + "||" + accumulated
                         if combined != _last_flushed_text:
-                            if tool_text != _last_flushed_tool_text:
+                            if tool_text and tool_text != _last_flushed_tool_text:
                                 cardkit_sequence += 1
                                 try:
                                     await asyncio.wait_for(
@@ -1018,20 +1018,21 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                                     logger.warning(f"[Feishu] CardKit tool_status stream timed out, seq={cardkit_sequence}")
                                 except Exception as e:
                                     logger.warning(f"[Feishu] CardKit tool_status stream failed: {e}")
-                            cardkit_sequence += 1
-                            try:
-                                await asyncio.wait_for(
-                                    feishu_service.stream_card_content(
-                                        config.app_id, config.app_secret,
-                                        cardkit_card_id, "streaming_content",
-                                        accumulated, cardkit_sequence,
-                                    ),
-                                    timeout=5.0,
-                                )
-                            except asyncio.TimeoutError:
-                                logger.warning(f"[Feishu] CardKit stream timed out, seq={cardkit_sequence}")
-                            except Exception as e:
-                                logger.warning(f"[Feishu] CardKit stream failed: {e}")
+                            if accumulated:
+                                cardkit_sequence += 1
+                                try:
+                                    await asyncio.wait_for(
+                                        feishu_service.stream_card_content(
+                                            config.app_id, config.app_secret,
+                                            cardkit_card_id, "streaming_content",
+                                            accumulated, cardkit_sequence,
+                                        ),
+                                        timeout=5.0,
+                                    )
+                                except asyncio.TimeoutError:
+                                    logger.warning(f"[Feishu] CardKit stream timed out, seq={cardkit_sequence}")
+                                except Exception as e:
+                                    logger.warning(f"[Feishu] CardKit stream failed: {e}")
                             _last_flushed_text = combined
                     elif msg_id_for_patch:
                         card = _build_card(accumulated, "".join(_thinking_buffer), streaming=True)
