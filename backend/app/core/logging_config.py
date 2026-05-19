@@ -21,6 +21,9 @@ NOISY_CONNECTION_LOGGERS = {
     "websockets.server": logging.DEBUG,
     "websockets.client": logging.DEBUG,
     "uvicorn.protocols.websockets.websockets_impl": logging.WARNING,
+    "feishu": logging.DEBUG,
+    "lark_oapi": logging.DEBUG,
+    "asyncio": logging.DEBUG,
 }
 
 
