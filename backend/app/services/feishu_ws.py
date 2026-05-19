@@ -239,6 +239,23 @@ class FeishuWSManager:
             logger.exception(f"[Feishu WS] Failed to create event handler for {agent_id}: {e}")
             return
 
+        # lark-oapi 1.5.x ws/client.py captures asyncio.get_event_loop() at module
+        # import time. Under Python 3.12 + uvicorn that loop is not the running
+        # FastAPI loop, so the receive task scheduled inside _connect() via
+        # `loop.create_task(self._receive_message_loop())` lands on a dead loop
+        # and never executes — frames arrive (websockets DEBUG `< BINARY`) but
+        # no event ever reaches the dispatcher. Re-bind the SDK's module loop
+        # to the running loop before connecting.
+        if _HAS_LARK:
+            try:
+                import lark_oapi.ws.client as _lark_ws_client
+                _running_loop = asyncio.get_running_loop()
+                if getattr(_lark_ws_client, "loop", None) is not _running_loop:
+                    _lark_ws_client.loop = _running_loop
+                    logger.info(f"[Feishu WS] Re-bound lark-oapi module loop to running FastAPI loop for agent {agent_id}")
+            except Exception as e:
+                logger.warning(f"[Feishu WS] Failed to re-bind lark-oapi loop: {e}")
+
         # Instantiate Client — SDK manages connect + receive + ping internally.
         # We set auto_reconnect=True so the SDK handles reconnections.
         client = ws.Client(
