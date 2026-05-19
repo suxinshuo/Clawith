@@ -10,12 +10,10 @@ from loguru import logger
 try:
     import lark_oapi as lark
     import lark_oapi.ws as ws
-    from lark_oapi.ws.client import _new_ping_frame as _lark_new_ping_frame
     _HAS_LARK = True
 except ImportError:
     lark = None  # type: ignore
     ws = None    # type: ignore
-    _lark_new_ping_frame = None  # type: ignore
     _HAS_LARK = False
 
 if _HAS_LARK:
@@ -260,100 +258,18 @@ class FeishuWSManager:
             else None
         )
 
-        # Serialize force-reconnect attempts from ping_loop and health-watch.
-        _reconnect_lock = asyncio.Lock()
-
-        async def _scoped_connect():
-            """Call client._connect() under the macOS proxy-bypass scope when applicable."""
+        async def _do_full_connect():
+            """Perform a single clean connect + start receive/ping loops.
+            
+            This is the ONLY place we call _connect() and _ping_loop().
+            The SDK's internal _reconnect() will handle subsequent reconnections.
+            """
             if _no_proxy_ctx:
                 async with _no_proxy_ctx():
                     await client._connect()
             else:
                 await client._connect()
-
-        async def _force_reconnect(reason: str) -> bool:
-            """Disconnect + reconnect, gated by _reconnect_lock.
-
-            Bypasses lark-oapi 1.5.3's brittle reconnect path (which depends on
-            _receive_message_loop detecting a closed recv() — observed to hang
-            silently in production). Returns True on success.
-            """
-            async with _reconnect_lock:
-                logger.warning(
-                    f"[Feishu WS] Force-reconnect for agent {agent_id} ({reason})"
-                )
-                try:
-                    await client._disconnect()
-                except Exception as de:
-                    logger.debug(
-                        f"[Feishu WS] disconnect during force-reconnect raised "
-                        f"(usually safe): {de}"
-                    )
-                try:
-                    await _scoped_connect()
-                    logger.info(
-                        f"[Feishu WS] Force-reconnect ok for agent {agent_id} "
-                        f"(new conn_id={getattr(client, '_conn_id', None)})"
-                    )
-                    return True
-                except Exception as ce:
-                    logger.error(
-                        f"[Feishu WS] Force-reconnect failed for agent {agent_id}: {ce}"
-                    )
-                    return False
-
-        async def _custom_ping_loop():
-            """Replacement for SDK's _ping_loop() that triggers reconnect on failure.
-
-            SDK's _ping_loop only logs warnings on send failure and keeps spinning,
-            relying entirely on _receive_message_loop to detect death and reconnect.
-            When the recv loop hangs, the connection becomes a permanent zombie.
-            Here we treat any ping send failure as proof the conn is dead and
-            force a reconnect immediately.
-            """
-            interval = getattr(client, "_ping_interval", 120) or 120
-            while True:
-                try:
-                    if client._conn is not None and _lark_new_ping_frame is not None:
-                        frame = _lark_new_ping_frame(int(client._service_id))
-                        await client._write_message(frame.SerializeToString())
-                except asyncio.CancelledError:
-                    return
-                except Exception as e:
-                    await _force_reconnect(f"ping failed: {e}")
-                    interval = getattr(client, "_ping_interval", 120) or 120
-                try:
-                    await asyncio.sleep(interval)
-                except asyncio.CancelledError:
-                    return
-
-        async def _do_full_connect():
-            """Initial connect + start the custom ping loop."""
-            await _scoped_connect()
-            asyncio.create_task(
-                _custom_ping_loop(), name=f"feishu-ws-ping-{str(agent_id)[:8]}"
-            )
-
-        def _conn_state(conn) -> str:
-            """Best-effort representation of the underlying websocket state."""
-            if conn is None:
-                return "None"
-            for attr in ("state", "closed", "close_code"):
-                if hasattr(conn, attr):
-                    return f"{attr}={getattr(conn, attr)!r}"
-            return repr(conn)
-
-        def _is_dead(conn) -> bool:
-            if conn is None:
-                return True
-            # websockets 15.x asyncio API
-            state = getattr(conn, "state", None)
-            if state is not None:
-                return str(state).rsplit(".", 1)[-1] in {"CLOSED", "CLOSING"}
-            # legacy API
-            if hasattr(conn, "closed"):
-                return bool(conn.closed)
-            return False
+            asyncio.create_task(client._ping_loop())
 
         async def _run_async_client():
             try:
@@ -365,43 +281,41 @@ class FeishuWSManager:
             except Exception as e:
                 logger.exception(f"[Feishu WS] Initial connect failed for agent {agent_id}: {e}")
 
-            # Health-watch with active force-reconnect after sustained dead state.
-            # We no longer trust the SDK's internal _reconnect path; lark-oapi 1.5.3
-            # has been observed to silently hang with conn alive but unresponsive.
+            # Health-watch: only log status changes for diagnostics.
+            # SDK handles reconnect internally via _receive_message_loop → _reconnect.
+            # We do NOT call _connect() or _ping_loop() again to avoid creating
+            # duplicate connections that cause "kicked by new connection".
             _last_conn_id = getattr(client, "_conn_id", None)
-            _dead_seconds = 0
+            _was_disconnected = False
             while True:
                 try:
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(30)  # Check every 30 seconds
 
                     conn = client._conn
                     curr_conn_id = getattr(client, "_conn_id", None)
-                    recv_alive = sum(
-                        1 for t in asyncio.all_tasks()
-                        if "_receive_message_loop" in str(t.get_coro()) and not t.done()
-                    )
 
-                    if _is_dead(conn):
-                        _dead_seconds += 30
-                        logger.warning(
-                            f"[Feishu WS] {agent_id} connection looks dead "
-                            f"(state={_conn_state(conn)}, dead_for={_dead_seconds}s, "
-                            f"recv_loops_alive={recv_alive}, last_conn_id={_last_conn_id})"
-                        )
-                        if _dead_seconds >= 60:
-                            ok = await _force_reconnect(
-                                f"health-watch detected {_dead_seconds}s of dead conn"
+                    if conn is None:
+                        if not _was_disconnected:
+                            logger.warning(
+                                f"[Feishu WS] Connection lost for agent {agent_id} "
+                                f"(last conn_id={_last_conn_id}), "
+                                "waiting for SDK auto-reconnect..."
                             )
-                            if ok:
-                                _dead_seconds = 0
-                                _last_conn_id = getattr(client, "_conn_id", None)
+                            _was_disconnected = True
+                    elif hasattr(conn, 'closed') and conn.closed:
+                        if not _was_disconnected:
+                            logger.warning(
+                                f"[Feishu WS] WebSocket closed for agent {agent_id}, "
+                                "waiting for SDK auto-reconnect..."
+                            )
+                            _was_disconnected = True
                     else:
-                        if _dead_seconds > 0:
+                        if _was_disconnected:
                             logger.info(
-                                f"[Feishu WS] {agent_id} connection healthy again "
-                                f"(conn_id={curr_conn_id}, recv_loops={recv_alive})"
+                                f"[Feishu WS] Connection restored for agent {agent_id} "
+                                f"(new conn_id={curr_conn_id})"
                             )
-                        _dead_seconds = 0
+                            _was_disconnected = False
                         if curr_conn_id != _last_conn_id and curr_conn_id:
                             logger.info(
                                 f"[Feishu WS] Connection ID changed for agent {agent_id}: "
