@@ -102,7 +102,6 @@ class FeishuWSManager:
         def handle_message(data: Any) -> None:
             """Handle im.message.receive_v1 events from Feishu WebSocket."""
             try:
-                logger.info(f"===> [Feishu WS] handle_message Received event: {data}")
                 # The data object carries the raw event body
                 raw_body = getattr(data, "raw_body", None)
                 logger.info(f"[Feishu WS] Received event: {data}")
@@ -140,12 +139,10 @@ class FeishuWSManager:
                             return
                 else:
                     body_dict = json.loads(raw_body.decode("utf-8"))
-                    logger.info(f"===> [Feishu WS] Received event: {body_dict}")
 
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._async_handle_message(agent_id, data))
-            except RuntimeError as e:
-                logger.exception(f"===> [Feishu WS] Could not dispatch event to running loop: {e}")
+            except RuntimeError:
                 try:
                     # If no running loop in this thread, try to find the main event loop
                     # This is a heuristic and might need adjustment depending on the exact async framework setup
@@ -164,7 +161,6 @@ class FeishuWSManager:
     async def _async_handle_message(self, agent_id: uuid.UUID, data: Dict[str, Any]) -> None:
         """Handle im.message.receive_v1 events from Feishu WebSocket asynchronously."""
         try:
-            logger.info(f"===> [Feishu WS] _async_handle_message Received event: {data}")
             # The data object carries the raw event body
             raw_body = getattr(data, "raw_body", None)
             if not raw_body:
@@ -239,7 +235,6 @@ class FeishuWSManager:
 
         try:
             event_handler = self._create_event_handler(agent_id)
-            logger.info(f"===> [Feishu WS] Created event handler for {agent_id}")
         except Exception as e:
             logger.exception(f"[Feishu WS] Failed to create event handler for {agent_id}: {e}")
             return
@@ -281,8 +276,7 @@ class FeishuWSManager:
                 logger.info(f"[Feishu WS] Connecting for agent {agent_id}")
                 await _do_full_connect()
                 logger.info(f"[Feishu WS] Connected for agent {agent_id}, receive loop started")
-            except asyncio.CancelledError as e:
-                logger.info(f"===> [Feishu WS] Client task cancelled for agent {agent_id}")
+            except asyncio.CancelledError:
                 return
             except Exception as e:
                 logger.exception(f"[Feishu WS] Initial connect failed for agent {agent_id}: {e}")
