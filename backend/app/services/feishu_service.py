@@ -484,41 +484,37 @@ class FeishuService:
     ) -> dict:
         """Send a message that renders markdown to a Feishu user or chat.
 
-        Wraps the content in an interactive card with a `markdown` element so
-        Feishu renders headings, bold, lists, tables, code blocks, etc.
-        Falls back to a plain `text` message if the card send fails.
+        Uses CardKit (schema 2.0) to render headings, bold, lists, tables,
+        code blocks etc. — the same path the streaming reply uses. Falls
+        back to a plain `text` message if CardKit fails.
         """
         if not text or not text.strip():
             return {"code": 0, "msg": "skipped_empty"}
 
-        card: dict = {
-            "config": {"update_multi": True},
-            "elements": [{"tag": "markdown", "content": text}],
+        card_dict: dict = {
+            "schema": "2.0",
+            "config": {"streaming_mode": False},
+            "body": {
+                "elements": [
+                    {"tag": "markdown", "content": text, "text_align": "left"},
+                ],
+            },
         }
         if title:
-            card["header"] = {
+            card_dict["header"] = {
                 "template": "blue",
                 "title": {"tag": "plain_text", "content": title[:100]},
             }
 
         try:
-            resp = await self.send_message(
-                app_id=app_id,
-                app_secret=app_secret,
-                receive_id=receive_id,
-                msg_type="interactive",
-                content=json.dumps(card, ensure_ascii=False),
+            card_id = await self.create_card_entity(app_id, app_secret, card_dict)
+            await self.send_card_by_card_id(
+                app_id, app_secret, receive_id, card_id,
                 receive_id_type=receive_id_type,
-                stage=stage,
             )
-            if resp.get("code") == 0:
-                return resp
-            logger.warning(
-                f"[Feishu] markdown card send failed code={resp.get('code')} "
-                f"msg={resp.get('msg')}; falling back to plain text"
-            )
+            return {"code": 0, "msg": "ok", "card_id": card_id}
         except Exception as e:
-            logger.warning(f"[Feishu] markdown card send raised: {e}; falling back to plain text")
+            logger.warning(f"[Feishu] CardKit markdown send failed: {e}; falling back to plain text")
 
         return await self.send_message(
             app_id=app_id,
