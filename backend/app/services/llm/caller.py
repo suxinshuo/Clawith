@@ -505,6 +505,21 @@ async def call_llm(
 
         # If no tool calls, return the final content
         if not response.tool_calls:
+            if not response.content:
+                logger.warning(
+                    "[LLM] empty final content "
+                    "agent_id={} provider={} model={} round={} finish_reason={} "
+                    "content_is_none={} reasoning_chars={} history_msgs={} usage={}",
+                    agent_id,
+                    getattr(model, "provider", "?"),
+                    getattr(model, "model", "?"),
+                    round_i,
+                    getattr(response, "finish_reason", None),
+                    response.content is None,
+                    len(getattr(response, "reasoning_content", "") or ""),
+                    len(api_messages),
+                    getattr(response, "usage", None),
+                )
             if agent_id and _accumulated_usage.total_tokens > 0:
                 await record_token_usage(agent_id, _accumulated_usage)
             await client.close()
