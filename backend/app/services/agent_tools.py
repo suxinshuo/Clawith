@@ -5829,10 +5829,9 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
                 if status_info["access_status"] != "active":
                     return f"❌ Relationship to recipient is not active ({status_info['access_status_reason'] or 'restricted'})"
                 try:
-                    resp = await feishu_service.send_message(
+                    resp = await feishu_service.send_markdown_message(
                         config.app_id, config.app_secret,
-                        receive_id=direct_user_id, msg_type="text",
-                        content=json.dumps({"text": message_text}, ensure_ascii=False),
+                        receive_id=direct_user_id, text=message_text,
                         receive_id_type="user_id",
                     )
                     if resp.get("code") == 0:
@@ -5868,13 +5867,11 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
                 logger.error(f"❌ {member_name} has no linked Feishu user_id")
                 return f"❌ {member_name} 没有关联可用的飞书 user_id"
 
-            content = json.dumps({"text": message_text}, ensure_ascii=False)
-
             async def _try_send(app_id: str, app_secret: str, receive_id: str, id_type: str = "user_id") -> dict:
-                return await feishu_service.send_message(
+                return await feishu_service.send_markdown_message(
                     app_id, app_secret,
-                    receive_id=receive_id, msg_type="text",
-                    content=content, receive_id_type=id_type,
+                    receive_id=receive_id, text=message_text,
+                    receive_id_type=id_type,
                 )
 
             async def _save_outgoing_to_feishu_session(feishu_user_id: str):

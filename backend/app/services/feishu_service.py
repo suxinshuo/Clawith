@@ -472,6 +472,64 @@ class FeishuService:
                     return uid
             return None
 
+    async def send_markdown_message(
+        self,
+        app_id: str,
+        app_secret: str,
+        receive_id: str,
+        text: str,
+        receive_id_type: str = "open_id",
+        title: str | None = None,
+        stage: str = "send_markdown_message",
+    ) -> dict:
+        """Send a message that renders markdown to a Feishu user or chat.
+
+        Wraps the content in an interactive card with a `markdown` element so
+        Feishu renders headings, bold, lists, tables, code blocks, etc.
+        Falls back to a plain `text` message if the card send fails.
+        """
+        if not text or not text.strip():
+            return {"code": 0, "msg": "skipped_empty"}
+
+        card: dict = {
+            "config": {"update_multi": True},
+            "elements": [{"tag": "markdown", "content": text}],
+        }
+        if title:
+            card["header"] = {
+                "template": "blue",
+                "title": {"tag": "plain_text", "content": title[:100]},
+            }
+
+        try:
+            resp = await self.send_message(
+                app_id=app_id,
+                app_secret=app_secret,
+                receive_id=receive_id,
+                msg_type="interactive",
+                content=json.dumps(card, ensure_ascii=False),
+                receive_id_type=receive_id_type,
+                stage=stage,
+            )
+            if resp.get("code") == 0:
+                return resp
+            logger.warning(
+                f"[Feishu] markdown card send failed code={resp.get('code')} "
+                f"msg={resp.get('msg')}; falling back to plain text"
+            )
+        except Exception as e:
+            logger.warning(f"[Feishu] markdown card send raised: {e}; falling back to plain text")
+
+        return await self.send_message(
+            app_id=app_id,
+            app_secret=app_secret,
+            receive_id=receive_id,
+            msg_type="text",
+            content=json.dumps({"text": text}, ensure_ascii=False),
+            receive_id_type=receive_id_type,
+            stage=f"{stage}_text_fallback",
+        )
+
     async def send_approval_card(self, app_id: str, app_secret: str,
                                   creator_open_id: str, agent_name: str,
                                   action_type: str, details: str, approval_id: str) -> dict:

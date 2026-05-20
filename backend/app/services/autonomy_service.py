@@ -249,10 +249,10 @@ class AutonomyService:
                     if member and (member.external_id or member.open_id):
                         receive_id = member.external_id or member.open_id
                         id_type = "user_id" if member.external_id else "open_id"
-                        await feishu_service.send_message(
+                        await feishu_service.send_markdown_message(
                             channel.app_id, channel.app_secret,
-                            receive_id, "text",
-                            json.dumps({"text": f"[{agent.name}] executed: {action_type}"}),
+                            receive_id=receive_id,
+                            text=f"[{agent.name}] executed: {action_type}",
                             receive_id_type=id_type,
                         )
 
