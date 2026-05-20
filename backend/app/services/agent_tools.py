@@ -274,17 +274,17 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "upsert_focus_item",
-            "description": "Create or update one Focus item in structured storage. Use this whenever you start tracking an active task, reminder, delegated wait, or system concern.",
+            "description": "Create or update one Focus item in structured storage. Use this whenever you start tracking an active task, reminder, delegated wait, or system concern. The UI shows `key` as the card title and `description` as the expandable detail, so they MUST be different — `key` is a short label, `description` is the full sentence.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "key": {
                         "type": "string",
-                        "description": "Stable short identifier, snake_case preferred. If omitted, the system derives one from description.",
+                        "description": "REQUIRED. Short snake_case identifier shown as the card title in the UI. Keep it under ~40 characters and use 2-5 words, e.g. 'daily_news_check', 'wait_qinrui_reply', 'follow_up_ray_tickets'. Do NOT put the full sentence here; that belongs in `description`.",
                     },
                     "description": {
                         "type": "string",
-                        "description": "Clear human-readable description of what is being tracked.",
+                        "description": "Full human-readable sentence explaining what is being tracked, including context (who/why/when). Shown as the detail under the title when the card is expanded. Must be different from `key` — if your description is just the key restated, write a fuller sentence instead.",
                     },
                     "kind": {
                         "type": "string",
@@ -296,7 +296,7 @@ AGENT_TOOLS = [
                         "description": "Optional origin label, e.g. user, trigger, a2a, okr.",
                     },
                 },
-                "required": ["description"],
+                "required": ["key", "description"],
             },
         },
     },
@@ -2637,11 +2637,18 @@ async def execute_tool(
                 result = "\n".join(lines)
         elif tool_name == "upsert_focus_item":
             description = (arguments.get("description") or "").strip()
+            key = (arguments.get("key") or "").strip()
             if not description:
                 return "❌ Missing required argument 'description' for upsert_focus_item"
+            if not key:
+                return (
+                    "❌ Missing required argument 'key' for upsert_focus_item. "
+                    "`key` should be a short snake_case label (2-5 words) shown as the card title; "
+                    "`description` is the full sentence shown as the detail."
+                )
             item = await upsert_focus_item(
                 agent_id,
-                key=arguments.get("key"),
+                key=key,
                 description=description,
                 status="in_progress",
                 kind=arguments.get("kind") or "normal",
