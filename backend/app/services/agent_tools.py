@@ -274,17 +274,17 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "upsert_focus_item",
-            "description": "Create or update one Focus item in structured storage. Use this whenever you start tracking an active task, reminder, delegated wait, or system concern. The UI shows `key` as the card title and `description` as the expandable detail, so they MUST be different — `key` is a short label, `description` is the full sentence.",
+            "description": "Create or update one Focus item in structured storage. Use this whenever you start tracking an active task, reminder, delegated wait, or system concern.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "key": {
                         "type": "string",
-                        "description": "REQUIRED. Short snake_case identifier shown as the card title in the UI. Keep it under ~40 characters and use 2-5 words, e.g. 'daily_news_check', 'wait_qinrui_reply', 'follow_up_ray_tickets'. Do NOT put the full sentence here; that belongs in `description`.",
+                        "description": "Stable short identifier, snake_case preferred. If omitted, the system derives one from description.",
                     },
                     "description": {
                         "type": "string",
-                        "description": "Full human-readable sentence explaining what is being tracked, including context (who/why/when). Shown as the detail under the title when the card is expanded. Must be different from `key` — if your description is just the key restated, write a fuller sentence instead.",
+                        "description": "Clear human-readable description of what is being tracked.",
                     },
                     "kind": {
                         "type": "string",

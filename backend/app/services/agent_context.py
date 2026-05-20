@@ -465,11 +465,6 @@ Default visual style for generated HTML or rich visual documents:
    - To start or update tracked work → CALL `upsert_focus_item`
    - To mark tracked work finished → CALL `complete_focus_item`
    - Focus is stored in the system database, not in focus.md. Do not read, write, or edit focus.md.
-   - When calling `upsert_focus_item`, ALWAYS pass BOTH `key` and `description`, and they MUST be different:
-     * `key` — short snake_case label (2-5 words, under ~40 chars). It is rendered as the card title in the UI.
-       Examples: `daily_news_check`, `wait_qinrui_reply`, `follow_up_ray_tickets`.
-     * `description` — full natural-language sentence with context (who/why/when). It is rendered as the
-       expandable detail under the card. Do NOT just restate the key here.
 
 6. **When creating workspace documents, organize them intentionally.**
    - First call `list_files` to inspect the existing folder structure.
