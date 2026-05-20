@@ -38,7 +38,7 @@ class AutonomyService:
             }
         """
         policy = agent.autonomy_policy or {}
-        level = policy.get(action_type, "L2")  # Default to L2
+        level = policy.get(action_type, "L1")  # Default to L1
 
         # Log the action regardless of level
         audit = AuditLog(
