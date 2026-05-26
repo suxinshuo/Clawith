@@ -614,6 +614,155 @@ AGENT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "send_feishu_card_kv",
+            "description": (
+                "Send a Feishu card with a list of key/value fields. "
+                "Use for status reports, OKR sync, attribute summaries — anything "
+                "that benefits from a clean labelled layout instead of free-form markdown. "
+                "Provide ONE of: member_name (preferred for known colleagues), "
+                "direct_user_id (raw Feishu user_id), or chat_id (group chat). "
+                "Falls back to a markdown message if the card render fails."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "member_name": {"type": "string", "description": "Recipient name from your relationship list."},
+                    "direct_user_id": {"type": "string", "description": "Recipient Feishu user_id (tenant-stable)."},
+                    "chat_id": {"type": "string", "description": "Group chat_id."},
+                    "title": {"type": "string", "description": "Card header title (≤100 chars). Optional."},
+                    "fields": {
+                        "type": "array",
+                        "description": "List of key/value fields rendered as a labelled list.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "key": {"type": "string", "description": "Field label, e.g. '状态'"},
+                                "value": {"type": "string", "description": "Field value."},
+                                "color": {"type": "string", "description": "Optional value color hint (e.g. 'green', 'red', 'orange')."},
+                            },
+                            "required": ["key", "value"],
+                        },
+                    },
+                    "summary": {"type": "string", "description": "Short preview text shown in the Feishu chat list. Optional."},
+                },
+                "required": ["fields"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_feishu_card_actions",
+            "description": (
+                "Send a Feishu card with a body of markdown plus a row of clickable buttons. "
+                "When the user clicks a button, you will receive a NEW user message of the form "
+                "`[卡片操作] {label}` (plus serialized context if you provided one). "
+                "Use this when you want to offer the user a small set of next actions without typing — "
+                "e.g. '查看详情 / 我已处理 / 稍后提醒'. "
+                "Provide ONE of: member_name / direct_user_id / chat_id."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "member_name": {"type": "string"},
+                    "direct_user_id": {"type": "string"},
+                    "chat_id": {"type": "string"},
+                    "title": {"type": "string", "description": "Card header title. Optional."},
+                    "body": {"type": "string", "description": "Markdown body shown above the buttons."},
+                    "actions": {
+                        "type": "array",
+                        "description": "1–4 buttons. Order = on-screen order.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string", "description": "Button text shown to the user (≤30 chars)."},
+                                "action_id": {"type": "string", "description": "Stable identifier you choose; echoed back on click for routing/idempotency."},
+                                "style": {"type": "string", "enum": ["primary", "default", "danger", "text"], "description": "Visual style. Default 'default'."},
+                                "context": {"type": "object", "description": "Optional structured payload. Will be JSON-serialized and appended to your synthetic user message on click."},
+                                "confirm": {
+                                    "type": "object",
+                                    "description": "Optional confirmation dialog before the click is sent.",
+                                    "properties": {
+                                        "title": {"type": "string"},
+                                        "text": {"type": "string"},
+                                    },
+                                },
+                            },
+                            "required": ["label", "action_id"],
+                        },
+                    },
+                    "summary": {"type": "string"},
+                },
+                "required": ["body", "actions"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_feishu_card_table",
+            "description": (
+                "Send a Feishu card containing a table. Use for tabular data "
+                "(e.g. comparison of options, list of items with attributes). "
+                "Each row must have the same number of cells as `columns`. "
+                "Provide ONE of: member_name / direct_user_id / chat_id."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "member_name": {"type": "string"},
+                    "direct_user_id": {"type": "string"},
+                    "chat_id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "columns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Column headers, in display order.",
+                    },
+                    "rows": {
+                        "type": "array",
+                        "items": {"type": "array", "items": {"type": "string"}},
+                        "description": "List of rows; each row is a list of cell strings.",
+                    },
+                    "summary": {"type": "string"},
+                },
+                "required": ["columns", "rows"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_feishu_card_approval",
+            "description": (
+                "Send a Feishu approval card with 通过 / 拒绝 buttons. "
+                "When the user clicks, you receive a synthetic user message "
+                "`[卡片操作] 通过（approval_id=...）` (or 拒绝). "
+                "Use this when the agent needs an explicit human go/no-go decision "
+                "(e.g. before doing something irreversible, before a publish, "
+                "before sending a customer-facing message). "
+                "Provide ONE of: member_name / direct_user_id / chat_id."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "member_name": {"type": "string"},
+                    "direct_user_id": {"type": "string"},
+                    "chat_id": {"type": "string"},
+                    "title": {"type": "string", "description": "Card header title (e.g. '需要您的审批')."},
+                    "summary_text": {"type": "string", "description": "Markdown body explaining what is being approved."},
+                    "approval_id": {"type": "string", "description": "Stable id you choose; included in the click callback for routing/idempotency."},
+                    "approve_label": {"type": "string", "description": "Label for the approve button. Default '通过'."},
+                    "reject_label": {"type": "string", "description": "Label for the reject button. Default '拒绝'."},
+                    "summary": {"type": "string"},
+                },
+                "required": ["title", "summary_text", "approval_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "send_channel_message",
             "description": (
                 "Send a message to a colleague via their configured external channel "
@@ -2012,6 +2161,10 @@ _FEISHU_TOOL_NAMES = {
     "feishu_approval_get",
     "feishu_chat_search",
     "feishu_chat_messages",
+    "send_feishu_card_kv",
+    "send_feishu_card_actions",
+    "send_feishu_card_table",
+    "send_feishu_card_approval",
 }
 _always_core_tools = [t for t in AGENT_TOOLS if t["function"]["name"] in _ALWAYS_INCLUDE_CORE]
 _feishu_tools = [t for t in AGENT_TOOLS if t["function"]["name"] in _FEISHU_TOOL_NAMES]
@@ -2861,6 +3014,14 @@ async def execute_tool(
             result = await _handle_list_triggers(agent_id)
         elif tool_name == "send_feishu_message":
             result = await _send_feishu_message(agent_id, arguments)
+        elif tool_name == "send_feishu_card_kv":
+            result = await _send_feishu_card_kv(agent_id, arguments)
+        elif tool_name == "send_feishu_card_actions":
+            result = await _send_feishu_card_actions(agent_id, arguments)
+        elif tool_name == "send_feishu_card_table":
+            result = await _send_feishu_card_table(agent_id, arguments)
+        elif tool_name == "send_feishu_card_approval":
+            result = await _send_feishu_card_approval(agent_id, arguments)
         elif tool_name == "send_platform_message":
             result = await _send_platform_message(agent_id, arguments)
         elif tool_name == "send_channel_message":
@@ -5743,6 +5904,140 @@ async def _manage_tasks(
         return f"Unknown action: {action}"
 
 
+async def _resolve_feishu_receive(
+    agent_id: uuid.UUID,
+    db,
+    *,
+    member_name: str | None = None,
+    direct_user_id: str | None = None,
+    chat_id: str | None = None,
+):
+    """Resolve a Feishu receive target from one of (member_name | direct_user_id | chat_id).
+
+    Returns:
+        On success: (config, receive_id, receive_id_type, target_member_or_None, None)
+        On failure: (None, None, None, None, error_message)
+    """
+    from app.services.feishu_service import feishu_service  # noqa: F401  (parity with caller)
+    from sqlalchemy.orm import selectinload
+
+    member_name = (member_name or "").strip()
+    direct_user_id = (direct_user_id or "").strip()
+    chat_id = (chat_id or "").strip()
+
+    if not (member_name or direct_user_id or chat_id):
+        return (None, None, None, None,
+                "❌ Provide one of: member_name, direct_user_id, or chat_id")
+
+    cfg_result = await db.execute(
+        select(ChannelConfig).where(
+            ChannelConfig.agent_id == agent_id,
+            ChannelConfig.channel_type == "feishu",
+        )
+    )
+    config = cfg_result.scalar_one_or_none()
+    if not config:
+        return (None, None, None, None, "❌ This agent has no Feishu channel configured")
+
+    # Group chat — no relationship gate (group membership is enforced by Feishu).
+    if chat_id and not (member_name or direct_user_id):
+        return (config, chat_id, "chat_id", None, None)
+
+    if direct_user_id and not member_name:
+        rel_result = await db.execute(
+            select(AgentRelationship)
+            .join(OrgMember, AgentRelationship.member_id == OrgMember.id)
+            .where(
+                AgentRelationship.agent_id == agent_id,
+                (OrgMember.external_id == direct_user_id) | (OrgMember.open_id == direct_user_id),
+                OrgMember.status == "active",
+            )
+            .options(selectinload(AgentRelationship.member))
+        )
+        direct_rel = rel_result.scalars().first()
+        if not direct_rel:
+            return (None, None, None, None, "❌ Recipient is not in your active relationship network")
+        status_info = await evaluate_human_relationship_status(db, direct_rel)
+        if status_info["access_status"] != "active":
+            return (None, None, None, None,
+                    f"❌ Relationship to recipient is not active ({status_info['access_status_reason'] or 'restricted'})")
+        return (config, direct_user_id, "user_id", direct_rel.member, None)
+
+    # Resolve by member_name through relationships.
+    result = await db.execute(
+        select(AgentRelationship)
+        .where(AgentRelationship.agent_id == agent_id)
+        .options(selectinload(AgentRelationship.member))
+    )
+    target_member = None
+    for r in result.scalars().all():
+        status_info = await evaluate_human_relationship_status(db, r)
+        if r.member and status_info["access_status"] == "active" and r.member.name == member_name:
+            target_member = r.member
+            break
+    if not target_member:
+        return (None, None, None, None, f"❌ {member_name} 不是我的关系")
+    if not target_member.external_id:
+        return (None, None, None, None, f"❌ {member_name} 没有关联可用的飞书 user_id")
+    return (config, target_member.external_id, "user_id", target_member, None)
+
+
+async def _save_feishu_card_to_history(
+    agent_id: uuid.UUID,
+    db,
+    *,
+    target_member,
+    receive_id: str,
+    receive_id_type: str,
+    summary_text: str,
+):
+    """Persist an outgoing card as an assistant ChatMessage in the matching channel session."""
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        agent_r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+        agent_obj = agent_r.scalar_one_or_none()
+
+        if receive_id_type == "chat_id":
+            ext_conv_id = f"feishu_group_{receive_id}"
+            user_id = agent_obj.creator_id if agent_obj else None
+            title = "[Agent → group]"
+        else:
+            if not target_member:
+                return
+            platform_user = await get_platform_user_by_org_member(
+                db=db,
+                org_member=target_member,
+                agent_tenant_id=agent_obj.tenant_id if agent_obj else None,
+            )
+            user_id = platform_user.id
+            ext_conv_id = f"feishu_p2p_{receive_id}"
+            title = f"[Agent → {target_member.name or receive_id}]"
+
+        if not user_id:
+            return
+
+        sess = await find_or_create_channel_session(
+            db=db,
+            agent_id=agent_id,
+            user_id=user_id,
+            external_conv_id=ext_conv_id,
+            source_channel="feishu",
+            first_message_title=title,
+        )
+        db.add(ChatMessage(
+            agent_id=agent_id,
+            user_id=user_id,
+            role="assistant",
+            content=summary_text,
+            conversation_id=str(sess.id),
+        ))
+        from datetime import datetime as _dt2, timezone as _tz2
+        sess.last_message_at = _dt2.now(_tz2.utc)
+        await db.commit()
+    except Exception as e:
+        logger.error(f"[Feishu] Failed to save outgoing card to history: {e}")
+
+
 async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
     """Send a Feishu message to a person or group chat."""
     member_name = (args.get("member_name") or "").strip()
@@ -5926,6 +6221,191 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
                 return f"❌ 飞书发送失败：{user_id_err.user_message}"
     except Exception as e:
         return f"❌ Message send error: {str(e)[:200]}"
+
+
+# ──────────────────────────────────────────────────────────────────
+# Feishu CardKit 2.0 card-sending tools.
+# Each builds a card via feishu_service.build_*_card, sends via
+# send_card_with_fallback (markdown fallback on CardKit failure),
+# and persists an outgoing assistant ChatMessage for chat history.
+# ──────────────────────────────────────────────────────────────────
+
+
+def _format_card_summary_for_history(kind: str, title: str | None, body_preview: str) -> str:
+    title_part = f"【{title}】" if title else ""
+    return f"[Feishu {kind}]{title_part} {body_preview}".strip()
+
+
+async def _dispatch_feishu_card(
+    agent_id: uuid.UUID,
+    args: dict,
+    *,
+    card_kind: str,
+    build_card,
+    fallback_text_builder,
+) -> str:
+    """Shared plumbing for the 4 send_feishu_card_* tools."""
+    try:
+        from app.services.feishu_service import feishu_service
+        async with async_session() as db:
+            config, receive_id, id_type, target_member, err = await _resolve_feishu_receive(
+                agent_id, db,
+                member_name=args.get("member_name"),
+                direct_user_id=args.get("direct_user_id"),
+                chat_id=args.get("chat_id"),
+            )
+            if err:
+                return err
+
+            try:
+                card_dict = build_card(str(agent_id))
+            except Exception as e:
+                logger.exception(f"[Feishu] {card_kind} build failed")
+                return f"❌ 卡片构造失败：{str(e)[:160]}"
+
+            fallback_text = fallback_text_builder()
+            resp = await feishu_service.send_card_with_fallback(
+                config.app_id, config.app_secret,
+                receive_id, id_type, card_dict, fallback_text,
+                stage=f"send_feishu_{card_kind}",
+            )
+            if resp.get("code") != 0:
+                return f"❌ 卡片发送失败：{resp.get('msg')} (code {resp.get('code')})"
+
+            await _save_feishu_card_to_history(
+                agent_id, db,
+                target_member=target_member,
+                receive_id=receive_id,
+                receive_id_type=id_type,
+                summary_text=fallback_text,
+            )
+
+            who = (target_member.name if target_member else None) or receive_id
+            mode = "降级 markdown" if "card_id" not in resp else "卡片"
+            return f"✅ 已通过{mode}发送给 {who}"
+    except Exception as e:
+        logger.exception(f"[Feishu] {card_kind} dispatch error")
+        return f"❌ 卡片发送出错：{str(e)[:200]}"
+
+
+async def _send_feishu_card_kv(agent_id: uuid.UUID, args: dict) -> str:
+    from app.services.feishu_service import build_kv_card
+    title = (args.get("title") or "").strip() or None
+    fields = args.get("fields") or []
+    summary = (args.get("summary") or "").strip() or None
+    if not isinstance(fields, list) or not fields:
+        return "❌ Provide a non-empty `fields` array"
+
+    def _build(_aid):
+        return build_kv_card(title=title, fields=fields, summary=summary)
+
+    def _fallback():
+        lines = [f"**{f.get('key')}**: {f.get('value')}" for f in fields if f.get("key") or f.get("value")]
+        head = f"**{title}**\n\n" if title else ""
+        return head + "\n".join(lines)
+
+    return await _dispatch_feishu_card(
+        agent_id, args,
+        card_kind="card_kv",
+        build_card=_build,
+        fallback_text_builder=_fallback,
+    )
+
+
+async def _send_feishu_card_actions(agent_id: uuid.UUID, args: dict) -> str:
+    from app.services.feishu_service import build_actions_card
+    title = (args.get("title") or "").strip() or None
+    body = (args.get("body") or "").strip()
+    actions = args.get("actions") or []
+    summary = (args.get("summary") or "").strip() or None
+
+    if not body:
+        return "❌ Provide `body`"
+    if not isinstance(actions, list) or not actions:
+        return "❌ Provide at least one button in `actions`"
+    if len(actions) > 4:
+        return "❌ Cards support at most 4 buttons"
+
+    for a in actions:
+        if not isinstance(a, dict) or not a.get("label") or not a.get("action_id"):
+            return "❌ Each action requires `label` and `action_id`"
+
+    def _build(aid):
+        return build_actions_card(title=title, body=body, actions=actions, summary=summary, agent_id=aid)
+
+    def _fallback():
+        head = f"**{title}**\n\n" if title else ""
+        labels = " / ".join(a["label"] for a in actions)
+        return f"{head}{body}\n\n_(可选操作: {labels})_"
+
+    return await _dispatch_feishu_card(
+        agent_id, args,
+        card_kind="card_actions",
+        build_card=_build,
+        fallback_text_builder=_fallback,
+    )
+
+
+async def _send_feishu_card_table(agent_id: uuid.UUID, args: dict) -> str:
+    from app.services.feishu_service import build_table_card
+    title = (args.get("title") or "").strip() or None
+    columns = args.get("columns") or []
+    rows = args.get("rows") or []
+    summary = (args.get("summary") or "").strip() or None
+
+    if not isinstance(columns, list) or not columns:
+        return "❌ Provide non-empty `columns`"
+    if not isinstance(rows, list):
+        return "❌ `rows` must be a list of lists"
+
+    def _build(_aid):
+        return build_table_card(title=title, columns=columns, rows=rows, summary=summary)
+
+    def _fallback():
+        head = f"**{title}**\n\n" if title else ""
+        head += "| " + " | ".join(str(c) for c in columns) + " |\n"
+        head += "| " + " | ".join(["---"] * len(columns)) + " |\n"
+        for r in rows:
+            head += "| " + " | ".join(str(c) for c in r) + " |\n"
+        return head
+
+    return await _dispatch_feishu_card(
+        agent_id, args,
+        card_kind="card_table",
+        build_card=_build,
+        fallback_text_builder=_fallback,
+    )
+
+
+async def _send_feishu_card_approval(agent_id: uuid.UUID, args: dict) -> str:
+    from app.services.feishu_service import build_approval_card
+    title = (args.get("title") or "").strip()
+    summary_text = (args.get("summary_text") or "").strip()
+    approval_id = (args.get("approval_id") or "").strip()
+    approve_label = (args.get("approve_label") or "通过").strip() or "通过"
+    reject_label = (args.get("reject_label") or "拒绝").strip() or "拒绝"
+    summary = (args.get("summary") or "").strip() or None
+
+    if not title or not summary_text or not approval_id:
+        return "❌ title / summary_text / approval_id are all required"
+
+    def _build(aid):
+        return build_approval_card(
+            title=title, summary_text=summary_text, approval_id=approval_id,
+            agent_id=aid,
+            approve_label=approve_label, reject_label=reject_label,
+            summary=summary,
+        )
+
+    def _fallback():
+        return f"**{title}**\n\n{summary_text}\n\n_(请回复「{approve_label}」或「{reject_label}」以做出决定，approval_id={approval_id})_"
+
+    return await _dispatch_feishu_card(
+        agent_id, args,
+        card_kind="card_approval",
+        build_card=_build,
+        fallback_text_builder=_fallback,
+    )
 
 
 async def _send_channel_message(agent_id: uuid.UUID, args: dict) -> str:

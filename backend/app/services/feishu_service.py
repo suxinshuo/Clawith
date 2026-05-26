@@ -74,6 +74,199 @@ class FeishuAPIError(RuntimeError):
         return base
 
 
+# ──────────────────────────────────────────────────────────────────
+# CardKit 2.0 card builders
+#
+# Action button callback protocol (event.action.value when user clicks):
+#   {
+#     "v": 1,                              # schema version
+#     "kind": "card_action" | "approval",  # routing kind
+#     "agent_id": "<uuid>",                # source agent (server validates)
+#     "action_id": "<string>",             # business id (idempotency)
+#     "label": "通过",                      # button text → synthetic user msg
+#     "context": { ... }                   # optional structured payload
+#   }
+# ──────────────────────────────────────────────────────────────────
+
+_CARD_HEADER_TEMPLATE_DEFAULT = "blue"
+
+
+def _build_card_header(title: str | None, template: str = _CARD_HEADER_TEMPLATE_DEFAULT) -> dict | None:
+    if not title:
+        return None
+    return {
+        "template": template,
+        "title": {"tag": "plain_text", "content": str(title)[:100]},
+    }
+
+
+def _build_button_element(
+    *,
+    label: str,
+    action_value: dict,
+    button_type: str = "default",
+    confirm: dict | None = None,
+) -> dict:
+    """Build a single CardKit 2.0 button with a callback behavior."""
+    el: dict = {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": str(label)[:30]},
+        "type": button_type if button_type in ("default", "primary", "danger", "text") else "default",
+        "behaviors": [{"type": "callback", "value": action_value}],
+    }
+    if confirm:
+        el["confirm"] = {
+            "title": {"tag": "plain_text", "content": str(confirm.get("title", "确认"))[:50]},
+            "text": {"tag": "plain_text", "content": str(confirm.get("text", ""))[:200]},
+        }
+    return el
+
+
+def _wrap_card(elements: list[dict], title: str | None, summary: str | None) -> dict:
+    config: dict = {"wide_screen_mode": True, "update_multi": True}
+    if summary:
+        config["summary"] = {"content": str(summary)[:60]}
+    card: dict = {
+        "schema": "2.0",
+        "config": config,
+        "body": {"elements": elements},
+    }
+    header = _build_card_header(title)
+    if header:
+        card["header"] = header
+    return card
+
+
+def build_kv_card(
+    title: str | None,
+    fields: list[dict],
+    summary: str | None = None,
+) -> dict:
+    """Title + key/value field list. `fields`: [{"key": "...", "value": "...", "color"?: "..."}]."""
+    if not fields:
+        elements: list[dict] = [{"tag": "markdown", "content": "_（无字段）_"}]
+    else:
+        lines = []
+        for f in fields:
+            key = str(f.get("key", "")).strip()
+            value = str(f.get("value", "")).strip()
+            color = f.get("color")
+            if not key and not value:
+                continue
+            value_md = f"<font color='{color}'>{value}</font>" if color else value
+            lines.append(f"**{key}**: {value_md}" if key else value_md)
+        elements = [{"tag": "markdown", "content": "\n".join(lines) or "_（无字段）_"}]
+    return _wrap_card(elements, title, summary)
+
+
+def build_actions_card(
+    title: str | None,
+    body: str,
+    actions: list[dict],
+    summary: str | None = None,
+    *,
+    agent_id: str,
+) -> dict:
+    """Body markdown + a row of buttons. `actions`: [{"label": "...", "action_id": "...", "style"?: "primary|default|danger", "context"?: {...}, "confirm"?: {...}}]."""
+    elements: list[dict] = []
+    if body:
+        elements.append({"tag": "markdown", "content": body})
+    button_elements = []
+    for a in actions or []:
+        label = a.get("label")
+        action_id = a.get("action_id") or ""
+        if not label:
+            continue
+        action_value = {
+            "v": 1,
+            "kind": "card_action",
+            "agent_id": agent_id,
+            "action_id": str(action_id),
+            "label": str(label),
+            "context": a.get("context") or {},
+        }
+        button_elements.append(_build_button_element(
+            label=label,
+            action_value=action_value,
+            button_type=a.get("style") or "default",
+            confirm=a.get("confirm"),
+        ))
+    if button_elements:
+        elements.append({"tag": "action", "actions": button_elements})
+    return _wrap_card(elements, title, summary)
+
+
+def build_table_card(
+    title: str | None,
+    columns: list[str],
+    rows: list[list[str]],
+    summary: str | None = None,
+) -> dict:
+    """Title + table. CardKit 2.0 has a `table` element."""
+    cols = [str(c) for c in (columns or [])]
+    safe_rows = []
+    for row in (rows or []):
+        safe_rows.append([str(cell) for cell in row][: len(cols)] if cols else [str(cell) for cell in row])
+    if not cols or not safe_rows:
+        elements: list[dict] = [{"tag": "markdown", "content": "_（空表）_"}]
+    else:
+        # Use markdown table fallback (universally supported, simpler than `tag: table`).
+        # If we ever need sortable / scrollable tables, switch to tag=table here.
+        header_line = "| " + " | ".join(cols) + " |"
+        sep_line = "| " + " | ".join(["---"] * len(cols)) + " |"
+        body_lines = ["| " + " | ".join(r + [""] * (len(cols) - len(r))) + " |" for r in safe_rows]
+        md = "\n".join([header_line, sep_line] + body_lines)
+        elements = [{"tag": "markdown", "content": md}]
+    return _wrap_card(elements, title, summary)
+
+
+def build_approval_card(
+    title: str,
+    summary_text: str,
+    approval_id: str,
+    *,
+    agent_id: str,
+    approve_label: str = "通过",
+    reject_label: str = "拒绝",
+    require_reason: bool = False,
+    summary: str | None = None,
+    extra_context: dict | None = None,
+) -> dict:
+    """Approval card: body + 通过/拒绝 buttons. action.value.kind = 'approval'."""
+    elements: list[dict] = []
+    if summary_text:
+        elements.append({"tag": "markdown", "content": summary_text})
+
+    base_ctx = {"approval_id": str(approval_id), "require_reason": bool(require_reason)}
+    if extra_context:
+        base_ctx.update(extra_context)
+
+    approve_value = {
+        "v": 1,
+        "kind": "approval",
+        "agent_id": agent_id,
+        "action_id": f"approve:{approval_id}",
+        "label": approve_label,
+        "context": {**base_ctx, "decision": "approve"},
+    }
+    reject_value = {
+        "v": 1,
+        "kind": "approval",
+        "agent_id": agent_id,
+        "action_id": f"reject:{approval_id}",
+        "label": reject_label,
+        "context": {**base_ctx, "decision": "reject"},
+    }
+    elements.append({
+        "tag": "action",
+        "actions": [
+            _build_button_element(label=approve_label, action_value=approve_value, button_type="primary"),
+            _build_button_element(label=reject_label, action_value=reject_value, button_type="danger"),
+        ],
+    })
+    return _wrap_card(elements, title, summary)
+
+
 class FeishuService:
     """Service for Feishu OAuth login and message API."""
 
@@ -988,6 +1181,39 @@ class FeishuService:
             receive_id_type=receive_id_type,
             stage="send_card_by_card_id",
         )
+
+    async def send_card_with_fallback(
+        self,
+        app_id: str,
+        app_secret: str,
+        receive_id: str,
+        receive_id_type: str,
+        card_dict: dict,
+        fallback_text: str,
+        stage: str = "send_card_with_fallback",
+    ) -> dict:
+        """Create a CardKit card entity and send it; fall back to markdown text on any error.
+
+        Returns {"code": 0, "msg": "ok", "card_id": "..."} on card success,
+        or the underlying markdown send response on fallback.
+        """
+        try:
+            card_id = await self.create_card_entity(app_id, app_secret, card_dict)
+            await self.send_card_by_card_id(
+                app_id, app_secret, receive_id, card_id,
+                receive_id_type=receive_id_type,
+            )
+            return {"code": 0, "msg": "ok", "card_id": card_id}
+        except Exception as e:
+            logger.warning(f"[Feishu] {stage} CardKit send failed: {e}; falling back to markdown")
+            return await self.send_markdown_message(
+                app_id=app_id,
+                app_secret=app_secret,
+                receive_id=receive_id,
+                text=fallback_text,
+                receive_id_type=receive_id_type,
+                stage=f"{stage}_md_fallback",
+            )
 
     async def stream_card_content(
         self,

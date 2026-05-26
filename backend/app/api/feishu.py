@@ -468,6 +468,10 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
     event = body.get("event", {})
     event_type = body.get("header", {}).get("event_type", "")
 
+    # ── Card button click → synthesize a user message and re-enter the pipeline ──
+    if event_type in ("card.action.trigger", "card.action.trigger_v1"):
+        return await _handle_feishu_card_action(agent_id, body, event_id)
+
     if event_type == "im.message.receive_v1":
         message = event.get("message", {})
         sender = event.get("sender", {}).get("sender_id", {})
@@ -1254,6 +1258,133 @@ _FILE_ACK_MESSAGES = [
     "已收到文件，随时准备好为你处理！",
     "收到！请问希望我对这份文件做什么？",
 ]
+
+
+def _parse_card_action_value(raw) -> dict:
+    """Tolerantly decode action.value (Feishu may pass a JSON string or a dict)."""
+    import json as _json
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            decoded = _json.loads(raw)
+            return decoded if isinstance(decoded, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _build_synthetic_card_user_text(action_value: dict) -> str:
+    """Convert a card click into the synthetic user message text injected into the LLM."""
+    import json as _json
+    label = str(action_value.get("label") or "").strip() or "操作"
+    kind = action_value.get("kind")
+    ctx = action_value.get("context") or {}
+    action_id = str(action_value.get("action_id") or "")
+
+    if kind == "approval":
+        approval_id = str(ctx.get("approval_id") or "")
+        decision = ctx.get("decision") or label
+        text = f"[卡片操作] {label}（approval_id={approval_id}, decision={decision}）"
+    else:
+        text = f"[卡片操作] {label}"
+        ctx_for_msg = {k: v for k, v in ctx.items() if k not in ("approval_id", "decision")}
+        if ctx_for_msg:
+            try:
+                text += f"\n\n上下文: {_json.dumps(ctx_for_msg, ensure_ascii=False)}"
+            except Exception:
+                pass
+        if action_id:
+            text += f"\n（action_id={action_id}）"
+    return text
+
+
+async def _handle_feishu_card_action(
+    agent_id: uuid.UUID,
+    body: dict,
+    event_id: str,
+) -> dict:
+    """Handle a card.action.trigger event by synthesizing a user message.
+
+    Feishu requires a response within ~3s. We validate the payload, schedule the
+    synthetic message processing as a background task, and return a toast immediately.
+
+    Action.value protocol (set by the agent_tools card builders):
+        {"v": 1, "kind": "card_action"|"approval", "agent_id": "<uuid>",
+         "action_id": "...", "label": "...", "context": {...}}
+    """
+    import asyncio
+    import json as _json
+    from app.database import async_session as _async_session_card
+
+    event = body.get("event", {}) or {}
+    operator = event.get("operator", {}) or {}
+    sender_open_id = str(operator.get("open_id") or "")
+    sender_user_id_from_event = str(operator.get("user_id") or "")
+    action = event.get("action", {}) or {}
+    action_value = _parse_card_action_value(action.get("value"))
+
+    if action_value.get("v") != 1 or action_value.get("kind") not in ("card_action", "approval"):
+        logger.warning(f"[Feishu] Card action with unexpected schema: {action_value!r}")
+        return {"toast": {"type": "warning", "content": "无效的卡片操作"}}
+    if action_value.get("agent_id") != str(agent_id):
+        logger.warning(
+            f"[Feishu] Card action agent_id mismatch: payload={action_value.get('agent_id')!r} route={agent_id!r}"
+        )
+        return {"toast": {"type": "error", "content": "操作来源不匹配"}}
+    if not sender_open_id:
+        logger.warning("[Feishu] Card action without operator.open_id; cannot route.")
+        return {"toast": {"type": "error", "content": "无法识别操作者"}}
+
+    label = str(action_value.get("label") or "").strip() or "操作"
+    synthetic_text = _build_synthetic_card_user_text(action_value)
+
+    ctx_meta = event.get("context") or {}
+    open_chat_id = str(ctx_meta.get("open_chat_id") or "")
+    open_message_id = str(ctx_meta.get("open_message_id") or "")
+    is_group_chat = bool(open_chat_id) and open_chat_id.startswith("oc_")
+    chat_type_synth = "group" if is_group_chat else "p2p"
+
+    header = body.get("header", {}) or {}
+    synth_body = {
+        "schema": body.get("schema", "2.0"),
+        "header": {
+            "event_id": f"card_action_{event_id or header.get('event_id', '')}",
+            "event_type": "im.message.receive_v1",
+            "create_time": header.get("create_time"),
+            "token": header.get("token"),
+            "app_id": header.get("app_id"),
+            "tenant_key": header.get("tenant_key"),
+        },
+        "event": {
+            "sender": {
+                "sender_id": {
+                    "open_id": sender_open_id,
+                    "user_id": sender_user_id_from_event,
+                },
+                "sender_type": "user",
+            },
+            "message": {
+                "message_id": open_message_id or f"card_action_msg_{event_id}",
+                "message_type": "text",
+                "chat_type": chat_type_synth,
+                "chat_id": open_chat_id,
+                "content": _json.dumps({"text": synthetic_text}, ensure_ascii=False),
+                "create_time": header.get("create_time"),
+            },
+        },
+    }
+
+    async def _run_synthetic():
+        try:
+            async with _async_session_card() as bg_db:
+                await process_feishu_event(agent_id, synth_body, bg_db)
+        except Exception:
+            logger.exception("[Feishu] Card action synthetic processing failed")
+
+    asyncio.create_task(_run_synthetic())
+
+    return {"toast": {"type": "success", "content": f"已收到「{label}」"}}
 
 
 async def _handle_feishu_file(
