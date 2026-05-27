@@ -616,13 +616,15 @@ AGENT_TOOLS = [
         "function": {
             "name": "send_feishu_card_kv",
             "description": (
-                "Send a Feishu card with a list of key/value fields **to the current Feishu "
-                "conversation only** (the chat you are currently replying in). "
-                "Cannot be used to message other users or other groups — recipient is fixed. "
-                "Use for status reports, OKR sync, attribute summaries — anything "
-                "that benefits from a clean labelled layout instead of free-form markdown. "
+                "Send a Feishu card with a list of key/value fields. "
+                "Default recipient: the current Feishu conversation (the chat you are replying in). "
+                "To target someone else, pass member_name / user_id (individual) or chat_id / chat_name (group) — "
+                "same recipient semantics as send_feishu_message. "
+                "Use for status reports, OKR sync, attribute summaries — anything that benefits from "
+                "a clean labelled layout instead of free-form markdown. "
                 "Falls back to a markdown message if the card render fails. "
-                "Errors if invoked outside a Feishu chat session (e.g. web debug, non-Feishu trigger)."
+                "Errors if no explicit recipient is given AND you are not currently in a Feishu chat session "
+                "(e.g. web debug, non-Feishu trigger)."
             ),
             "parameters": {
                 "type": "object",
@@ -642,6 +644,10 @@ AGENT_TOOLS = [
                         },
                     },
                     "summary": {"type": "string", "description": "Short preview text shown in the Feishu chat list. Optional."},
+                    "member_name": {"type": "string", "description": "Optional. Target a specific person by name (looked up via relationships). Defaults to current conversation."},
+                    "user_id": {"type": "string", "description": "Optional. Target a specific person by Feishu user_id. Defaults to current conversation."},
+                    "chat_id": {"type": "string", "description": "Optional. Target a specific group by chat_id. Defaults to current conversation."},
+                    "chat_name": {"type": "string", "description": "Optional. Target a specific group by name (auto-resolved to chat_id). Defaults to current conversation."},
                 },
                 "required": ["fields"],
             },
@@ -652,14 +658,15 @@ AGENT_TOOLS = [
         "function": {
             "name": "send_feishu_card_actions",
             "description": (
-                "Send a Feishu card with a body of markdown plus a row of clickable buttons "
-                "**to the current Feishu conversation only**. "
-                "Cannot target other users or other groups — recipient is fixed to this chat. "
+                "Send a Feishu card with a body of markdown plus a row of clickable buttons. "
+                "Default recipient: the current Feishu conversation. "
+                "To target someone else, pass member_name / user_id (individual) or chat_id / chat_name (group) — "
+                "same recipient semantics as send_feishu_message. "
                 "When the user clicks a button, you will receive a NEW user message of the form "
                 "`[卡片操作] {label}` (plus serialized context if you provided one). "
                 "Use this when you want to offer the user a small set of next actions without typing — "
                 "e.g. '查看详情 / 我已处理 / 稍后提醒'. "
-                "Errors if invoked outside a Feishu chat session."
+                "Errors if no explicit recipient is given AND you are not currently in a Feishu chat session."
             ),
             "parameters": {
                 "type": "object",
@@ -689,6 +696,10 @@ AGENT_TOOLS = [
                         },
                     },
                     "summary": {"type": "string"},
+                    "member_name": {"type": "string", "description": "Optional. Target a specific person by name (looked up via relationships). Defaults to current conversation."},
+                    "user_id": {"type": "string", "description": "Optional. Target a specific person by Feishu user_id. Defaults to current conversation."},
+                    "chat_id": {"type": "string", "description": "Optional. Target a specific group by chat_id. Defaults to current conversation."},
+                    "chat_name": {"type": "string", "description": "Optional. Target a specific group by name (auto-resolved to chat_id). Defaults to current conversation."},
                 },
                 "required": ["body", "actions"],
             },
@@ -699,11 +710,13 @@ AGENT_TOOLS = [
         "function": {
             "name": "send_feishu_card_table",
             "description": (
-                "Send a Feishu card containing a table **to the current Feishu conversation only**. "
-                "Cannot target other users or other groups — recipient is fixed to this chat. "
+                "Send a Feishu card containing a table. "
+                "Default recipient: the current Feishu conversation. "
+                "To target someone else, pass member_name / user_id (individual) or chat_id / chat_name (group) — "
+                "same recipient semantics as send_feishu_message. "
                 "Use for tabular data (e.g. comparison of options, list of items with attributes). "
                 "Each row must have the same number of cells as `columns`. "
-                "Errors if invoked outside a Feishu chat session."
+                "Errors if no explicit recipient is given AND you are not currently in a Feishu chat session."
             ),
             "parameters": {
                 "type": "object",
@@ -720,6 +733,10 @@ AGENT_TOOLS = [
                         "description": "List of rows; each row is a list of cell strings.",
                     },
                     "summary": {"type": "string"},
+                    "member_name": {"type": "string", "description": "Optional. Target a specific person by name (looked up via relationships). Defaults to current conversation."},
+                    "user_id": {"type": "string", "description": "Optional. Target a specific person by Feishu user_id. Defaults to current conversation."},
+                    "chat_id": {"type": "string", "description": "Optional. Target a specific group by chat_id. Defaults to current conversation."},
+                    "chat_name": {"type": "string", "description": "Optional. Target a specific group by name (auto-resolved to chat_id). Defaults to current conversation."},
                 },
                 "required": ["columns", "rows"],
             },
@@ -730,15 +747,16 @@ AGENT_TOOLS = [
         "function": {
             "name": "send_feishu_card_approval",
             "description": (
-                "Send a Feishu approval card with 通过 / 拒绝 buttons "
-                "**to the current Feishu conversation only**. "
-                "Cannot target other users or other groups — recipient is fixed to this chat. "
+                "Send a Feishu approval card with 通过 / 拒绝 buttons. "
+                "Default recipient: the current Feishu conversation. "
+                "To request approval from someone else, pass member_name / user_id (individual) or "
+                "chat_id / chat_name (group) — same recipient semantics as send_feishu_message. "
                 "When the user clicks, you receive a synthetic user message "
                 "`[卡片操作] 通过（approval_id=...）` (or 拒绝). "
                 "Use this when the agent needs an explicit human go/no-go decision "
                 "(e.g. before doing something irreversible, before a publish, "
                 "before sending a customer-facing message). "
-                "Errors if invoked outside a Feishu chat session."
+                "Errors if no explicit recipient is given AND you are not currently in a Feishu chat session."
             ),
             "parameters": {
                 "type": "object",
@@ -749,6 +767,10 @@ AGENT_TOOLS = [
                     "approve_label": {"type": "string", "description": "Label for the approve button. Default '通过'."},
                     "reject_label": {"type": "string", "description": "Label for the reject button. Default '拒绝'."},
                     "summary": {"type": "string"},
+                    "member_name": {"type": "string", "description": "Optional. Target a specific person by name (looked up via relationships). Defaults to current conversation."},
+                    "user_id": {"type": "string", "description": "Optional. Target a specific person by Feishu user_id. Defaults to current conversation."},
+                    "chat_id": {"type": "string", "description": "Optional. Target a specific group by chat_id. Defaults to current conversation."},
+                    "chat_name": {"type": "string", "description": "Optional. Target a specific group by name (auto-resolved to chat_id). Defaults to current conversation."},
                 },
                 "required": ["title", "summary_text", "approval_id"],
             },
@@ -6286,6 +6308,78 @@ async def _resolve_current_feishu_conversation(session_id: str, agent_id: uuid.U
             f"❌ 卡片工具仅能在飞书会话中使用：未知会话格式 {external_conv_id[:40]}")
 
 
+async def _resolve_feishu_card_target(
+    agent_id: uuid.UUID,
+    args: dict,
+    session_id: str,
+):
+    """Resolve a Feishu card target.
+
+    Priority:
+      1. If the LLM provided any of member_name / user_id / chat_id / chat_name
+         in args, target that recipient (relationship-gated for users; chat
+         search for chat_name).
+      2. Otherwise, fall back to the current Feishu conversation derived from
+         the ChatSession's external_conv_id.
+
+    Returns (config, receive_id, receive_id_type, target_member, err).
+    target_member is the resolved OrgMember when sending to a person via name
+    or user_id (used for history persistence); None for groups or current-
+    session paths (in which case _dispatch_feishu_card looks it up post-hoc).
+    """
+    member_name = (args.get("member_name") or "").strip()
+    user_id_arg = (args.get("user_id") or "").strip()
+    chat_id_arg = (args.get("chat_id") or "").strip()
+    chat_name = (args.get("chat_name") or "").strip()
+
+    explicit = bool(member_name or user_id_arg or chat_id_arg or chat_name)
+
+    if not explicit:
+        config, recv, id_type, err = await _resolve_current_feishu_conversation(session_id, agent_id)
+        return (config, recv, id_type, None, err)
+
+    # If only chat_name is provided, resolve it to chat_id via Feishu search.
+    if chat_name and not chat_id_arg:
+        from app.services.feishu_service import feishu_service
+        async with async_session() as db:
+            cfg_result = await db.execute(
+                select(ChannelConfig).where(
+                    ChannelConfig.agent_id == agent_id,
+                    ChannelConfig.channel_type == "feishu",
+                )
+            )
+            config = cfg_result.scalar_one_or_none()
+            if not config:
+                return (None, None, None, None, "❌ 当前 Agent 没有配置飞书通道")
+            try:
+                search_resp = await feishu_service.search_chats(
+                    config.app_id, config.app_secret, chat_name, page_size=5,
+                )
+                items = search_resp.get("data", {}).get("items") or []
+                if not items:
+                    return (None, None, None, None, f"❌ 找不到名为「{chat_name}」的飞书群")
+                chat_id_arg = items[0].get("chat_id") or ""
+                if not chat_id_arg:
+                    return (None, None, None, None, "❌ 找到了群但解析 chat_id 失败")
+            except Exception as e:
+                return (None, None, None, None, f"❌ 群搜索失败：{str(e)[:160]}")
+
+    async with async_session() as db:
+        return await _resolve_feishu_receive(
+            agent_id, db,
+            member_name=member_name,
+            direct_user_id=user_id_arg,
+            chat_id=chat_id_arg,
+        )
+
+
+def _has_explicit_feishu_target(args: dict) -> bool:
+    return any(
+        (args.get(k) or "").strip()
+        for k in ("member_name", "user_id", "chat_id", "chat_name")
+    )
+
+
 async def _dispatch_feishu_card(
     agent_id: uuid.UUID,
     args: dict,
@@ -6297,14 +6391,18 @@ async def _dispatch_feishu_card(
 ) -> str:
     """Shared plumbing for the 4 send_feishu_card_* tools.
 
-    Scoped to the **current conversation only**: receive_id is derived from the
-    ChatSession's external_conv_id, not from the LLM's args. This prevents the
-    LLM from card-bombing other users/groups, and avoids the cross-app open_id
-    problem inherent in resolving via OrgMember.
+    Default target = current Feishu conversation (derived from the ChatSession's
+    external_conv_id). When the LLM passes member_name / user_id / chat_id /
+    chat_name in args, that explicit recipient overrides — same semantics as
+    send_feishu_message. User targets are gated by AgentRelationship; groups
+    rely on Feishu's own membership enforcement.
     """
     try:
         from app.services.feishu_service import feishu_service
-        config, receive_id, id_type, err = await _resolve_current_feishu_conversation(session_id, agent_id)
+        explicit = _has_explicit_feishu_target(args)
+        config, receive_id, id_type, resolved_member, err = await _resolve_feishu_card_target(
+            agent_id, args, session_id,
+        )
         if err:
             return err
 
@@ -6327,8 +6425,8 @@ async def _dispatch_feishu_card(
         # card text into the matching channel session so it shows in the audit trail.
         try:
             async with async_session() as db:
-                target_member = None
-                if id_type in ("user_id", "open_id"):
+                target_member = resolved_member
+                if target_member is None and id_type in ("user_id", "open_id"):
                     rel_result = await db.execute(
                         select(AgentRelationship)
                         .join(OrgMember, AgentRelationship.member_id == OrgMember.id)
@@ -6353,7 +6451,14 @@ async def _dispatch_feishu_card(
             logger.warning(f"[Feishu] {card_kind} history save failed: {e}")
 
         mode = "降级 markdown" if "card_id" not in resp else "卡片"
-        target_label = "当前群" if id_type == "chat_id" else "当前会话"
+        if explicit:
+            if id_type == "chat_id":
+                target_label = f"群 (chat_id: {receive_id})"
+            else:
+                who = (resolved_member.name if resolved_member else None) or receive_id
+                target_label = f"用户 {who}"
+        else:
+            target_label = "当前群" if id_type == "chat_id" else "当前会话"
         return f"✅ 已通过{mode}发送到{target_label}"
     except Exception as e:
         logger.exception(f"[Feishu] {card_kind} dispatch error")
