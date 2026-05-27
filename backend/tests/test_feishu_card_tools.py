@@ -252,7 +252,7 @@ async def test_handle_feishu_card_action_rejects_agent_id_mismatch():
             "context": {},
         },
     }
-    resp = await _handle_feishu_card_action(aid, body, "ev1")
+    resp = _handle_feishu_card_action(aid, body, "ev1")
     assert resp["toast"]["type"] == "error"
     assert "操作来源" in resp["toast"]["content"]
 
@@ -268,7 +268,7 @@ async def test_handle_feishu_card_action_rejects_unknown_kind():
             "action": {"value": {"v": 1, "kind": "weird", "agent_id": str(aid), "label": "?"}},
         },
     }
-    resp = await _handle_feishu_card_action(aid, body, "ev1")
+    resp = _handle_feishu_card_action(aid, body, "ev1")
     assert resp["toast"]["type"] == "warning"
 
 
@@ -283,7 +283,7 @@ async def test_handle_feishu_card_action_rejects_missing_v():
             "action": {"value": {"kind": "card_action", "agent_id": str(aid), "label": "X"}},
         },
     }
-    resp = await _handle_feishu_card_action(aid, body, "ev1")
+    resp = _handle_feishu_card_action(aid, body, "ev1")
     assert resp["toast"]["type"] == "warning"
 
 
@@ -320,7 +320,7 @@ async def test_handle_feishu_card_action_happy_path_schedules_synthetic(monkeypa
             "context": {"open_chat_id": "oc_group_xxx", "open_message_id": "om_card"},
         },
     }
-    resp = await feishu_api._handle_feishu_card_action(aid, body, "ev_orig")
+    resp = feishu_api._handle_feishu_card_action(aid, body, "ev_orig")
     assert resp["toast"]["type"] == "success"
     assert "通过" in resp["toast"]["content"]
 

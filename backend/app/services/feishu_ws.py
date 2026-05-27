@@ -168,10 +168,69 @@ class FeishuWSManager:
                 # Best-effort debug log; never raise from a no-op handler.
                 pass
 
+        def handle_card_action(data: Any):
+            """Handle card.action.trigger events from the WS long-connection.
+
+            The lark-oapi SDK marshals this function's return value back to Feishu
+            as the card-action HTTP response. Without this handler the SDK has no
+            processor for "p2.card.action.trigger" → no response → Feishu shows
+            "出错了，请稍后重试 code:200671" on the user's button click.
+            """
+            from lark_oapi.event.callback.model.p2_card_action_trigger import (
+                P2CardActionTriggerResponse,
+            )
+            try:
+                header_obj = getattr(data, "header", None)
+                event_obj = getattr(data, "event", None)
+                operator_obj = getattr(event_obj, "operator", None) if event_obj else None
+                action_obj = getattr(event_obj, "action", None) if event_obj else None
+                ctx_obj = getattr(event_obj, "context", None) if event_obj else None
+
+                event_id = getattr(header_obj, "event_id", "") or "" if header_obj else ""
+                body_dict = {
+                    "schema": "2.0",
+                    "header": {
+                        "event_id": event_id,
+                        "event_type": getattr(header_obj, "event_type", "card.action.trigger") if header_obj else "card.action.trigger",
+                        "create_time": getattr(header_obj, "create_time", None) if header_obj else None,
+                        "token": getattr(header_obj, "token", None) if header_obj else None,
+                        "app_id": getattr(header_obj, "app_id", None) if header_obj else None,
+                        "tenant_key": getattr(header_obj, "tenant_key", None) if header_obj else None,
+                    },
+                    "event": {
+                        "operator": {
+                            "open_id": (getattr(operator_obj, "open_id", None) or "") if operator_obj else "",
+                            "user_id": (getattr(operator_obj, "user_id", None) or "") if operator_obj else "",
+                        },
+                        "action": {
+                            "value": getattr(action_obj, "value", None) if action_obj else None,
+                            "tag": getattr(action_obj, "tag", None) if action_obj else None,
+                        },
+                        "context": {
+                            "open_chat_id": (getattr(ctx_obj, "open_chat_id", None) or "") if ctx_obj else "",
+                            "open_message_id": (getattr(ctx_obj, "open_message_id", None) or "") if ctx_obj else "",
+                        },
+                    },
+                }
+
+                logger.info(
+                    f"[Feishu WS] card.action.trigger for agent {agent_id} event_id={event_id}"
+                )
+
+                from app.api.feishu import _handle_feishu_card_action
+                resp_dict = _handle_feishu_card_action(agent_id, body_dict, event_id)
+                return P2CardActionTriggerResponse(resp_dict)
+            except Exception as e:
+                logger.exception(f"[Feishu WS] card.action.trigger handling failed: {e}")
+                return P2CardActionTriggerResponse(
+                    {"toast": {"type": "error", "content": "处理失败，请稍后重试"}}
+                )
+
         dispatcher = (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_customized_event("im.message.receive_v1", handle_message)
             .register_p2_customized_event("im.message.message_read_v1", handle_message_read)
+            .register_p2_card_action_trigger(handle_card_action)
             .build()
         )
         return dispatcher

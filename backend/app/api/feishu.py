@@ -470,7 +470,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
 
     # ── Card button click → synthesize a user message and re-enter the pipeline ──
     if event_type in ("card.action.trigger", "card.action.trigger_v1"):
-        return await _handle_feishu_card_action(agent_id, body, event_id)
+        return _handle_feishu_card_action(agent_id, body, event_id)
 
     if event_type == "im.message.receive_v1":
         message = event.get("message", {})
@@ -1299,7 +1299,7 @@ def _build_synthetic_card_user_text(action_value: dict) -> str:
     return text
 
 
-async def _handle_feishu_card_action(
+def _handle_feishu_card_action(
     agent_id: uuid.UUID,
     body: dict,
     event_id: str,
@@ -1308,6 +1308,11 @@ async def _handle_feishu_card_action(
 
     Feishu requires a response within ~3s. We validate the payload, schedule the
     synthetic message processing as a background task, and return a toast immediately.
+
+    Sync on purpose so it can be called from both the async webhook path and the
+    synchronous lark-oapi WebSocket dispatcher (which marshals the return value
+    as the card-action response). Both contexts have a running event loop so
+    asyncio.create_task() works for the background synth-message dispatch.
 
     Action.value protocol (set by the agent_tools card builders):
         {"v": 1, "kind": "card_action"|"approval", "agent_id": "<uuid>",
