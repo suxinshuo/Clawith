@@ -5961,7 +5961,14 @@ async def _resolve_feishu_receive(
         if status_info["access_status"] != "active":
             return (None, None, None, None,
                     f"❌ Relationship to recipient is not active ({status_info['access_status_reason'] or 'restricted'})")
-        return (config, direct_user_id, "user_id", direct_rel.member, None)
+        # Prefer open_id (no extra scope required). Bots without
+        # contact:user.employee_id:readonly cannot send via user_id type.
+        member = direct_rel.member
+        if member and member.open_id:
+            return (config, member.open_id, "open_id", member, None)
+        if direct_user_id.startswith("ou_"):
+            return (config, direct_user_id, "open_id", member, None)
+        return (config, direct_user_id, "user_id", member, None)
 
     # Resolve by member_name through relationships.
     result = await db.execute(
@@ -5977,9 +5984,12 @@ async def _resolve_feishu_receive(
             break
     if not target_member:
         return (None, None, None, None, f"❌ {member_name} 不是我的关系")
-    if not target_member.external_id:
-        return (None, None, None, None, f"❌ {member_name} 没有关联可用的飞书 user_id")
-    return (config, target_member.external_id, "user_id", target_member, None)
+    # Prefer open_id; fall back to external_id (user_id) only when open_id missing.
+    if target_member.open_id:
+        return (config, target_member.open_id, "open_id", target_member, None)
+    if target_member.external_id:
+        return (config, target_member.external_id, "user_id", target_member, None)
+    return (None, None, None, None, f"❌ {member_name} 没有关联可用的飞书标识")
 
 
 async def _save_feishu_card_to_history(

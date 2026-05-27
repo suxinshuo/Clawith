@@ -122,6 +122,20 @@ def _build_button_element(
     return el
 
 
+def _wrap_buttons_in_row(buttons: list[dict]) -> dict:
+    # CardKit Schema 2.0 dropped `{tag: action, actions: [...]}`. Use column_set
+    # with one column per button for a horizontal row layout.
+    return {
+        "tag": "column_set",
+        "horizontal_spacing": "8px",
+        "horizontal_align": "left",
+        "columns": [
+            {"tag": "column", "width": "weighted", "weight": 1, "elements": [btn]}
+            for btn in buttons
+        ],
+    }
+
+
 def _wrap_card(elements: list[dict], title: str | None, summary: str | None) -> dict:
     config: dict = {"wide_screen_mode": True, "update_multi": True}
     if summary:
@@ -192,7 +206,7 @@ def build_actions_card(
             confirm=a.get("confirm"),
         ))
     if button_elements:
-        elements.append({"tag": "action", "actions": button_elements})
+        elements.append(_wrap_buttons_in_row(button_elements))
     return _wrap_card(elements, title, summary)
 
 
@@ -257,13 +271,10 @@ def build_approval_card(
         "label": reject_label,
         "context": {**base_ctx, "decision": "reject"},
     }
-    elements.append({
-        "tag": "action",
-        "actions": [
-            _build_button_element(label=approve_label, action_value=approve_value, button_type="primary"),
-            _build_button_element(label=reject_label, action_value=reject_value, button_type="danger"),
-        ],
-    })
+    elements.append(_wrap_buttons_in_row([
+        _build_button_element(label=approve_label, action_value=approve_value, button_type="primary"),
+        _build_button_element(label=reject_label, action_value=reject_value, button_type="danger"),
+    ]))
     return _wrap_card(elements, title, summary)
 
 

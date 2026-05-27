@@ -11,6 +11,28 @@ import uuid
 import pytest
 
 
+def _extract_buttons(card: dict) -> list[dict]:
+    """Walk the card body and return all `tag: button` elements. Schema 2.0
+    lays them out via column_set/column wrappers, so a flat scan is needed."""
+    out: list[dict] = []
+
+    def visit(el):
+        if not isinstance(el, dict):
+            return
+        if el.get("tag") == "button":
+            out.append(el)
+            return
+        for child in el.get("columns") or []:
+            for sub in child.get("elements") or []:
+                visit(sub)
+        for sub in el.get("elements") or []:
+            visit(sub)
+
+    for e in card["body"]["elements"]:
+        visit(e)
+    return out
+
+
 # ─── Card builder snapshots ────────────────────────────────────────
 
 
@@ -56,24 +78,25 @@ def test_build_actions_card_button_callback_protocol():
     # First element: markdown body
     assert elements[0]["tag"] == "markdown"
     assert "Pick one" in elements[0]["content"]
-    # Second element: action row
-    actions = elements[1]["actions"]
-    assert len(actions) == 2
+    # Second element: column_set row holding the buttons
+    assert elements[1]["tag"] == "column_set"
+    buttons = _extract_buttons(card)
+    assert len(buttons) == 2
 
     # Button protocol
-    btn0_value = actions[0]["behaviors"][0]["value"]
+    btn0_value = buttons[0]["behaviors"][0]["value"]
     assert btn0_value["v"] == 1
     assert btn0_value["kind"] == "card_action"
     assert btn0_value["agent_id"] == aid
     assert btn0_value["action_id"] == "go"
     assert btn0_value["label"] == "继续"
     assert btn0_value["context"] == {"k": "v"}
-    assert actions[0]["type"] == "primary"
+    assert buttons[0]["type"] == "primary"
 
     # Confirm dialog
-    assert actions[1]["confirm"]["title"]["content"] == "确认"
-    assert actions[1]["confirm"]["text"]["content"] == "放弃此操作？"
-    assert actions[1]["type"] == "danger"
+    assert buttons[1]["confirm"]["title"]["content"] == "确认"
+    assert buttons[1]["confirm"]["text"]["content"] == "放弃此操作？"
+    assert buttons[1]["type"] == "danger"
 
 
 def test_build_table_card_markdown_table():
@@ -105,18 +128,19 @@ def test_build_approval_card_decisions():
         approval_id="apv-42",
         agent_id=aid,
     )
-    actions = card["body"]["elements"][1]["actions"]
-    assert len(actions) == 2
-    approve_v = actions[0]["behaviors"][0]["value"]
-    reject_v = actions[1]["behaviors"][0]["value"]
+    assert card["body"]["elements"][1]["tag"] == "column_set"
+    buttons = _extract_buttons(card)
+    assert len(buttons) == 2
+    approve_v = buttons[0]["behaviors"][0]["value"]
+    reject_v = buttons[1]["behaviors"][0]["value"]
     assert approve_v["kind"] == "approval"
     assert approve_v["agent_id"] == aid
     assert approve_v["action_id"] == "approve:apv-42"
     assert approve_v["context"]["decision"] == "approve"
     assert approve_v["context"]["approval_id"] == "apv-42"
     assert reject_v["context"]["decision"] == "reject"
-    assert actions[0]["type"] == "primary"
-    assert actions[1]["type"] == "danger"
+    assert buttons[0]["type"] == "primary"
+    assert buttons[1]["type"] == "danger"
 
 
 # ─── send_card_with_fallback ───────────────────────────────────────
