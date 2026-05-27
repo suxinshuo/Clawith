@@ -151,9 +151,27 @@ class FeishuWSManager:
                 except Exception as e:
                     logger.exception(f"[Feishu WS] Could not dispatch event to main loop: {e}")
 
+        def handle_message_read(data: Any) -> None:
+            """No-op handler for im.message.message_read_v1 (read receipt) events.
+
+            We subscribe to this event on the Feishu open platform but do not
+            currently use it. Registering an explicit no-op handler prevents the
+            lark-oapi SDK from logging a noisy "processor not found" ERROR for
+            every read receipt that arrives.
+            """
+            try:
+                event_id = getattr(getattr(data, "header", None), "event_id", "")
+                logger.debug(
+                    f"[Feishu WS] Ignored im.message.message_read_v1 event_id={event_id} for agent {agent_id}"
+                )
+            except Exception:
+                # Best-effort debug log; never raise from a no-op handler.
+                pass
+
         dispatcher = (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_customized_event("im.message.receive_v1", handle_message)
+            .register_p2_customized_event("im.message.message_read_v1", handle_message_read)
             .build()
         )
         return dispatcher
