@@ -1163,6 +1163,20 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
 
             final_reply_text = reply_text
 
+            # Defense in depth: if the final reply is empty or the legacy
+            # "[LLM returned empty content]" sentinel but on_chunk already
+            # streamed text into the card during earlier rounds (e.g.
+            # Anthropic emits a prefatory text block alongside tool_use, then
+            # ends round N+1 with end_turn and zero output), recover the
+            # streamed content from _stream_buffer instead of letting the
+            # final card update overwrite what the user already saw.
+            _streamed_text = "".join(_stream_buffer).strip()
+            if (not final_reply_text or final_reply_text == "[LLM returned empty content]") and _streamed_text:
+                logger.warning(
+                    f"[Feishu] empty final_reply_text, recovering {len(_streamed_text)} chars from stream buffer"
+                )
+                final_reply_text = _streamed_text
+
             # Send final card update or fallback text
             if cardkit_card_id:
                 try:
@@ -1697,6 +1711,17 @@ async def _handle_feishu_file(
                         pass
 
         logger.info(f"[Feishu] Image LLM reply: {reply_text[:100]}")
+
+        # Same defense as the text streaming path: if the LLM returned empty
+        # content (or the legacy sentinel) but on_chunk already streamed text
+        # into the card, fall back to the streamed buffer so the final card
+        # update doesn't overwrite content the user already saw.
+        _img_streamed_text = "".join(_img_stream_buf).strip()
+        if (not reply_text or reply_text == "[LLM returned empty content]") and _img_streamed_text:
+            logger.warning(
+                f"[Feishu] empty image reply_text, recovering {len(_img_streamed_text)} chars from stream buffer"
+            )
+            reply_text = _img_streamed_text
 
         # Send final card or fallback text
         if _patch_msg_id:

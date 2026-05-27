@@ -456,6 +456,13 @@ async def call_llm(
     max_tokens = get_max_tokens(model.provider, model.model, getattr(model, 'max_output_tokens', None))
     _accumulated_usage = TokenUsage()
 
+    # Cross-round buffer of assistant text emitted alongside tool_calls. Used as
+    # a fallback return value when the final (no-tool_calls) round comes back
+    # with empty content — common with Anthropic end_turn after tool use on
+    # long histories, where the prefatory text in the prior round is the only
+    # thing the user actually saw via streaming.
+    _assistant_text_parts: list[str] = []
+
     # Tool-calling loop
     for round_i in range(_max_tool_rounds):
         # Dynamic tool-call limit warning
@@ -505,11 +512,19 @@ async def call_llm(
 
         # If no tool calls, return the final content
         if not response.tool_calls:
+            final_text = response.content or ""
+            if not final_text and _assistant_text_parts:
+                # Recover prefatory text the user saw via streaming in earlier
+                # rounds, instead of returning a "[LLM returned empty content]"
+                # sentinel that downstream renderers will use to overwrite the
+                # already-visible content.
+                final_text = "".join(_assistant_text_parts)
             if not response.content:
                 logger.warning(
                     "[LLM] empty final content "
                     "agent_id={} provider={} model={} round={} finish_reason={} "
-                    "content_is_none={} reasoning_chars={} history_msgs={} usage={}",
+                    "content_is_none={} reasoning_chars={} history_msgs={} "
+                    "prior_assistant_chars={} usage={}",
                     agent_id,
                     getattr(model, "provider", "?"),
                     getattr(model, "model", "?"),
@@ -518,12 +533,13 @@ async def call_llm(
                     response.content is None,
                     len(getattr(response, "reasoning_content", "") or ""),
                     len(api_messages),
+                    len(final_text),
                     getattr(response, "usage", None),
                 )
             if agent_id and _accumulated_usage.total_tokens > 0:
                 await record_token_usage(agent_id, _accumulated_usage)
             await client.close()
-            return response.content or "[LLM returned empty content]"
+            return final_text
 
         # Execute tool calls
         logger.info(f"[LLM] Round {round_i+1}: {len(response.tool_calls)} tool call(s)")
@@ -531,6 +547,11 @@ async def call_llm(
         if retry_instruction:
             api_messages.append(LLMMessage(role="user", content=retry_instruction))
             continue
+
+        # Buffer prefatory text so we can fall back to it if a later round
+        # ends with empty content (Anthropic end_turn after tool use).
+        if response.content:
+            _assistant_text_parts.append(response.content)
 
         # Add assistant message with tool calls
         api_messages.append(LLMMessage(
