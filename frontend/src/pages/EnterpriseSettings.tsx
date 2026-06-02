@@ -4315,7 +4315,7 @@ export default function EnterpriseSettings() {
                                                         Edit Server
                                                     </button>
                                                 )}
-                                                {hasOwnConfig && (
+                                                {(hasOwnConfig || tool.type === 'mcp') && (
                                                     <button
                                                         style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', color: 'var(--text-secondary)' }}
                                                         title={t('enterprise.tools.configureSettings', 'Configure settings')}
@@ -4554,7 +4554,7 @@ export default function EnterpriseSettings() {
                             {editingToolId && (() => {
                                 const tool = allTools.find(t => t.id === editingToolId);
                                 if (!tool) return null;
-                                const visibleFields = (tool.config_schema.fields || []).filter((field: any) => {
+                                const visibleFields = (tool.config_schema?.fields || []).filter((field: any) => {
                                     if (field.depends_on) {
                                         return Object.entries(field.depends_on).every(([k, vals]: [string, any]) =>
                                             vals.includes(editingConfig[k])
