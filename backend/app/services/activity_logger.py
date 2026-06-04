@@ -61,6 +61,36 @@ def _normalize_activity_query(arguments: dict) -> dict:
     return {"limit": limit, "hours": hours, "action_types": action_types, "keyword": keyword}
 
 
+async def query_activities(
+    agent_id: uuid.UUID,
+    *,
+    limit: int = _DEFAULT_LIMIT,
+    hours: int | None = None,
+    action_types: list[str] | None = None,
+    keyword: str | None = None,
+) -> list[AgentActivityLog]:
+    """Return the agent's own activity log rows, newest first.
+
+    Always scoped to the given agent_id. Optional filters: time window (hours),
+    action_type set, and a case-insensitive substring match on summary.
+    """
+    stmt = select(AgentActivityLog).where(AgentActivityLog.agent_id == agent_id)
+    if hours:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        stmt = stmt.where(AgentActivityLog.created_at >= cutoff)
+    if action_types:
+        stmt = stmt.where(AgentActivityLog.action_type.in_(action_types))
+    if keyword:
+        # Escape LIKE wildcards in the user-supplied keyword.
+        esc = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        stmt = stmt.where(AgentActivityLog.summary.ilike(f"%{esc}%", escape="\\"))
+    stmt = stmt.order_by(AgentActivityLog.created_at.desc()).limit(limit)
+
+    async with async_session() as db:
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
+
 async def log_activity(
     agent_id: uuid.UUID,
     action_type: str,
