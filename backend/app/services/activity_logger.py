@@ -1,12 +1,94 @@
 """Activity logger — simple async function to record agent actions."""
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from loguru import logger
+from sqlalchemy import select
 
 from app.database import async_session
 from app.models.activity_log import AgentActivityLog
+
+# The valid action_type values stored in AgentActivityLog.action_type.
+# Mirrors the Enum in app/models/activity_log.py.
+ACTIVITY_ACTION_TYPES = frozenset({
+    "chat_reply", "tool_call", "feishu_msg_sent", "agent_msg_sent",
+    "web_msg_sent", "task_created", "task_updated", "file_written",
+    "error", "schedule_run", "heartbeat", "plaza_post",
+})
+
+_DEFAULT_LIMIT = 30
+_MAX_LIMIT = 100
+
+
+def _normalize_activity_query(arguments: dict) -> dict:
+    """Parse and clamp the get_activity_log tool arguments into safe values.
+
+    Pure function — no DB access. Garbage values fall back to safe defaults
+    rather than raising, so a malformed LLM tool call never breaks the loop.
+    """
+    arguments = arguments or {}
+
+    # limit: int in 1..100, default 30
+    try:
+        limit = int(arguments.get("limit", _DEFAULT_LIMIT))
+    except (TypeError, ValueError):
+        limit = _DEFAULT_LIMIT
+    limit = max(1, min(_MAX_LIMIT, limit))
+
+    # hours: positive int, else None (no window); 0 means no window
+    hours = None
+    try:
+        h = int(arguments.get("hours")) if arguments.get("hours") is not None else None
+        if h and h > 0:
+            hours = h
+    except (TypeError, ValueError):
+        hours = None
+
+    # action_types: list of valid enum values, else None
+    raw_types = arguments.get("action_types")
+    if isinstance(raw_types, str):
+        raw_types = [raw_types]
+    action_types = None
+    if isinstance(raw_types, (list, tuple)):
+        valid = [t for t in raw_types if t in ACTIVITY_ACTION_TYPES]
+        action_types = valid or None
+
+    # keyword: non-empty stripped string, else None
+    raw_kw = arguments.get("keyword")
+    keyword = raw_kw.strip() if isinstance(raw_kw, str) and raw_kw.strip() else None
+
+    return {"limit": limit, "hours": hours, "action_types": action_types, "keyword": keyword}
+
+
+async def query_activities(
+    agent_id: uuid.UUID,
+    *,
+    limit: int = _DEFAULT_LIMIT,
+    hours: int | None = None,
+    action_types: list[str] | None = None,
+    keyword: str | None = None,
+) -> list[AgentActivityLog]:
+    """Return the agent's own activity log rows, newest first.
+
+    Always scoped to the given agent_id. Optional filters: time window (hours),
+    action_type set, and a case-insensitive substring match on summary.
+    """
+    stmt = select(AgentActivityLog).where(AgentActivityLog.agent_id == agent_id)
+    if hours:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        stmt = stmt.where(AgentActivityLog.created_at >= cutoff)
+    if action_types:
+        stmt = stmt.where(AgentActivityLog.action_type.in_(action_types))
+    if keyword:
+        # Escape LIKE wildcards in the user-supplied keyword.
+        esc = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        stmt = stmt.where(AgentActivityLog.summary.ilike(f"%{esc}%", escape="\\"))
+    stmt = stmt.order_by(AgentActivityLog.created_at.desc()).limit(limit)
+
+    async with async_session() as db:
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
 
 
 async def log_activity(
@@ -29,3 +111,30 @@ async def log_activity(
             await db.commit()
     except Exception as e:
         logger.error(f"[ActivityLog] Failed to log {action_type}: {e}")
+
+
+_SUMMARY_MAX = 150
+
+
+def format_activity_log(rows: list, *, hours: int | None = None) -> str:
+    """Render activity rows (newest-first) as compact, chronological lines.
+
+    Pure function. `rows` are AgentActivityLog-like objects with action_type,
+    summary, and created_at attributes.
+    """
+    if not rows:
+        return "No matching activity."
+
+    count = len(rows)
+    noun = "entry" if count == 1 else "entries"
+    window = f" (last {hours}h)" if hours else ""
+    header = f"{count} activity log {noun}{window}:"
+
+    lines = [header]
+    for row in reversed(rows):  # newest-first -> chronological
+        ts = row.created_at.strftime("%m-%d %H:%M") if row.created_at else "??-?? ??:??"
+        summary = (row.summary or "").strip()
+        if len(summary) > _SUMMARY_MAX:
+            summary = summary[:_SUMMARY_MAX] + "…"
+        lines.append(f"- [{ts}] {row.action_type}: {summary}")
+    return "\n".join(lines)

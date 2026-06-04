@@ -71,6 +71,29 @@ BUILTIN_TOOLS = [
         },
     },
     {
+        "name": "get_activity_log",
+        "display_name": "Activity Log",
+        "description": "Retrieve your own recent work/activity log — actions you've taken such as chat replies, tool calls, messages sent, tasks created/updated, files written, scheduled runs, and errors. Use this to recall what you've recently done.",
+        "category": "file",
+        "icon": "🗒️",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Max number of entries to return (default 30, max 100)."},
+                "hours": {"type": "integer", "description": "Only return entries from the last N hours. e.g. 24 = today, 168 = past week. Omit for no time limit."},
+                "action_types": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["chat_reply", "tool_call", "feishu_msg_sent", "agent_msg_sent", "web_msg_sent", "task_created", "task_updated", "file_written", "error", "schedule_run", "heartbeat", "plaza_post"]},
+                    "description": "Restrict to these action types. Omit for all.",
+                },
+                "keyword": {"type": "string", "description": "Case-insensitive substring match against the entry summary."},
+            },
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
         "name": "list_focus_items",
         "display_name": "List Focus Items",
         "description": "List structured Focus items from the system database.",
