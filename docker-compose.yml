@@ -40,7 +40,8 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://clawith:clawith@postgres:5432/clawith?options=-ctimezone%3DAsia%2FShanghai"
+      TZ: Asia/Shanghai
+      DATABASE_URL: postgresql+asyncpg://clawith:clawith@postgres:5432/clawith
       REDIS_URL: redis://redis:6379/0
       AGENT_DATA_DIR: /data/agents
       AGENT_DATA_HOST_DIR: ${AGENT_DATA_HOST_DIR:-}
