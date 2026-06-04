@@ -257,6 +257,40 @@ AGENT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_activity_log",
+            "description": "Retrieve your own recent work/activity log — actions you've taken such as chat replies, tool calls, messages sent, tasks created/updated, files written, scheduled runs, and errors. Use this to recall what you've recently done.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max number of entries to return (default 30, max 100).",
+                    },
+                    "hours": {
+                        "type": "integer",
+                        "description": "Only return entries from the last N hours. e.g. 24 = today, 168 = past week. Omit for no time limit.",
+                    },
+                    "action_types": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["chat_reply", "tool_call", "feishu_msg_sent", "agent_msg_sent",
+                                     "web_msg_sent", "task_created", "task_updated", "file_written",
+                                     "error", "schedule_run", "heartbeat", "plaza_post"],
+                        },
+                        "description": "Restrict to these action types. Omit for all.",
+                    },
+                    "keyword": {
+                        "type": "string",
+                        "description": "Case-insensitive substring match against the entry summary.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_focus_items",
             "description": "List your structured Focus items. Focus is your current working state and is stored in the system database, not in focus.md.",
             "parameters": {
@@ -2831,6 +2865,25 @@ async def execute_tool(
                 return "❌ Missing required argument 'key' for complete_focus_item"
             item = await complete_focus_item(agent_id, key=key)
             result = f"✅ Focus item completed: {key}" if item else f"❌ Focus item not found: {key}"
+        elif tool_name == "get_activity_log":
+            from app.services.activity_logger import (
+                _normalize_activity_query,
+                query_activities,
+                format_activity_log,
+            )
+            opts = _normalize_activity_query(arguments)
+            try:
+                rows = await query_activities(
+                    agent_id,
+                    limit=opts["limit"],
+                    hours=opts["hours"],
+                    action_types=opts["action_types"],
+                    keyword=opts["keyword"],
+                )
+                result = format_activity_log(rows, hours=opts["hours"])
+            except Exception as e:
+                logger.error(f"[get_activity_log] query failed: {e}")
+                result = "⚠️ Failed to read activity log. Please try again."
         elif tool_name == "read_file":
             path = arguments.get("path")
             if not path:

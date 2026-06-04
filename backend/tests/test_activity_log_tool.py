@@ -156,3 +156,60 @@ def test_format_no_window_header_and_truncation():
     # summary truncated to 150 chars + ellipsis
     assert "a" * 150 + "…" in lines[1]
     assert "a" * 151 not in lines[1]
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_get_activity_log_wires_query_and_format():
+    from pathlib import Path
+    from unittest.mock import AsyncMock
+    from app.services import agent_tools
+
+    agent_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    rows = [
+        SimpleNamespace(action_type="tool_call", summary="searched web",
+                        created_at=datetime(2026, 6, 3, 9, 14, tzinfo=timezone.utc)),
+    ]
+
+    with patch.object(agent_tools, "ensure_workspace", AsyncMock(return_value=Path("/tmp/ws"))), \
+         patch.object(agent_tools, "_get_agent_tenant_id", AsyncMock(return_value=None)), \
+         patch("app.services.activity_logger.query_activities", AsyncMock(return_value=rows)) as q:
+        result = await agent_tools.execute_tool(
+            "get_activity_log",
+            {"hours": 24, "limit": 5, "action_types": ["tool_call"], "keyword": "web"},
+            agent_id,
+            user_id,
+        )
+
+    # query was called scoped to this agent with normalized kwargs
+    q.assert_awaited_once()
+    assert q.await_args.args[0] == agent_id
+    assert q.await_args.kwargs == {"limit": 5, "hours": 24,
+                                   "action_types": ["tool_call"], "keyword": "web"}
+    # output is the formatted compact log
+    assert result.splitlines()[0] == "1 activity log entry (last 24h):"
+    assert "- [06-03 09:14] tool_call: searched web" in result
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_get_activity_log_empty():
+    from pathlib import Path
+    from unittest.mock import AsyncMock
+    from app.services import agent_tools
+
+    with patch.object(agent_tools, "ensure_workspace", AsyncMock(return_value=Path("/tmp/ws"))), \
+         patch.object(agent_tools, "_get_agent_tenant_id", AsyncMock(return_value=None)), \
+         patch("app.services.activity_logger.query_activities", AsyncMock(return_value=[])):
+        result = await agent_tools.execute_tool(
+            "get_activity_log", {}, uuid.uuid4(), uuid.uuid4()
+        )
+    assert result == "No matching activity."
+
+
+def test_get_activity_log_registered_in_both_catalogs():
+    from app.services.agent_tools import AGENT_TOOLS
+    from app.services.tool_seeder import BUILTIN_TOOLS
+    agent_names = {t["function"]["name"] for t in AGENT_TOOLS}
+    builtin_names = {t["name"] for t in BUILTIN_TOOLS}
+    assert "get_activity_log" in agent_names
+    assert "get_activity_log" in builtin_names
