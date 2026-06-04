@@ -8,13 +8,13 @@ safe (it only depends on app.database and app.models).
 """
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from app.services.activity_logger import _normalize_activity_query
+from app.services.activity_logger import _normalize_activity_query, format_activity_log
 
 
 def test_normalize_defaults():
@@ -122,9 +122,6 @@ async def test_query_activities_minimal_only_agent_and_limit():
     assert "limit 30" in sql
     assert "action_type in" not in sql
     assert "like" not in sql
-
-
-from app.services.activity_logger import format_activity_log
 
 
 def _row(action_type, summary, dt):
