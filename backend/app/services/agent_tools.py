@@ -2871,6 +2871,7 @@ async def execute_tool(
                 query_activities,
                 format_activity_log,
             )
+            from app.services.timezone_utils import get_agent_timezone
             opts = _normalize_activity_query(arguments)
             try:
                 rows = await query_activities(
@@ -2880,7 +2881,8 @@ async def execute_tool(
                     action_types=opts["action_types"],
                     keyword=opts["keyword"],
                 )
-                result = format_activity_log(rows, hours=opts["hours"])
+                tz = await get_agent_timezone(agent_id)
+                result = format_activity_log(rows, hours=opts["hours"], tz=tz)
             except Exception as e:
                 logger.error(f"[get_activity_log] query failed: {e}")
                 result = "⚠️ Failed to read activity log. Please try again."

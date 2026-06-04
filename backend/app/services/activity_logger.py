@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from loguru import logger
 from sqlalchemy import select
@@ -116,14 +117,25 @@ async def log_activity(
 _SUMMARY_MAX = 150
 
 
-def format_activity_log(rows: list, *, hours: int | None = None) -> str:
+def format_activity_log(rows: list, *, hours: int | None = None, tz: str = "UTC") -> str:
     """Render activity rows (newest-first) as compact, chronological lines.
 
     Pure function. `rows` are AgentActivityLog-like objects with action_type,
     summary, and created_at attributes.
+
+    Timestamps are stored in UTC (asyncpg returns timestamptz as UTC-aware
+    datetimes regardless of the connection's timezone setting), so they are
+    explicitly converted to `tz` for display — callers pass the agent's
+    effective timezone (agent → tenant → UTC). A naive created_at is assumed
+    to be UTC, and an unknown `tz` falls back to UTC.
     """
     if not rows:
         return "No matching activity."
+
+    try:
+        display_tz = ZoneInfo(tz)
+    except Exception:
+        display_tz = ZoneInfo("UTC")
 
     count = len(rows)
     noun = "entry" if count == 1 else "entries"
@@ -132,7 +144,13 @@ def format_activity_log(rows: list, *, hours: int | None = None) -> str:
 
     lines = [header]
     for row in reversed(rows):  # newest-first -> chronological
-        ts = row.created_at.strftime("%m-%d %H:%M") if row.created_at else "??-?? ??:??"
+        if row.created_at:
+            created = row.created_at
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            ts = created.astimezone(display_tz).strftime("%m-%d %H:%M")
+        else:
+            ts = "??-?? ??:??"
         summary = (row.summary or "").strip()
         if len(summary) > _SUMMARY_MAX:
             summary = summary[:_SUMMARY_MAX] + "…"
