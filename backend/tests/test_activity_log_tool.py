@@ -122,3 +122,37 @@ async def test_query_activities_minimal_only_agent_and_limit():
     assert "limit 30" in sql
     assert "action_type in" not in sql
     assert "like" not in sql
+
+
+from app.services.activity_logger import format_activity_log
+
+
+def _row(action_type, summary, dt):
+    return SimpleNamespace(action_type=action_type, summary=summary, created_at=dt)
+
+
+def test_format_empty():
+    assert format_activity_log([], hours=24) == "No matching activity."
+
+
+def test_format_orders_chronologically_with_header():
+    # query returns newest-first; formatter must show oldest-first
+    t_new = datetime(2026, 6, 3, 9, 15, tzinfo=timezone.utc)
+    t_old = datetime(2026, 6, 3, 9, 14, tzinfo=timezone.utc)
+    rows = [_row("chat_reply", "replied", t_new), _row("tool_call", "searched", t_old)]
+    out = format_activity_log(rows, hours=24)
+    lines = out.splitlines()
+    assert lines[0] == "2 activity log entries (last 24h):"
+    assert lines[1] == "- [06-03 09:14] tool_call: searched"
+    assert lines[2] == "- [06-03 09:15] chat_reply: replied"
+
+
+def test_format_no_window_header_and_truncation():
+    long_summary = "a" * 300
+    rows = [_row("error", long_summary, datetime(2026, 6, 3, 9, 0, tzinfo=timezone.utc))]
+    out = format_activity_log(rows, hours=None)
+    lines = out.splitlines()
+    assert lines[0] == "1 activity log entry:"
+    # summary truncated to 150 chars + ellipsis
+    assert "a" * 150 + "…" in lines[1]
+    assert "a" * 151 not in lines[1]

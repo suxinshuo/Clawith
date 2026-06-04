@@ -111,3 +111,30 @@ async def log_activity(
             await db.commit()
     except Exception as e:
         logger.error(f"[ActivityLog] Failed to log {action_type}: {e}")
+
+
+_SUMMARY_MAX = 150
+
+
+def format_activity_log(rows: list, *, hours: int | None = None) -> str:
+    """Render activity rows (newest-first) as compact, chronological lines.
+
+    Pure function. `rows` are AgentActivityLog-like objects with action_type,
+    summary, and created_at attributes.
+    """
+    if not rows:
+        return "No matching activity."
+
+    count = len(rows)
+    noun = "entry" if count == 1 else "entries"
+    window = f" (last {hours}h)" if hours else ""
+    header = f"{count} activity log {noun}{window}:"
+
+    lines = [header]
+    for row in reversed(rows):  # newest-first -> chronological
+        ts = row.created_at.strftime("%m-%d %H:%M") if row.created_at else "??-?? ??:??"
+        summary = (row.summary or "").strip()
+        if len(summary) > _SUMMARY_MAX:
+            summary = summary[:_SUMMARY_MAX] + "…"
+        lines.append(f"- [{ts}] {row.action_type}: {summary}")
+    return "\n".join(lines)
