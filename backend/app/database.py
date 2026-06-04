@@ -14,6 +14,9 @@ engine = create_async_engine(
     echo=settings.DEBUG,
     pool_size=20,
     max_overflow=10,
+    # Store timestamps in UTC, but make each connection use Asia/Shanghai
+    # so that queries read/return timestamptz values in local time.
+    connect_args={"server_settings": {"timezone": "Asia/Shanghai"}},
 )
 
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
