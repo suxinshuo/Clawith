@@ -1461,6 +1461,65 @@ class GeminiClient(LLMClient):
 # Anthropic Native Client
 # ============================================================================
 
+def _anthropic_blocks_are_empty(blocks: list) -> bool:
+    """True when content blocks carry no usable payload (only blank text).
+
+    Blocks such as tool_use / tool_result / image / thinking always count as
+    content and make the turn non-empty.
+    """
+    for b in blocks:
+        if not isinstance(b, dict):
+            return False
+        if b.get("type") == "text":
+            if (b.get("text") or "").strip():
+                return False
+        else:
+            return False
+    return True
+
+
+def _normalize_anthropic_messages(messages: list[dict]) -> list[dict]:
+    """Sanitize a converted Anthropic message list to satisfy the Messages API
+    structural constraints: strictly alternating user/assistant turns, no empty
+    content, and a user turn first.
+
+    This is intentionally defensive and self-contained. Upstream context
+    builders (A2A history replay, the websocket tool loop) may emit consecutive
+    same-role turns — e.g. a just-persisted inbound message plus a freshly
+    appended prompt — or empty assistant rows. OpenAI-compatible gateways
+    tolerate these, but the native Anthropic endpoint rejects them with a 400
+    ``invalid_request_error``. Normalizing here keeps every Anthropic call safe
+    without touching the callers.
+    """
+    # 1. Coerce each content to a block list and drop empty turns.
+    coerced: list[dict] = []
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, str):
+            blocks = [{"type": "text", "text": content}] if content.strip() else []
+        elif isinstance(content, list):
+            blocks = content
+        else:
+            blocks = []
+        if not blocks or _anthropic_blocks_are_empty(blocks):
+            continue
+        coerced.append({"role": m.get("role"), "content": blocks})
+
+    # 2. Merge consecutive same-role turns so user/assistant strictly alternate.
+    merged: list[dict] = []
+    for m in coerced:
+        if merged and merged[-1]["role"] == m["role"]:
+            merged[-1]["content"].extend(m["content"])
+        else:
+            merged.append({"role": m["role"], "content": list(m["content"])})
+
+    # 3. A conversation must open with a user turn — drop any leading assistant.
+    while merged and merged[0]["role"] != "user":
+        merged.pop(0)
+
+    return merged
+
+
 class AnthropicClient(LLMClient):
     """Client for Anthropic's native Messages API.
 
@@ -1535,6 +1594,11 @@ class AnthropicClient(LLMClient):
                 formatted = msg.to_anthropic_format()
                 if formatted:
                     anthropic_messages.append(formatted)
+
+        # Enforce Anthropic Messages API structure (alternating roles, no empty
+        # turns, user-first). Callers may emit consecutive same-role turns that
+        # OpenAI-compatible gateways tolerate but the native endpoint rejects.
+        anthropic_messages = _normalize_anthropic_messages(anthropic_messages)
 
         # Add cache_control to the last user message for prompt caching
         # TTL must be <= system block TTL (non-increasing order: tools 1h >= system 5m >= messages 5m)
