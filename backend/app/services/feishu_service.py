@@ -311,21 +311,36 @@ class FeishuService:
                 f"[Feishu] {stage} returned non-JSON response "
                 f"(http_status={resp.status_code}, message_id={message_id}): {e}"
             )
-            raise RuntimeError(f"Feishu {stage} returned invalid JSON")
+            raise FeishuAPIError(
+                stage=stage,
+                http_status=resp.status_code,
+                msg="Provider returned invalid JSON",
+                message_id=message_id,
+            ) from e
 
         error_info = data.get("error") if isinstance(data, dict) else {}
         log_id = error_info.get("log_id") if isinstance(error_info, dict) else None
         troubleshooter = error_info.get("troubleshooter") if isinstance(error_info, dict) else None
 
-        if resp.status_code >= 400:
+        code = data.get("code") if isinstance(data, dict) else None
+        msg = data.get("msg", "") if isinstance(data, dict) else ""
+
+        if not 200 <= resp.status_code < 300:
             logger.warning(
                 f"[Feishu] {stage} HTTP failure "
                 f"(http_status={resp.status_code}, message_id={message_id}, body={str(data)[:300]})"
             )
+            raise FeishuAPIError(
+                stage=stage,
+                http_status=resp.status_code,
+                code=code,
+                msg=msg or "Provider rejected the HTTP request",
+                log_id=log_id,
+                troubleshooter=troubleshooter,
+                message_id=message_id,
+            )
 
-        code = data.get("code")
-        msg = data.get("msg", "")
-        if code is not None and code != 0:
+        if code != 0:
             logger.warning(
                 f"[Feishu] {stage} business failure "
                 f"(message_id={message_id}, code={code}, msg={msg})"
@@ -334,7 +349,7 @@ class FeishuService:
                 stage=stage,
                 http_status=resp.status_code,
                 code=code,
-                msg=msg,
+                msg=msg or "Provider response omitted a successful business code",
                 log_id=log_id,
                 troubleshooter=troubleshooter,
                 message_id=message_id,
@@ -500,9 +515,8 @@ class FeishuService:
             from app.services.registration_service import registration_service
             # No phone available in this specific Feishu login block, but it handles email/username matching
             identity = await registration_service.find_or_create_identity(
-                db,
                 email=email,
-                phone=user_info.get("mobile"),
+                phone=feishu_user.get("mobile"),
                 username=username,
                 password=open_id,
             )
@@ -816,12 +830,18 @@ class FeishuService:
 
             # Send text accompany message first if provided
             if accompany_msg:
-                await client.post(
+                text_resp = await client.post(
                     f"{FEISHU_SEND_MSG_URL}?receive_id_type={receive_id_type}",
                     json={"receive_id": receive_id, "msg_type": "text",
                           "content": _json.dumps({"text": accompany_msg})},
                     headers=headers,
                 )
+                if text_resp.status_code != 200:
+                    logger.error(
+                        f"[Feishu] Failed to send text accompany message: "
+                        f"status={text_resp.status_code}, body={text_resp.text}, "
+                        f"receive_id={receive_id}, receive_id_type={receive_id_type}"
+                    )
 
             # Send file message
             resp = await client.post(
@@ -830,6 +850,13 @@ class FeishuService:
                       "content": _json.dumps({"file_key": file_key})},
                 headers=headers,
             )
+            if resp.status_code != 200:
+                logger.error(
+                    f"[Feishu] Failed to send file message: "
+                    f"status={resp.status_code}, body={resp.text}, "
+                    f"receive_id={receive_id}, receive_id_type={receive_id_type}, "
+                    f"file_key={file_key}"
+                )
             return resp.json()
 
     # --- Bitable (多维表格) API ---
@@ -842,7 +869,10 @@ class FeishuService:
                 f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables",
                 headers={"Authorization": f"Bearer {token}"}
             )
-            return resp.json()
+            return self._parse_api_response(
+                resp,
+                stage="bitable_list_tables",
+            )
 
     async def bitable_list_fields(self, app_id: str, app_secret: str, app_token: str, table_id: str, *, access_token: str | None = None) -> dict:
         """List all fields in a specific table."""
@@ -852,21 +882,42 @@ class FeishuService:
                 f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields",
                 headers={"Authorization": f"Bearer {token}"}
             )
-            return resp.json()
+            return self._parse_api_response(
+                resp,
+                stage="bitable_list_fields",
+            )
 
-    async def bitable_query_records(self, app_id: str, app_secret: str, app_token: str, table_id: str, filters: dict | None = None, *, access_token: str | None = None) -> dict:
+    async def bitable_query_records(
+        self,
+        app_id: str,
+        app_secret: str,
+        app_token: str,
+        table_id: str,
+        filters: dict | None = None,
+        *,
+        access_token: str | None = None,
+        page_size: int = 100,
+        page_token: str | None = None,
+    ) -> dict:
         """Query records in a specific table."""
         token = access_token or await self.get_tenant_access_token(app_id, app_secret)
-        body = {}
-        if filters:
-            body = filters
+        body = dict(filters) if filters else {}
+        params: dict[str, object] = {
+            "page_size": max(1, min(page_size, 500)),
+        }
+        if page_token:
+            params["page_token"] = page_token
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/search",
                 json=body,
+                params=params,
                 headers={"Authorization": f"Bearer {token}"}
             )
-            return resp.json()
+            return self._parse_api_response(
+                resp,
+                stage="bitable_query_records",
+            )
 
     async def bitable_create_record(self, app_id: str, app_secret: str, app_token: str, table_id: str, fields: dict, *, access_token: str | None = None) -> dict:
         """Create a new record in a specific table."""
@@ -877,7 +928,10 @@ class FeishuService:
                 json={"fields": fields},
                 headers={"Authorization": f"Bearer {token}"}
             )
-            return resp.json()
+            return self._parse_api_response(
+                resp,
+                stage="bitable_create_record",
+            )
 
     async def bitable_update_record(self, app_id: str, app_secret: str, app_token: str, table_id: str, record_id: str, fields: dict, *, access_token: str | None = None) -> dict:
         """Update an existing record in a specific table."""
@@ -888,7 +942,10 @@ class FeishuService:
                 json={"fields": fields},
                 headers={"Authorization": f"Bearer {token}"}
             )
-            return resp.json()
+            return self._parse_api_response(
+                resp,
+                stage="bitable_update_record",
+            )
             
     async def bitable_delete_record(self, app_id: str, app_secret: str, app_token: str, table_id: str, record_id: str, *, access_token: str | None = None) -> dict:
         """Delete an existing record in a specific table."""
@@ -898,7 +955,10 @@ class FeishuService:
                 f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}",
                 headers={"Authorization": f"Bearer {token}"}
             )
-            return resp.json()
+            return self._parse_api_response(
+                resp,
+                stage="bitable_delete_record",
+            )
 
     async def bitable_create_app(self, app_id: str, app_secret: str, name: str, folder_token: str = "", *, access_token: str | None = None) -> dict:
         """Create a new Bitable (多维表格) app.
@@ -922,7 +982,10 @@ class FeishuService:
                 json=body,
                 headers={"Authorization": f"Bearer {token}"},
             )
-            return resp.json()
+            return self._parse_api_response(
+                resp,
+                stage="bitable_create_app",
+            )
 
 
     # --- Docs API ---
@@ -934,7 +997,7 @@ class FeishuService:
                 f"https://open.feishu.cn/open-apis/docx/v1/documents/{document_id}/raw_content",
                 headers={"Authorization": f"Bearer {token}"}
             )
-            return resp.json()
+            return self._parse_api_response(resp, stage="doc_read")
 
     async def search_feishu_doc(self, app_id: str, app_secret: str, payload: dict, *, access_token: str | None = None) -> dict:
         """Search Feishu documents by keyword via the Docs Search API."""
@@ -962,7 +1025,7 @@ class FeishuService:
                 json=body,
                 headers={"Authorization": f"Bearer {token}"}
             )
-            return resp.json()
+            return self._parse_api_response(resp, stage="doc_create")
 
     async def append_feishu_doc(self, app_id: str, app_secret: str, document_id: str, content: str, *, access_token: str | None = None) -> dict:
         """Append text to the end of a Feishu Doc (document_id is also the root block_id)."""

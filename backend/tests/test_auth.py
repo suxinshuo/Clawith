@@ -9,6 +9,15 @@ from fastapi import HTTPException
 
 from app.api import auth as auth_api
 from app.core.security import hash_password
+from app.database import _session_ctx
+
+
+async def run_with_db(db, func, *args, **kwargs):
+    token = _session_ctx.set(db)
+    try:
+        return await func(*args, **kwargs)
+    finally:
+        _session_ctx.reset(token)
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +95,7 @@ def _make_user(identity_id, *, role="member", tenant_id=None):
         role=role,
         tenant_id=tenant_id or uuid.uuid4(),
         identity=_make_identity(),
+        is_active=True,
     )
 
 
@@ -110,7 +120,7 @@ async def test_login_invalid_credentials_no_identity():
     bg = AsyncMock()
 
     with pytest.raises(HTTPException) as exc:
-        await auth_api.login(data, bg, db)
+        await run_with_db(db, auth_api.login, data, bg)
     assert exc.value.status_code == 401
 
 
@@ -123,7 +133,7 @@ async def test_login_invalid_credentials_wrong_password():
     bg = AsyncMock()
 
     with pytest.raises(HTTPException) as exc:
-        await auth_api.login(data, bg, db)
+        await run_with_db(db, auth_api.login, data, bg)
     assert exc.value.status_code == 401
 
 
@@ -136,7 +146,7 @@ async def test_login_disabled_account():
     bg = AsyncMock()
 
     with pytest.raises(HTTPException) as exc:
-        await auth_api.login(data, bg, db)
+        await run_with_db(db, auth_api.login, data, bg)
     assert exc.value.status_code == 403
     assert "disabled" in str(exc.value.detail).lower()
 
@@ -153,9 +163,10 @@ async def test_login_unverified_email():
     data = _make_login_data()
     bg = AsyncMock()
 
-    with patch.object(auth_api, "_send_verification_email_task", new_callable=AsyncMock):
-        with pytest.raises(HTTPException) as exc:
-            await auth_api.login(data, bg, db)
+    with patch("app.services.system_email_service.resolve_email_config_async", new_callable=AsyncMock, return_value={"host": "localhost"}):
+        with patch.object(auth_api, "_send_verification_email_task", new_callable=AsyncMock):
+            with pytest.raises(HTTPException) as exc:
+                await run_with_db(db, auth_api.login, data, bg)
     assert exc.value.status_code == 403
     assert exc.value.detail["needs_verification"] is True
 
@@ -180,7 +191,47 @@ async def test_get_me_returns_user():
         identity=identity,
     )
 
-    with patch("app.api.auth.UserOut") as MockUserOut:
-        MockUserOut.model_validate.return_value = {"id": str(user.id), "email": user.email}
+    class DummyUserOut:
+        def __init__(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+        @classmethod
+        def model_validate(cls, obj):
+            return cls(id=str(obj.id), email=obj.email)
+
+    with patch("app.api.auth.UserOut", new=DummyUserOut):
         result = await auth_api.get_me(current_user=user)
-    MockUserOut.model_validate.assert_called_once_with(user)
+    assert result.id == str(user.id)
+    assert result.email == user.email
+    assert result.is_platform_admin is False
+
+
+@pytest.mark.asyncio
+async def test_oauth_callback_passes_redirect_uri():
+    """OAuth callback should forward redirect_uri for providers like Google."""
+    identity = _make_identity()
+    user = _make_user(identity.id)
+    provider = AsyncMock()
+    provider.exchange_code_for_token = AsyncMock(return_value={"access_token": "provider-token"})
+    provider.get_user_info = AsyncMock(return_value=SimpleNamespace())
+    provider.find_or_create_user = AsyncMock(return_value=(user, False))
+    data = SimpleNamespace(
+        code="oauth-code",
+        state="oauth-state",
+        redirect_uri="https://example.com/oauth/callback/google",
+        pending_token=None,
+        tenant_id=None,
+    )
+
+    with patch("app.services.auth_registry.auth_provider_registry.get_provider", new=AsyncMock(return_value=provider)):
+        class DummyTokenResponse:
+            def __init__(self, access_token, **kwargs):
+                self.access_token = access_token
+        with patch("app.api.auth.TokenResponse", new=DummyTokenResponse):
+            with patch("app.api.auth.UserOut") as MockUserOut:
+                MockUserOut.model_validate.return_value = {"id": str(user.id)}
+                with patch.object(auth_api, "create_access_token", return_value="jwt-token"):
+                    result = await run_with_db(RecordingDB(), auth_api.oauth_callback, "google", data)
+
+    provider.exchange_code_for_token.assert_awaited_once_with("oauth-code", "https://example.com/oauth/callback/google")
+    assert result.access_token == "jwt-token"

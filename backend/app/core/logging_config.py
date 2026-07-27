@@ -3,7 +3,6 @@
 import sys
 import logging
 from contextvars import ContextVar
-from typing import Optional
 
 from loguru import logger
 
@@ -21,6 +20,8 @@ NOISY_CONNECTION_LOGGERS = {
     "websockets.server": logging.WARNING,
     "websockets.client": logging.WARNING,
     "uvicorn.protocols.websockets.websockets_impl": logging.WARNING,
+    # Supress "Failed to parse headers" warning from urllib3 when interacting with MinIO.
+    "urllib3.connection": logging.ERROR,
 }
 
 
@@ -32,6 +33,29 @@ def get_trace_id() -> str:
 def set_trace_id(trace_id: str) -> None:
     """Set trace ID in context."""
     trace_id_var.set(trace_id)
+
+
+def new_trace_id() -> str:
+    """Generate a new 12-char trace ID and bind it to the current context.
+
+    Intended for background tasks that run outside HTTP/WebSocket request
+    scopes so that all log lines produced by one task execution share the
+    same trace_id.
+    """
+    tid = uuid4().hex[:12]
+    set_trace_id(tid)
+    return tid
+
+
+def _disable_agentbay_logger_override():
+    """Disable AgentBay SDK's logging override to prevent it from resetting loguru."""
+    if "agentbay._common.logger" in sys.modules:
+        try:
+            from agentbay._common.logger import AgentBayLogger
+            AgentBayLogger._initialized = True
+            AgentBayLogger.setup = classmethod(lambda cls, *args, **kwargs: None)
+        except Exception:
+            pass
 
 
 def configure_logging():
@@ -49,6 +73,8 @@ def configure_logging():
         diagnose=True,
         filter=lambda record: (record["extra"].setdefault("trace_id", get_trace_id() or str(uuid4())) is not None)
     )
+
+    _disable_agentbay_logger_override()
 
     return logger
 

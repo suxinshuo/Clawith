@@ -18,6 +18,18 @@ from loguru import logger
 
 
 # ============================================================================
+# Errors and request-shape normalization
+# ============================================================================
+
+class LLMError(Exception):
+    """Base exception for LLM client errors."""
+
+
+class LLMRequestShapeError(LLMError):
+    """The final provider request violates a portable message-shape invariant."""
+
+
+# ============================================================================
 # Data Models
 # ============================================================================
 
@@ -153,6 +165,89 @@ class LLMMessage:
             content = content_blocks
 
         return {"role": role, "content": content}
+
+
+def _system_content_as_text(content: str | list | None) -> str:
+    """Convert a secondary system message into ordered text for the dynamic tail."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        raise LLMRequestShapeError(
+            f"system message content must be text or text blocks, got {type(content).__name__}"
+        )
+
+    text_parts: list[str] = []
+    for part in content:
+        if not isinstance(part, dict) or part.get("type") != "text":
+            raise LLMRequestShapeError(
+                "secondary system messages may contain only text blocks"
+            )
+        text = part.get("text")
+        if text:
+            text_parts.append(str(text))
+    return "\n".join(text_parts)
+
+
+def normalize_provider_messages(messages: list[LLMMessage]) -> list[LLMMessage]:
+    """Return a provider-safe copy with at most one leading system message.
+
+    The first system message remains the cacheable/static prefix. Its dynamic
+    content and any later system records are folded, in encounter order, into
+    the uncached dynamic tail. Non-system history keeps its original order.
+    """
+    system_messages = [message for message in messages if message.role == "system"]
+    if not system_messages:
+        return list(messages)
+
+    for message in system_messages:
+        if message.tool_calls or message.tool_call_id or message.reasoning_content:
+            raise LLMRequestShapeError(
+                "system messages cannot contain tool calls, tool results, or reasoning content"
+            )
+
+    first = system_messages[0]
+    dynamic_parts: list[str] = []
+    if first.dynamic_content:
+        dynamic_parts.append(first.dynamic_content)
+
+    for message in system_messages[1:]:
+        content = _system_content_as_text(message.content)
+        if content:
+            dynamic_parts.append(content)
+        if message.dynamic_content:
+            dynamic_parts.append(message.dynamic_content)
+
+    normalized_system = LLMMessage(
+        role="system",
+        content=first.content if first.content is not None else "",
+        dynamic_content="\n\n".join(dynamic_parts) or None,
+    )
+    normalized = [normalized_system]
+    normalized.extend(message for message in messages if message.role != "system")
+    return normalized
+
+
+def validate_openai_message_shape(
+    messages: list[dict[str, Any]],
+    *,
+    provider_label: str,
+) -> None:
+    """Fail closed if a final OpenAI-style payload has an unsafe system shape."""
+    system_indexes = [
+        index
+        for index, message in enumerate(messages)
+        if isinstance(message, dict) and message.get("role") == "system"
+    ]
+    if len(system_indexes) > 1:
+        raise LLMRequestShapeError(
+            f"{provider_label} request contains multiple system messages; expected at most one"
+        )
+    if system_indexes and system_indexes[0] != 0:
+        raise LLMRequestShapeError(
+            f"{provider_label} request system message must be the first item"
+        )
 
 
 @dataclass
@@ -293,8 +388,8 @@ class OpenAICompatibleClient(LLMClient):
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Build request payload."""
-        messages_payload = self._messages_to_openai_payload(messages)
-        logger.debug(f"[LLM-Debug] OpenAICompatibleClient payload messages for model {self.model}: {json.dumps(messages_payload, indent=2, ensure_ascii=False)}")
+        normalized_messages = normalize_provider_messages(messages)
+        messages_payload = self._messages_to_openai_payload(normalized_messages)
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages_payload,
@@ -318,6 +413,20 @@ class OpenAICompatibleClient(LLMClient):
 
         # Add any additional kwargs
         payload.update(kwargs)
+
+        final_messages = payload.get("messages")
+        if not isinstance(final_messages, list):
+            raise LLMRequestShapeError(
+                "OpenAI-compatible provider request messages must be a list"
+            )
+        validate_openai_message_shape(
+            final_messages,
+            provider_label="OpenAI-compatible provider",
+        )
+        logger.debug(
+            "[LLM-Debug] OpenAICompatibleClient payload messages for model "
+            f"{self.model}: {json.dumps(final_messages, indent=2, ensure_ascii=False)}"
+        )
 
         return payload
 
@@ -743,10 +852,20 @@ class OpenAIResponsesClient(LLMClient):
         input_items: list[dict[str, Any]] = []
 
         for msg in messages:
-            if msg.role in {"system", "user", "assistant"} and msg.content is not None:
-                item: dict[str, Any] = {"role": msg.role}
-                item["content"] = self._format_content_for_input(msg.content)
-                input_items.append(item)
+            # Handle system messages with dynamic_content
+            if msg.role == "system" and msg.content is not None:
+                content = msg.content
+                if msg.dynamic_content:
+                    content = f"{content}\n\n{msg.dynamic_content}"
+                input_items.append({
+                    "role": msg.role,
+                    "content": self._format_content_for_input(content),
+                })
+            elif msg.role in {"user", "assistant"} and msg.content is not None:
+                input_items.append({
+                    "role": msg.role,
+                    "content": self._format_content_for_input(msg.content),
+                })
 
             if msg.role == "assistant" and msg.tool_calls:
                 for tc in msg.tool_calls:
@@ -768,7 +887,66 @@ class OpenAIResponsesClient(LLMClient):
                     "output": msg.content or "",
                 })
 
+        # Sanitize: ensure every function_call_output has a matching function_call.
+        # This prevents "No tool call found for function call output" API errors
+        # caused by context window truncation breaking assistant+tool pairs.
+        input_items = self._sanitize_input_items(input_items)
+
         return input_items
+
+    @staticmethod
+    def _sanitize_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Remove orphaned function_call_output items that have no matching function_call.
+
+        Also removes function_call items whose function_call_output is missing,
+        since the Responses API requires complete pairs.
+        """
+        # Collect all call_ids from function_call items
+        call_ids_with_fc: set[str] = set()
+        for item in items:
+            if item.get("type") == "function_call":
+                call_id = item.get("call_id", "")
+                if call_id:
+                    call_ids_with_fc.add(call_id)
+
+        # Collect all call_ids from function_call_output items
+        call_ids_with_fco: set[str] = set()
+        for item in items:
+            if item.get("type") == "function_call_output":
+                call_id = item.get("call_id", "")
+                if call_id:
+                    call_ids_with_fco.add(call_id)
+
+        # Determine which call_ids are orphaned (output without call, or call without output)
+        orphaned_fco = call_ids_with_fco - call_ids_with_fc
+        orphaned_fc = call_ids_with_fc - call_ids_with_fco
+
+        if not orphaned_fco and not orphaned_fc:
+            return items
+
+        if orphaned_fco:
+            logger.warning(
+                "[OpenAIResponses] Removing %d orphaned function_call_output item(s) "
+                "with no matching function_call: %s",
+                len(orphaned_fco),
+                orphaned_fco,
+            )
+        if orphaned_fc:
+            logger.warning(
+                "[OpenAIResponses] Removing %d orphaned function_call item(s) "
+                "with no matching function_call_output: %s",
+                len(orphaned_fc),
+                orphaned_fc,
+            )
+
+        # Filter out orphaned items
+        return [
+            item for item in items
+            if not (
+                (item.get("type") == "function_call_output" and item.get("call_id", "") in orphaned_fco)
+                or (item.get("type") == "function_call" and item.get("call_id", "") in orphaned_fc)
+            )
+        ]
 
     def _convert_tools(self, tools: list[dict] | None) -> list[dict] | None:
         """Convert OpenAI tool schema to Responses API function tool schema."""
@@ -798,9 +976,11 @@ class OpenAIResponsesClient(LLMClient):
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Build request payload."""
+        normalized_messages = normalize_provider_messages(messages)
+        input_items = self._messages_to_input(normalized_messages)
         payload: dict[str, Any] = {
             "model": self.model,
-            "input": self._messages_to_input(messages),
+            "input": input_items,
             "temperature": temperature,
             "stream": stream,
         }
@@ -815,6 +995,15 @@ class OpenAIResponsesClient(LLMClient):
                 payload["tool_choice"] = "auto"
 
         payload.update(kwargs)
+        final_input = payload.get("input")
+        if not isinstance(final_input, list):
+            raise LLMRequestShapeError(
+                "OpenAI Responses provider request input must be a list"
+            )
+        validate_openai_message_shape(
+            final_input,
+            provider_label="OpenAI Responses provider",
+        )
         return payload
 
     def _parse_response_data(self, data: dict[str, Any]) -> LLMResponse:
@@ -1136,6 +1325,7 @@ class GeminiClient(LLMClient):
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Build Gemini request payload."""
+        messages = normalize_provider_messages(messages)
         system_blocks: list[str] = []
         contents: list[dict[str, Any]] = []
         tool_name_map = self._extract_tool_name_map(messages)
@@ -1144,6 +1334,8 @@ class GeminiClient(LLMClient):
             if msg.role == "system":
                 parts = self._content_to_gemini_parts(msg.content)
                 text_chunks = [p.get("text", "") for p in parts if p.get("text")]
+                if msg.dynamic_content:
+                    text_chunks.append(msg.dynamic_content)
                 if text_chunks:
                     system_blocks.append("\n".join(text_chunks))
                 continue
@@ -1169,11 +1361,16 @@ class GeminiClient(LLMClient):
                             parsed_args = args
                         else:
                             parsed_args = {}
+
+                        func_call_dict: dict[str, Any] = {
+                            "name": fn.get("name", ""),
+                            "args": parsed_args,
+                        }
+                        if "_gemini_extra" in tc:
+                            func_call_dict.update(tc["_gemini_extra"])
+
                         parts.append({
-                            "functionCall": {
-                                "name": fn.get("name", ""),
-                                "args": parsed_args,
-                            }
+                            "functionCall": func_call_dict
                         })
                 if parts:
                     contents.append({"role": "model", "parts": parts})
@@ -1282,6 +1479,9 @@ class GeminiClient(LLMClient):
                     if dedup_key in seen_tool_calls:
                         continue
                     seen_tool_calls.add(dedup_key)
+                    
+                    extra = {k: v for k, v in function_call.items() if k not in ["name", "args"]}
+                    
                     tool_calls.append({
                         "id": f"call_{len(tool_calls) + 1}",
                         "type": "function",
@@ -1289,6 +1489,7 @@ class GeminiClient(LLMClient):
                             "name": name,
                             "arguments": args_str,
                         },
+                        "_gemini_extra": extra,
                     })
 
         usage = self._normalize_usage(data.get("usageMetadata"))
@@ -1429,6 +1630,9 @@ class GeminiClient(LLMClient):
                             if dedup_key in seen_tool_calls:
                                 continue
                             seen_tool_calls.add(dedup_key)
+                            
+                            extra = {k: v for k, v in function_call.items() if k not in ["name", "args"]}
+                            
                             tool_calls.append({
                                 "id": f"call_{len(tool_calls) + 1}",
                                 "type": "function",
@@ -1436,6 +1640,7 @@ class GeminiClient(LLMClient):
                                     "name": name,
                                     "arguments": args_str,
                                 },
+                                "_gemini_extra": extra,
                             })
 
         except (httpx.ConnectError, httpx.ReadError, httpx.ConnectTimeout) as e:
@@ -1515,6 +1720,7 @@ class AnthropicClient(LLMClient):
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Build Anthropic request payload."""
+        messages = normalize_provider_messages(messages)
         system_blocks = []
         anthropic_messages = []
 
@@ -2019,11 +2225,6 @@ MAX_TOKENS_BY_MODEL: dict[str, int] = {
 }
 
 
-class LLMError(Exception):
-    """Base exception for LLM client errors."""
-    pass
-
-
 def get_provider_base_url(provider: str, custom_base_url: str | None = None) -> str | None:
     """Return the API base URL for a provider.
 
@@ -2047,7 +2248,7 @@ def get_max_tokens(provider: str, model: str | None = None, max_output_tokens: i
     model_limits = spec.model_max_tokens if spec else MAX_TOKENS_BY_MODEL
 
     # Highest priority: per-model DB override
-    if max_output_tokens and max_output_tokens > 0:
+    if isinstance(max_output_tokens, int) and max_output_tokens > 0:
         return max_output_tokens
 
     # Check model-specific limits

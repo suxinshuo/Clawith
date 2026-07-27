@@ -6,9 +6,14 @@
  */
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { IconDownload, IconEdit, IconFolder, IconFolderPlus, IconUpload } from '@tabler/icons-react';
+import { IconDownload, IconEdit, IconFolder, IconFolderPlus, IconTrash, IconUpload } from '@tabler/icons-react';
 import MarkdownRenderer from './MarkdownRenderer';
 import { useDropZone } from '../hooks/useDropZone';
+import { formatFileSize } from '../utils/formatFileSize';
+import {
+    WORKSPACE_TEXT_UPLOAD_EXTENSIONS,
+    WORKSPACE_UPLOAD_ACCEPT,
+} from '../utils/workspaceFileFormats.ts';
 
 // ─── Types ─────────────────────────────────────────────
 
@@ -25,7 +30,7 @@ export interface FileBrowserApi {
     write: (path: string, content: string) => Promise<any>;
     delete: (path: string) => Promise<any>;
     upload?: (file: File, path: string, onProgress?: (pct: number) => void) => Promise<any>;
-    downloadUrl?: (path: string) => string;
+    downloadUrl?: (path: string, options?: { inline?: boolean }) => string;
 }
 
 export interface FileBrowserProps {
@@ -51,7 +56,7 @@ export interface FileBrowserProps {
 
 // ─── Text file detection ───────────────────────────────
 
-const TEXT_EXTS = ['.txt', '.md', '.csv', '.json', '.xml', '.yaml', '.yml', '.js', '.ts', '.py', '.html', '.css', '.sh', '.log', '.gitkeep', '.env'];
+const TEXT_EXTS = WORKSPACE_TEXT_UPLOAD_EXTENSIONS;
 
 function isTextFile(name: string): boolean {
     const n = name.toLowerCase();
@@ -75,7 +80,7 @@ export default function FileBrowser({
     features = {},
     fileFilter,
     singleFile,
-    uploadAccept = '.pdf,.docx,.xlsx,.pptx,.txt,.md,.csv,.json,.xml,.yaml,.yml,.js,.ts,.py,.html,.css,.sh,.log,.png,.jpg,.jpeg,.gif,.svg,.webp',
+    uploadAccept = WORKSPACE_UPLOAD_ACCEPT,
     title,
     readOnly = false,
     onRefresh,
@@ -101,6 +106,7 @@ export default function FileBrowser({
     const [editing, setEditing] = useState(false);
     const [editContent, setEditContent] = useState('');
     const [saving, setSaving] = useState(false);
+    const [deleting, setDeleting] = useState(false);
     const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
     const [deleteTarget, setDeleteTarget] = useState<{ path: string; name: string } | null>(null);
     const [promptModal, setPromptModal] = useState<{ title: string; placeholder: string; action: string } | null>(null);
@@ -147,11 +153,12 @@ export default function FileBrowser({
                 data = data.filter(f => f.is_dir || fileFilter.some(ext => f.name.toLowerCase().endsWith(ext)));
             }
             setFiles(data);
-        } catch {
+        } catch (err: any) {
             setFiles([]);
+            showToast(`${t('agent.workspace.loadFailed', 'Could not load files')}: ${err?.message || ''}`, 'error');
         }
         setLoading(false);
-    }, [api, currentPath, singleFile, fileFilter]);
+    }, [api, currentPath, singleFile, fileFilter, showToast, t]);
 
     // ─── Drag-and-drop upload ─────────────────────
     const handleDroppedFiles = useCallback(async (files: File[]) => {
@@ -175,6 +182,10 @@ export default function FileBrowser({
 
     const { isDragging, dropZoneProps } = useDropZone({
         onDrop: handleDroppedFiles,
+        onReject: (files) => showToast(
+            t('agent.upload.unsupported', 'Unsupported file type: {{name}}', { name: files[0]?.name || '' }),
+            'error',
+        ),
         disabled: !upload || !api.upload || !!singleFile || !!viewing || readOnly,
         accept: uploadAccept,
     });
@@ -185,10 +196,17 @@ export default function FileBrowser({
 
     useEffect(() => {
         if (!viewing || singleFile) return;
+        if (!isTextFile(viewing)) {
+            setContent('');
+            return;
+        }
         api.read(viewing).then(data => {
             setContent(data.content || '');
-        }).catch(() => setContent(''));
-    }, [viewing, api, singleFile]);
+        }).catch((err: any) => {
+            setContent('');
+            showToast(`${t('agent.workspace.loadFailed', 'Could not load file')}: ${err?.message || ''}`, 'error');
+        });
+    }, [viewing, api, singleFile, showToast, t]);
 
     // ─── Actions ──────────────────────────────────────
 
@@ -210,6 +228,7 @@ export default function FileBrowser({
 
     const handleDelete = async () => {
         if (!deleteTarget) return;
+        setDeleting(true);
         try {
             await api.delete(deleteTarget.path);
             setDeleteTarget(null);
@@ -222,6 +241,8 @@ export default function FileBrowser({
             showToast('Deleted');
         } catch (err: any) {
             showToast('Delete failed: ' + (err.message || ''), 'error');
+        } finally {
+            setDeleting(false);
         }
     };
 
@@ -230,24 +251,9 @@ export default function FileBrowser({
         input.type = 'file';
         input.accept = uploadAccept;
         input.multiple = true;
-        input.onchange = async () => {
+        input.onchange = () => {
             if (!input.files || input.files.length === 0) return;
-            try {
-                const fileList = Array.from(input.files);
-                for (const file of fileList) {
-                    setUploadProgress({ fileName: file.name, percent: 0 });
-                    await api.upload!(file, currentPath, (pct) => {
-                        setUploadProgress({ fileName: file.name, percent: pct });
-                    });
-                }
-                setUploadProgress(null);
-                reload();
-                onRefresh?.();
-                showToast('Upload successful');
-            } catch (err: any) {
-                setUploadProgress(null);
-                showToast('Upload failed: ' + (err.message || ''), 'error');
-            }
+            void handleDroppedFiles(Array.from(input.files));
         };
         input.click();
     };
@@ -342,7 +348,9 @@ export default function FileBrowser({
                     <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '20px' }}>Delete "{deleteTarget.name}"?</p>
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
                         <button className="btn btn-secondary" onClick={() => setDeleteTarget(null)}>{t('common.cancel')}</button>
-                        <button className="btn btn-danger" onClick={handleDelete}>{t('common.delete')}</button>
+                        <button className="btn btn-danger" onClick={handleDelete} disabled={deleting}>
+                            {deleting ? t('common.loading') : t('common.delete')}
+                        </button>
                     </div>
                 </div>
             </div>
@@ -451,7 +459,11 @@ export default function FileBrowser({
                     )}
                     {canDelete && (
                         <button className="btn btn-danger" style={{ padding: '4px 10px', fontSize: '12px' }}
-                            onClick={() => setDeleteTarget({ path: viewing, name: viewing.split('/').pop() || viewing })}>×</button>
+                            title={t('common.delete')}
+                            aria-label={t('common.delete')}
+                            onClick={() => setDeleteTarget({ path: viewing, name: viewing.split('/').pop() || viewing })}>
+                            <IconTrash size={13} stroke={1.8} />
+                        </button>
                     )}
                 </div>
                 <div className="card">
@@ -470,7 +482,7 @@ export default function FileBrowser({
                         <div style={{ textAlign: 'center', padding: '20px', background: 'var(--bg-tertiary)', borderRadius: '8px' }}>
                             {api.downloadUrl ? (
                                 <img 
-                                    src={api.downloadUrl(viewing)} 
+                                    src={api.downloadUrl(viewing, { inline: true })}
                                     alt={viewing.split('/').pop()} 
                                     style={{ maxWidth: '100%', maxHeight: '600px', objectFit: 'contain', borderRadius: '4px', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }} 
                                 />
@@ -516,7 +528,7 @@ export default function FileBrowser({
                 {renderBreadcrumbs()}
                 <div style={{ display: 'flex', gap: '6px', marginLeft: 'auto' }}>
                     {upload && api.upload && (
-                        <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={handleUpload}><IconUpload size={13} stroke={1.8} /> Upload</button>
+                        <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={handleUpload}><IconUpload size={13} stroke={1.8} /> {t('agent.workspace.uploadFile', 'Upload File')}</button>
                     )}
                     {newFolder && (
                         <button className="btn btn-secondary" style={{ fontSize: '12px' }}
@@ -592,7 +604,7 @@ export default function FileBrowser({
                                 <span style={{ fontWeight: 500, fontSize: '13px' }}>{fileFilter?.includes('.md') ? f.name.replace('.md', '') : f.name}</span>
                             </div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                {f.size != null && <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{(f.size / 1024).toFixed(1)} KB</span>}
+                                {f.size != null && <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{formatFileSize(f.size)}</span>}
                                 {!f.is_dir && api.downloadUrl && (
                                     <a href={api.downloadUrl(f.path || `${currentPath}/${f.name}`)} download
                                         onClick={(e) => e.stopPropagation()}
@@ -603,8 +615,10 @@ export default function FileBrowser({
                                 )}
                                 {canDelete && (
                                     <button className="btn btn-ghost" style={{ padding: '2px 6px', fontSize: '11px', color: 'var(--error)' }}
+                                        title={t('common.delete')}
+                                        aria-label={t('common.delete')}
                                         onClick={(e) => { e.stopPropagation(); setDeleteTarget({ path: f.path || `${currentPath}/${f.name}`, name: f.name }); }}>
-                                        ×
+                                        <IconTrash size={13} stroke={1.8} />
                                     </button>
                                 )}
                             </div>

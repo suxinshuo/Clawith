@@ -167,7 +167,10 @@ async def broadcast_notification(
 
     # Notify all agents in tenant
     agents_result = await db.execute(
-        select(Agent).where(Agent.tenant_id == tenant_id)
+        select(Agent).where(
+            Agent.tenant_id == tenant_id,
+            Agent.deleted_at.is_(None),
+        )
     )
     for agent in agents_result.scalars().all():
         await send_notification(
@@ -183,7 +186,6 @@ async def broadcast_notification(
         from app.services.system_email_service import (
             BroadcastEmailRecipient,
             deliver_broadcast_emails,
-            run_background_email_job,
         )
 
         for user in users:
@@ -205,7 +207,7 @@ async def broadcast_notification(
 
     await db.commit()
     if email_recipients:
-        background_tasks.add_task(run_background_email_job, deliver_broadcast_emails, email_recipients)
+        background_tasks.add_task(deliver_broadcast_emails, email_recipients)
     return {
         "ok": True,
         "users_notified": count_users,

@@ -3,7 +3,12 @@
 FROM python:3.12-slim AS deps
 
 WORKDIR /app
-RUN apt-get update && \
+RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list.d/debian.sources; \
+    else \
+        sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list; \
+    fi && \
+    apt-get update && \
     apt-get install -y --no-install-recommends gcc libpq-dev libcairo2 libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 shared-mime-info pango1.0-tools && \
     rm -rf /var/lib/apt/lists/*
 
@@ -11,19 +16,25 @@ COPY pyproject.toml ./
 ARG CLAWITH_PIP_INDEX_URL
 ARG CLAWITH_PIP_TRUSTED_HOST
 RUN if [ -n "$CLAWITH_PIP_INDEX_URL" ] && [ -n "$CLAWITH_PIP_TRUSTED_HOST" ]; then \
-        pip install --no-cache-dir --index-url "$CLAWITH_PIP_INDEX_URL" --trusted-host "$CLAWITH_PIP_TRUSTED_HOST" .; \
+        pip install --no-cache-dir --index-url "$CLAWITH_PIP_INDEX_URL" --trusted-host "$CLAWITH_PIP_TRUSTED_HOST" . uv; \
     elif [ -n "$CLAWITH_PIP_INDEX_URL" ]; then \
-        pip install --no-cache-dir --index-url "$CLAWITH_PIP_INDEX_URL" .; \
+        pip install --no-cache-dir --index-url "$CLAWITH_PIP_INDEX_URL" . uv; \
     else \
-        pip install --no-cache-dir .; \
+        pip install --no-cache-dir . uv; \
     fi
 
 # ─── Production ─────────────────────────────────────────
 FROM python:3.12-slim AS production
 
 WORKDIR /app
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends libpq5 curl shadowsocks-libev gosu bubblewrap libcairo2 libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 shared-mime-info pango1.0-tools fonts-wqy-microhei fonts-wqy-zenhei && \
+RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list.d/debian.sources; \
+    else \
+        sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list; \
+    fi && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends libpq5 curl shadowsocks-libev gosu bubblewrap libcairo2 libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 shared-mime-info pango1.0-tools fonts-wqy-microhei fonts-wqy-zenhei fonts-noto-cjk chromium && \
+    fc-cache -fv && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy installed packages from deps stage
@@ -46,5 +57,5 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -f http://localhost:8000/api/health || exit 1
 
 EXPOSE 8000
-# entrypoint.sh runs `alembic upgrade head` then `uvicorn`
+# entrypoint.sh bootstraps Alembic and LangGraph checkpoints before `uvicorn`
 ENTRYPOINT ["/bin/bash", "/app/entrypoint.sh"]

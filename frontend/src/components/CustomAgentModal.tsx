@@ -15,6 +15,7 @@ import {
 import { agentApi, authApi, enterpriseApi, tenantApi } from '../services/api';
 import { useDialog } from './Dialog/DialogProvider';
 import LinearCopyButton from './LinearCopyButton';
+import { buildOpenClawInstruction } from '../utils/openClawInstruction';
 
 type Mode = 'native' | 'openclaw';
 type Visibility = 'company' | 'only_me' | 'custom';
@@ -43,7 +44,6 @@ export default function CustomAgentModal({ open, initialMode = 'native', onClose
     const navigate = useNavigate();
     const queryClient = useQueryClient();
     const dialog = useDialog();
-    const isChinese = i18n.language.startsWith('zh');
 
     const [mode, setMode] = useState<Mode>(initialMode);
     const [name, setName] = useState('');
@@ -82,12 +82,7 @@ export default function CustomAgentModal({ open, initialMode = 'native', onClose
         || !!currentUser?.is_platform_admin;
     const nativeHasNoModel = mode === 'native' && enabledModels.length === 0;
     const disabledByNoModel = nativeHasNoModel
-        ? t(
-            'customAgentModal.noModelButtonHint',
-            isChinese
-                ? '需要先在公司设置中启用至少一个模型，才能创建平台托管成员。'
-                : 'Enable at least one model in company settings before creating a platform-hosted teammate.',
-        )
+        ? t('customAgentModal.noModelButtonHint')
         : undefined;
     const openModelSettings = () => {
         (onDone || onClose)();
@@ -132,20 +127,13 @@ export default function CustomAgentModal({ open, initialMode = 'native', onClose
         mutationFn: async ({ chatNow }: { chatNow: boolean }) => {
             const trimmedName = name.trim();
             if (!trimmedName) {
-                throw new Error(t('customAgentModal.nameRequired', isChinese ? '请填写名称' : 'Name is required'));
+                throw new Error(t('customAgentModal.nameRequired'));
             }
             if (mode === 'native' && enabledModels.length === 0) {
-                throw new Error(
-                    t(
-                        'customAgentModal.noModelError',
-                        isChinese
-                            ? '公司还没有启用可用模型，请先配置模型或切换为外部 Agent。'
-                            : 'No company model is enabled yet. Configure a model or switch to External agent.',
-                    ),
-                );
+                throw new Error(t('customAgentModal.noModelError'));
             }
             if (mode === 'native' && !modelId) {
-                throw new Error(t('customAgentModal.modelRequired', isChinese ? '请选择模型' : 'Choose a model'));
+                throw new Error(t('customAgentModal.modelRequired'));
             }
 
             const currentTenant = localStorage.getItem('current_tenant_id');
@@ -177,7 +165,7 @@ export default function CustomAgentModal({ open, initialMode = 'native', onClose
             if (chatNow) navigate(`/agents/${agent.id}#chat`);
         },
         onError: async (err: any) => {
-            await dialog.alert(isChinese ? '创建失败' : 'Creation failed', {
+            await dialog.alert(t('customAgentModal.creationFailed'), {
                 type: 'error',
                 details: String(err?.message || err),
             });
@@ -188,7 +176,7 @@ export default function CustomAgentModal({ open, initialMode = 'native', onClose
 
     const busy = createAgent.isPending;
     const setupInstruction = createdExternal?.api_key
-        ? buildOpenClawInstruction(createdExternal.api_key)
+        ? buildOpenClawInstruction(createdExternal.api_key, !!i18n.language?.startsWith('zh'))
         : '';
 
     const closeSuccess = () => {
@@ -226,7 +214,6 @@ export default function CustomAgentModal({ open, initialMode = 'native', onClose
                     <ExternalSuccess
                         agent={createdExternal}
                         setupInstruction={setupInstruction}
-                        isChinese={isChinese}
                         t={t}
                         onClose={onClose}
                         onEnter={closeSuccess}
@@ -237,13 +224,13 @@ export default function CustomAgentModal({ open, initialMode = 'native', onClose
                             <div>
                                 <h3 style={{ margin: 0, fontSize: '18px', fontWeight: 650 }}>
                                     {mode === 'native'
-                                        ? t('customAgentModal.nativeTitle', isChinese ? '创建自定义成员' : 'Create custom teammate')
-                                        : t('customAgentModal.externalTitle', isChinese ? '连接外部 Agent' : 'Link external agent')}
+                                        ? t('customAgentModal.nativeTitle')
+                                        : t('customAgentModal.externalTitle')}
                                 </h3>
                                 <p style={{ margin: '5px 0 0', fontSize: '12.5px', color: 'var(--text-secondary)' }}>
                                     {mode === 'native'
-                                        ? t('customAgentModal.nativeSubtitle', isChinese ? '先完成必要信息，其余能力之后在设置中调整。' : 'Start with the essentials; tune the rest in settings later.')
-                                        : t('customAgentModal.externalSubtitle', isChinese ? '为 OpenClaw 或其他外部运行的 Agent 创建连接入口。' : 'Create a Clawith connection for an externally running agent.')}
+                                        ? t('customAgentModal.nativeSubtitle')
+                                        : t('customAgentModal.externalSubtitle')}
                                 </p>
                             </div>
                             <button onClick={onClose} className="btn btn-ghost" disabled={busy} style={{ padding: '4px', display: 'flex' }}>
@@ -265,40 +252,40 @@ export default function CustomAgentModal({ open, initialMode = 'native', onClose
                                 <ModeButton
                                     active={mode === 'native'}
                                     icon={<IconSparkles size={15} stroke={1.7} />}
-                                    label={t('customAgentModal.nativeMode', isChinese ? '平台托管' : 'Platform hosted')}
+                                    label={t('customAgentModal.nativeMode')}
                                     onClick={() => !busy && setMode('native')}
                                 />
                                 <ModeButton
                                     active={mode === 'openclaw'}
                                     icon={<IconPlugConnected size={15} stroke={1.7} />}
-                                    label={t('customAgentModal.externalMode', isChinese ? '外部 Agent' : 'External agent')}
+                                    label={t('customAgentModal.externalMode')}
                                     onClick={() => !busy && setMode('openclaw')}
                                 />
                             </div>
 
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                                <Field label={t('customAgentModal.name', isChinese ? '名称' : 'Name')} required>
+                                <Field label={t('customAgentModal.name')} required>
                                     <input
                                         className="form-input"
                                         value={name}
                                         onChange={(e) => setName(e.target.value)}
                                         maxLength={100}
                                         placeholder={mode === 'native'
-                                            ? t('customAgentModal.namePlaceholderNative', isChinese ? '例如：客户研究员' : 'e.g. Customer researcher')
-                                            : t('customAgentModal.namePlaceholderExternal', isChinese ? '例如：OpenClaw 研究助手' : 'e.g. OpenClaw research assistant')}
+                                            ? t('customAgentModal.namePlaceholderNative')
+                                            : t('customAgentModal.namePlaceholderExternal')}
                                         disabled={busy}
                                         autoFocus
                                         style={{ width: '100%' }}
                                     />
                                 </Field>
 
-                                <Field label={t('customAgentModal.role', isChinese ? '角色描述' : 'Role')}>
+                                <Field label={t('customAgentModal.role')}>
                                     <textarea
                                         className="form-input"
                                         value={roleDescription}
                                         onChange={(e) => setRoleDescription(e.target.value)}
                                         maxLength={500}
-                                        placeholder={t('customAgentModal.rolePlaceholder', isChinese ? '一句话说明它负责什么。' : 'Describe what this teammate is responsible for.')}
+                                        placeholder={t('customAgentModal.rolePlaceholder')}
                                         disabled={busy}
                                         rows={3}
                                         style={{ width: '100%', resize: 'vertical', minHeight: '76px' }}
@@ -307,35 +294,34 @@ export default function CustomAgentModal({ open, initialMode = 'native', onClose
 
                                 <section>
                                     <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px' }}>
-                                        {t('customAgentModal.visibility', isChinese ? '可见权限' : 'Visibility')}
+                                        {t('customAgentModal.visibility')}
                                     </div>
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                                         <RadioRow
                                             selected={visibility === 'company'}
                                             onClick={() => !busy && setVisibility('company')}
-                                            title={t('customAgentModal.visibilityCompany', isChinese ? '公司所有人' : 'Everyone at the company')}
-                                            hint={t('customAgentModal.visibilityCompanyHint', isChinese ? '全公司都能使用这个数字员工' : 'Everyone in the company can use this agent')}
+                                            title={t('customAgentModal.visibilityCompany')}
+                                            hint={t('customAgentModal.visibilityCompanyHint')}
                                         />
                                         <RadioRow
                                             selected={visibility === 'only_me'}
                                             onClick={() => !busy && setVisibility('only_me')}
-                                            title={t('customAgentModal.visibilityOnlyMe', isChinese ? '仅自己' : 'Only me')}
-                                            hint={t('customAgentModal.visibilityOnlyMeHint', isChinese ? '只有你能使用，可以之后在设置里分享' : 'Only you can use it; you can share it later')}
+                                            title={t('customAgentModal.visibilityOnlyMe')}
+                                            hint={t('customAgentModal.visibilityOnlyMeHint')}
                                         />
                                         <RadioRow
                                             selected={visibility === 'custom'}
                                             onClick={() => !busy && setVisibility('custom')}
-                                            title={t('customAgentModal.visibilityCustom', isChinese ? '指定成员' : 'Custom')}
-                                            hint={t('customAgentModal.visibilityCustomHint', isChinese ? '先仅创建者可管理，之后在设置里指定成员' : 'Start private, then choose members in settings')}
+                                            title={t('customAgentModal.visibilityCustom')}
+                                            hint={t('customAgentModal.visibilityCustomHint')}
                                         />
                                     </div>
                                 </section>
 
                                 {mode === 'native' && (
-                                    <Field label={t('customAgentModal.model', isChinese ? '首选模型' : 'Preferred model')} required>
+                                    <Field label={t('customAgentModal.model')} required>
                                         {enabledModels.length === 0 ? (
                                             <NoModelsNotice
-                                                isChinese={isChinese}
                                                 canManageModels={canManageModels}
                                                 onConfigure={openModelSettings}
                                                 t={t}
@@ -351,8 +337,8 @@ export default function CustomAgentModal({ open, initialMode = 'native', onClose
                                             >
                                                 {enabledModels.map((m) => (
                                                     <option key={m.id} value={m.id}>
-                                                        {m.label || t('customAgentModal.modelFallback', isChinese ? '模型' : 'Model')}
-                                                        {myTenant?.default_model_id === m.id ? ` · ${t('customAgentModal.defaultModel', isChinese ? '默认' : 'default')}` : ''}
+                                                        {m.label || t('customAgentModal.modelFallback')}
+                                                        {myTenant?.default_model_id === m.id ? ` · ${t('customAgentModal.defaultModel')}` : ''}
                                                     </option>
                                                 ))}
                                             </select>
@@ -364,26 +350,36 @@ export default function CustomAgentModal({ open, initialMode = 'native', onClose
 
                         <div style={{ padding: '16px 26px 20px', display: 'flex', justifyContent: 'flex-end', gap: '8px', borderTop: '1px solid var(--border-subtle)' }}>
                             <button className="btn btn-secondary" disabled={busy} onClick={onClose}>
-                                {t('common.cancel', isChinese ? '取消' : 'Cancel')}
+                                {t('common.cancel')}
                             </button>
                             {mode === 'native' ? (
                                 <>
-                                    <button
-                                        className="btn btn-secondary"
-                                        disabled={busy || nativeHasNoModel}
+                                    <span
                                         title={disabledByNoModel}
-                                        onClick={() => createAgent.mutate({ chatNow: false })}
+                                        style={{ display: 'inline-flex', cursor: nativeHasNoModel ? 'not-allowed' : undefined }}
                                     >
-                                        {t('customAgentModal.createOnly', isChinese ? '仅创建' : 'Just create')}
-                                    </button>
-                                    <button
-                                        className="btn btn-primary"
-                                        disabled={busy || nativeHasNoModel}
+                                        <button
+                                            className="btn btn-secondary"
+                                            disabled={busy || nativeHasNoModel}
+                                            style={{ pointerEvents: nativeHasNoModel ? 'none' : undefined }}
+                                            onClick={() => createAgent.mutate({ chatNow: false })}
+                                        >
+                                            {t('customAgentModal.createOnly')}
+                                        </button>
+                                    </span>
+                                    <span
                                         title={disabledByNoModel}
-                                        onClick={() => createAgent.mutate({ chatNow: true })}
+                                        style={{ display: 'inline-flex', cursor: nativeHasNoModel ? 'not-allowed' : undefined }}
                                     >
-                                        {busy ? t('customAgentModal.creating', isChinese ? '创建中...' : 'Creating...') : t('customAgentModal.chatNow', isChinese ? '立即对话' : 'Chat now')}
-                                    </button>
+                                        <button
+                                            className="btn btn-primary"
+                                            disabled={busy || nativeHasNoModel}
+                                            style={{ pointerEvents: nativeHasNoModel ? 'none' : undefined }}
+                                            onClick={() => createAgent.mutate({ chatNow: true })}
+                                        >
+                                            {busy ? t('customAgentModal.creating') : t('customAgentModal.chatNow')}
+                                        </button>
+                                    </span>
                                 </>
                             ) : (
                                 <button
@@ -391,7 +387,7 @@ export default function CustomAgentModal({ open, initialMode = 'native', onClose
                                     disabled={busy}
                                     onClick={() => createAgent.mutate({ chatNow: false })}
                                 >
-                                    {busy ? t('customAgentModal.creating', isChinese ? '创建中...' : 'Creating...') : t('customAgentModal.createConnection', isChinese ? '创建连接' : 'Create connection')}
+                                    {busy ? t('customAgentModal.creating') : t('customAgentModal.createConnection')}
                                 </button>
                             )}
                         </div>
@@ -403,16 +399,14 @@ export default function CustomAgentModal({ open, initialMode = 'native', onClose
 }
 
 function NoModelsNotice({
-    isChinese,
     canManageModels,
     onConfigure,
     t,
     allowExternalHint,
 }: {
-    isChinese: boolean;
     canManageModels: boolean;
     onConfigure: () => void;
-    t: (key: string, fallback: string) => string;
+    t: (key: string) => string;
     allowExternalHint?: boolean;
 }) {
     return (
@@ -431,31 +425,16 @@ function NoModelsNotice({
             <IconAlertTriangle size={17} stroke={1.8} style={{ marginTop: '1px', color: '#b45309', flexShrink: 0 }} />
             <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: '13px', fontWeight: 650, color: 'var(--text-primary)' }}>
-                    {t('customAgentModal.noModelsTitle', isChinese ? '还没有可用模型' : 'No enabled model yet')}
+                    {t('customAgentModal.noModelsTitle')}
                 </div>
                 <div style={{ marginTop: '3px', fontSize: '12px', lineHeight: 1.5, color: 'var(--text-secondary)' }}>
                     {canManageModels
-                        ? t(
-                            'customAgentModal.noModelsAdminHint',
-                            isChinese
-                                ? '启用至少一个公司模型后，才能创建平台托管的数字员工。'
-                                : 'Enable at least one company model before creating a platform-hosted teammate.',
-                        )
-                        : t(
-                            'customAgentModal.noModelsMemberHint',
-                            isChinese
-                                ? '请联系公司管理员先启用模型。'
-                                : 'Ask a company admin to enable a model first.',
-                        )}
+                        ? t('customAgentModal.noModelsAdminHint')
+                        : t('customAgentModal.noModelsMemberHint')}
                     {!canManageModels && allowExternalHint ? (
                         <span>
                             {' '}
-                            {t(
-                                'customAgentModal.noModelsExternalHint',
-                                isChinese
-                                    ? '如果你只是接入外部运行的 Agent，可以切换到“外部 Agent”。'
-                                    : 'If you are linking an externally running agent, switch to External agent.',
-                            )}
+                            {t('customAgentModal.noModelsExternalHint')}
                         </span>
                     ) : null}
                 </div>
@@ -467,7 +446,7 @@ function NoModelsNotice({
                         style={{ marginTop: '9px', height: '30px', padding: '0 10px', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
                     >
                         <IconSettings size={14} stroke={1.7} />
-                        {t('customAgentModal.configureModels', isChinese ? '配置模型' : 'Configure models')}
+                        {t('customAgentModal.configureModels')}
                     </button>
                 ) : null}
             </div>
@@ -555,15 +534,13 @@ function RadioRow({ selected, onClick, title, hint }: { selected: boolean; onCli
 function ExternalSuccess({
     agent,
     setupInstruction,
-    isChinese,
     t,
     onClose,
     onEnter,
 }: {
     agent: CreatedAgent;
     setupInstruction: string;
-    isChinese: boolean;
-    t: (key: string, fallback: string) => string;
+    t: (key: string) => string;
     onClose: () => void;
     onEnter: () => void;
 }) {
@@ -586,7 +563,7 @@ function ExternalSuccess({
                     </span>
                     <div>
                         <h3 style={{ margin: 0, fontSize: '18px', fontWeight: 650 }}>
-                            {t('customAgentModal.externalCreated', isChinese ? '连接已创建' : 'Connection created')}
+                            {t('customAgentModal.externalCreated')}
                         </h3>
                         <p style={{ margin: '5px 0 0', fontSize: '12.5px', color: 'var(--text-secondary)' }}>
                             {agent.name}
@@ -600,12 +577,7 @@ function ExternalSuccess({
 
             <div style={{ padding: '8px 26px 20px', overflowY: 'auto' }}>
                 <p style={{ margin: '0 0 12px', fontSize: '13px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-                    {t(
-                        'customAgentModal.externalCreatedDesc',
-                        isChinese
-                            ? '把下面的连接指令交给外部 Agent，它就能通过网关收发 Clawith 消息。'
-                            : 'Send the setup instruction below to the external agent so it can sync with Clawith through the gateway.',
-                    )}
+                    {t('customAgentModal.externalCreatedDesc')}
                 </p>
 
                 <div style={{
@@ -620,14 +592,14 @@ function ExternalSuccess({
                 }}>
                     <IconCpu size={15} stroke={1.7} style={{ color: 'var(--text-secondary)', flexShrink: 0 }} />
                     <span style={{ flex: 1, minWidth: 0, fontSize: '12.5px', color: 'var(--text-secondary)' }}>
-                        {t('customAgentModal.gatewayKeyEmbedded', isChinese ? 'API Key 已包含在连接指令中' : 'The API key is included in the setup instruction')}
+                        {t('customAgentModal.gatewayKeyEmbedded')}
                     </span>
                     {agent.api_key && (
                         <LinearCopyButton
                             className="btn btn-secondary"
                             textToCopy={agent.api_key}
-                            label={t('customAgentModal.copyKey', isChinese ? '复制 Key' : 'Copy key')}
-                            copiedLabel={t('common.copied', isChinese ? '已复制' : 'Copied')}
+                            label={t('customAgentModal.copyKey')}
+                            copiedLabel={t('common.copied')}
                             style={{ fontSize: '11px', padding: '4px 10px', minWidth: '76px' }}
                         />
                     )}
@@ -645,14 +617,14 @@ function ExternalSuccess({
                         maxHeight: '260px',
                         border: '1px solid var(--border-subtle)',
                         whiteSpace: 'pre-wrap',
-                    }}>{setupInstruction || t('customAgentModal.noKeyReturned', isChinese ? '未返回 API Key，请进入 Agent 页面重新生成。' : 'No API key was returned. Open the agent page and generate one there.')}</pre>
+                    }}>{setupInstruction || t('customAgentModal.noKeyReturned')}</pre>
                     {setupInstruction && (
                         <LinearCopyButton
                             className="btn btn-ghost"
                             style={{ position: 'absolute', top: '5px', right: '5px', fontSize: '11px', minWidth: '64px' }}
                             textToCopy={setupInstruction}
-                            label={t('common.copy', isChinese ? '复制' : 'Copy')}
-                            copiedLabel={t('common.copied', isChinese ? '已复制' : 'Copied')}
+                            label={t('common.copy')}
+                            copiedLabel={t('common.copied')}
                         />
                     )}
                 </div>
@@ -660,69 +632,12 @@ function ExternalSuccess({
 
             <div style={{ padding: '16px 26px 20px', display: 'flex', justifyContent: 'flex-end', gap: '8px', borderTop: '1px solid var(--border-subtle)' }}>
                 <button className="btn btn-secondary" onClick={onClose}>
-                    {t('common.close', isChinese ? '关闭' : 'Close')}
+                    {t('common.close')}
                 </button>
                 <button className="btn btn-primary" onClick={onEnter}>
-                    {t('customAgentModal.enterAgent', isChinese ? '进入 Agent' : 'Open agent')}
+                    {t('customAgentModal.enterAgent')}
                 </button>
             </div>
         </>
     );
-}
-
-function buildOpenClawInstruction(apiKey: string) {
-    const origin = window.location.origin;
-    return `Please create a skill file at skills/clawith_sync.md with the following content, then add "Check Clawith inbox using the clawith_sync skill and process any pending messages" to your HEARTBEAT.md:
-
----
-name: clawith_sync
-description: Sync with Clawith platform — check inbox, submit results, and send messages.
----
-
-# Clawith Sync
-
-## When to use
-Check for new messages from the Clawith platform during every heartbeat cycle.
-You can also proactively send messages to people and agents in your relationships.
-
-## Instructions
-
-### 1. Check inbox
-Make an HTTP GET request:
-- URL: ${origin}/api/gateway/poll
-- Header: X-Api-Key: ${apiKey}
-
-The response contains a \`messages\` array. Each message includes:
-- \`id\` — unique message ID (use this for reporting)
-- \`content\` — the message text
-- \`sender_user_name\` — name of the Clawith user who sent it
-- \`sender_user_id\` — unique ID of the sender
-- \`conversation_id\` — the conversation this message belongs to
-- \`history\` — array of previous messages in this conversation for context
-
-The response also contains a \`relationships\` array describing your colleagues:
-- \`name\` — the person or agent name
-- \`type\` — "human" or "agent"
-- \`role\` — relationship type (e.g. collaborator, supervisor)
-- \`channels\` — available communication channels (e.g. ["feishu"], ["agent"])
-
-IMPORTANT: Use the \`history\` array to understand conversation context before replying.
-Different \`sender_user_name\` values mean different people — address them accordingly.
-
-### 2. Report results
-For each completed message, make an HTTP POST request:
-- URL: ${origin}/api/gateway/report
-- Header: X-Api-Key: ${apiKey}
-- Header: Content-Type: application/json
-- Body: {"message_id": "<id from the message>", "result": "<your response>"}
-
-### 3. Send a message to someone
-To proactively contact a person or agent, make an HTTP POST request:
-- URL: ${origin}/api/gateway/send-message
-- Header: X-Api-Key: ${apiKey}
-- Header: Content-Type: application/json
-- Body: {"target": "<name of person or agent>", "content": "<your message>"}
-
-The system auto-detects the best channel. For agents, the reply appears in your next poll.
-For humans, the message is delivered via their available channel (e.g. Feishu).`;
 }

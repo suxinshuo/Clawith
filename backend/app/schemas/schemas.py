@@ -112,6 +112,10 @@ class MultiTenantResponse(BaseModel):
     requires_tenant_selection: bool = True
     login_identifier: str
     tenants: list[TenantChoice]
+    # Opaque short-lived token used by OAuth flows (no password available for re-auth).
+    # When present, the client must POST to /auth/select-oauth-tenant instead of re-calling /auth/login.
+    pending_token: str | None = None
+
 
 
 class TenantSwitchRequest(BaseModel):
@@ -180,8 +184,12 @@ class OAuthAuthorizeResponse(BaseModel):
 
 
 class OAuthCallbackRequest(BaseModel):
-    code: str
+    code: str | None = None          # Step 1: initial OAuth code exchange
     state: str
+    redirect_uri: str | None = None
+    # Step 2: tenant selection (no code needed)
+    tenant_id: str | None = None
+    pending_token: str | None = None
 
 
 class IdentityBindRequest(BaseModel):
@@ -288,6 +296,7 @@ class AgentOut(BaseModel):
     onboarded_for_me: bool = True
     created_at: datetime
     last_active_at: datetime | None = None
+    deleted_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 
@@ -425,9 +434,14 @@ class LLMModelOut(BaseModel):
     max_tokens_per_day: int | None = None
     enabled: bool
     supports_vision: bool = False
+    supports_tool_calling: bool | None = None
+    tool_calling_capability_source: str | None = None
+    tool_calling_checked_at: datetime | None = None
+    tool_calling_error: str | None = None
     max_output_tokens: int | None = None
     request_timeout: int | None = None
     created_at: datetime
+    deleted_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 
@@ -590,3 +604,4 @@ class GatewaySendMessageRequest(BaseModel):
     target: str  # Name of target person or agent
     content: str = Field(min_length=1)
     channel: str | None = None  # Optional: "feishu", "agent", etc. Auto-detected if omitted.
+    message_id: uuid.UUID | None = None  # Optional idempotency key for Agent delivery.

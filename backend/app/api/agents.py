@@ -1,27 +1,43 @@
 """Agent (Digital Employee) API routes."""
 
 import hashlib
-import json
 import secrets
 import uuid
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import cast, func, select, String
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from loguru import logger
+from sqlalchemy import String, cast, delete, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
+from app.config import get_settings
 from app.core.permissions import build_visible_agents_query, check_agent_access, is_agent_creator
 from app.core.security import get_current_user
-from app.database import get_db
+from app.database import async_session, get_db
 from app.models.agent import Agent, AgentPermission, AgentTemplate
-from app.models.audit import ChatMessage
+from app.models.agent_run import AgentRun
+from app.models.agent_run_event import AgentRunEvent
+from app.models.org import OrgMember
+from app.models.audit import AuditLog, ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.user import User
 from app.schemas.schemas import AgentCreate, AgentOut, AgentUpdate
+from app.services.storage import get_storage_backend
 from app.services.access_relationships import ensure_access_granted_platform_relationships
+from app.services.quota_guard import check_agent_creation_quota, QuotaExceeded
+from app.models.tenant import Tenant
+from app.models.participant import Participant
+from app.models.workspace import WorkspaceEditLock
+from app.services.okr_agent_hook import hook_new_agent
+from app.services.agent_manager import agent_manager
+from app.models.skill import Skill
+from app.services.resource_discovery import import_mcp_from_smithery
+from app.services.agent_runtime.persistence import enqueue_cancel
+from app.services.llm.model_resolution import load_active_model
 
 router = APIRouter(prefix="/agents", tags=["agents"])
+settings = get_settings()
 
 
 async def _get_active_admin_users(db: AsyncSession, tenant_id: uuid.UUID | None) -> list[User]:
@@ -37,64 +53,20 @@ async def _get_active_admin_users(db: AsyncSession, tenant_id: uuid.UUID | None)
     return result.scalars().all()
 
 
-def _serialize_dt(value: datetime | None) -> str | None:
-    return value.isoformat() if value else None
-
-
-async def _archive_agent_task_history(db: AsyncSession, agent_id: uuid.UUID, archive_dir: Path) -> Path | None:
-    """Persist task and task-log history into the agent archive directory before DB cleanup."""
-    from app.models.task import Task, TaskLog
-
-    task_result = await db.execute(select(Task).where(Task.agent_id == agent_id).order_by(Task.created_at.asc()))
-    tasks = task_result.scalars().all()
-    if not tasks:
-        return None
-
-    archive_dir.mkdir(parents=True, exist_ok=True)
-
-    payload = {
-        "agent_id": str(agent_id),
-        "archived_at": datetime.now(timezone.utc).isoformat(),
-        "tasks": [],
-    }
-
-    for task in tasks:
-        log_result = await db.execute(select(TaskLog).where(TaskLog.task_id == task.id).order_by(TaskLog.created_at.asc()))
-        logs = log_result.scalars().all()
-        payload["tasks"].append(
-            {
-                "id": str(task.id),
-                "title": task.title,
-                "description": task.description,
-                "type": task.type,
-                "status": task.status,
-                "priority": task.priority,
-                "assignee": task.assignee,
-                "created_by": str(task.created_by),
-                "due_date": _serialize_dt(task.due_date),
-                "supervision_target_user_id": (
-                    str(task.supervision_target_user_id) if task.supervision_target_user_id else None
-                ),
-                "supervision_target_name": task.supervision_target_name,
-                "supervision_channel": task.supervision_channel,
-                "remind_schedule": task.remind_schedule,
-                "created_at": _serialize_dt(task.created_at),
-                "updated_at": _serialize_dt(task.updated_at),
-                "completed_at": _serialize_dt(task.completed_at),
-                "logs": [
-                    {
-                        "id": str(log.id),
-                        "content": log.content,
-                        "created_at": _serialize_dt(log.created_at),
-                    }
-                    for log in logs
-                ],
-            }
+async def _validate_active_agent_model(
+    db: AsyncSession,
+    *,
+    model_id: uuid.UUID | None,
+    tenant_id: uuid.UUID | None,
+    field_name: str,
+) -> None:
+    if model_id is None:
+        return
+    if await load_active_model(db, model_id=model_id, tenant_id=tenant_id) is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} must reference an active model in the Agent tenant",
         )
-
-    archive_path = archive_dir / "task_history.json"
-    archive_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return archive_path
 
 
 async def _lazy_reset_token_counters(agent: Agent, db: AsyncSession) -> bool:
@@ -103,6 +75,7 @@ async def _lazy_reset_token_counters(agent: Agent, db: AsyncSession) -> bool:
     Returns True if any counter was reset (caller should commit/flush).
     """
     from datetime import datetime, timezone as tz
+
     now = datetime.now(tz.utc)
     changed = False
 
@@ -146,10 +119,11 @@ async def _build_unread_count_by_agent(
         .where(
             ChatSession.agent_id.in_(agent_ids),
             ChatSession.user_id == current_user.id,
-            ChatSession.is_group == False,
+            ChatSession.is_group.is_(False),
             ChatSession.source_channel.notin_(["agent", "trigger"]),
             ChatMessage.role.in_(["assistant", "system", "tool_call"]),
-            ChatMessage.created_at > func.coalesce(
+            ChatMessage.created_at
+            > func.coalesce(
                 ChatSession.last_read_at_by_user,
                 datetime(1970, 1, 1, tzinfo=timezone.utc),
             ),
@@ -172,6 +146,7 @@ async def list_templates(
 ):
     """List all available agent templates."""
     from app.models.agent import AgentTemplate
+
     result = await db.execute(
         select(AgentTemplate).order_by(AgentTemplate.is_builtin.desc(), AgentTemplate.created_at.asc())
     )
@@ -188,7 +163,6 @@ async def list_templates(
             "default_skills": t.default_skills,
             "default_autonomy_policy": t.default_autonomy_policy,
             "capability_bullets": t.capability_bullets or [],
-            "has_bootstrap": bool(t.bootstrap_content),
         }
         for t in templates
     ]
@@ -201,6 +175,7 @@ async def _agent_to_out(
 ) -> AgentOut:
     """Serialize one agent with ``onboarded_for_me`` for the given viewer."""
     from app.services.onboarding import is_onboarded
+
     model = AgentOut.model_validate(agent)
     model.onboarded_for_me = await is_onboarded(db, agent.id, viewer_id)
     return model
@@ -213,6 +188,7 @@ async def _agents_to_out(
 ) -> list[AgentOut]:
     """List variant that fetches all junction rows in one query."""
     from app.services.onboarding import onboarded_agent_ids
+
     onboarded = await onboarded_agent_ids(db, viewer_id, [a.id for a in agents])
     out: list[AgentOut] = []
     for a in agents:
@@ -253,6 +229,7 @@ async def list_agents(
         await db.commit()
     unread_by_agent = await _build_unread_count_by_agent(db, agents, current_user)
     from app.services.onboarding import onboarded_agent_ids
+
     onboarded = await onboarded_agent_ids(db, current_user.id, [a.id for a in agents])
     out: list[AgentOut] = []
     for a in agents:
@@ -262,22 +239,188 @@ async def list_agents(
     return out
 
 
+async def _background_agent_setup(
+    agent_id: uuid.UUID,
+    personality: str,
+    boundaries: str,
+    skill_ids: list[uuid.UUID],
+    template_skill_folder_names: list[str],
+    template_mcp_servers: list[str],
+) -> None:
+    """Run all creation tasks asynchronously with small, short-lived transactions."""
+    # 1. Initialize agent file system from template
+    try:
+        async with async_session() as db:
+            agent_result = await db.execute(
+                select(Agent).where(
+                    Agent.id == agent_id,
+                    Agent.deleted_at.is_(None),
+                )
+            )
+            agent = agent_result.scalar_one_or_none()
+            if not agent:
+                logger.error(f"[background_agent_setup] Agent {agent_id} not found")
+                return
+            await agent_manager.initialize_agent_files(
+                db,
+                agent,
+                personality=personality,
+                boundaries=boundaries,
+            )
+            await db.commit()
+    except Exception as e:
+        logger.exception(f"Error during agent file initialization for {agent_id}: {e}")
+        async with async_session() as db:
+            agent_result = await db.execute(
+                select(Agent).where(
+                    Agent.id == agent_id,
+                    Agent.deleted_at.is_(None),
+                )
+            )
+            agent = agent_result.scalar_one_or_none()
+            if agent:
+                agent.status = "error"
+                await db.commit()
+        return
+
+    # 2. Skill resolution (reads from DB)
+    skill_files_to_write = []
+    try:
+        async with async_session() as db:
+            default_result = await db.execute(select(Skill).where(Skill.is_default))
+            default_ids = {s.id for s in default_result.scalars().all()}
+
+            template_skill_ids = set()
+            if template_skill_folder_names:
+                tpl_skills_r = await db.execute(select(Skill).where(Skill.folder_name.in_(template_skill_folder_names)))
+                template_skill_ids = {s.id for s in tpl_skills_r.scalars().all()}
+
+            all_skill_ids = set(skill_ids) | default_ids | template_skill_ids
+
+            if all_skill_ids:
+                skills_result = await db.execute(
+                    select(Skill).where(Skill.id.in_(all_skill_ids)).options(selectinload(Skill.files))
+                )
+                skills = skills_result.scalars().all()
+                agent_prefix = agent_manager._agent_storage_prefix(agent_id)
+                for skill in skills:
+                    for sf in skill.files:
+                        skill_files_to_write.append(
+                            (f"{agent_prefix}/skills/{skill.folder_name}/{sf.path}", sf.content)
+                        )
+    except Exception as e:
+        logger.exception(f"Error resolving skills for agent {agent_id}: {e}")
+        async with async_session() as db:
+            agent_result = await db.execute(
+                select(Agent).where(
+                    Agent.id == agent_id,
+                    Agent.deleted_at.is_(None),
+                )
+            )
+            agent = agent_result.scalar_one_or_none()
+            if agent:
+                agent.status = "error"
+                await db.commit()
+        return
+
+    # 3. Skills Copying (I/O only, NO db connection held!)
+    if skill_files_to_write:
+        try:
+            import asyncio
+
+            storage = get_storage_backend()
+            await asyncio.gather(
+                *[storage.write_text(key, content, encoding="utf-8") for key, content in skill_files_to_write]
+            )
+            logger.info(f"[_skills_copy] background agent={agent_id} files={len(skill_files_to_write)} completed")
+        except Exception as e:
+            logger.exception(f"Error copying skills files for agent {agent_id}: {e}")
+            async with async_session() as db:
+                agent_result = await db.execute(
+                    select(Agent).where(
+                        Agent.id == agent_id,
+                        Agent.deleted_at.is_(None),
+                    )
+                )
+                agent = agent_result.scalar_one_or_none()
+                if agent:
+                    agent.status = "error"
+                    await db.commit()
+            return
+
+    # 4. Install template MCP servers
+    if template_mcp_servers:
+        for server_id in template_mcp_servers:
+            try:
+                result_msg = await import_mcp_from_smithery(
+                    server_id=server_id,
+                    agent_id=agent_id,
+                    config={},
+                )
+                if result_msg.startswith("❌"):
+                    logger.warning(
+                        f"[create_agent] background MCP pre-install for '{server_id}' "
+                        f"on agent {agent_id} reported error: {result_msg[:200]}"
+                    )
+                else:
+                    logger.info(
+                        f"[create_agent] background MCP pre-install '{server_id}' succeeded for agent {agent_id}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"[create_agent] background MCP pre-install for '{server_id}' on agent {agent_id} raised: {e}"
+                )
+
+    # 5. Start container and Hook OKR Agent
+    try:
+        async with async_session() as db:
+            agent_result = await db.execute(
+                select(Agent).where(
+                    Agent.id == agent_id,
+                    Agent.deleted_at.is_(None),
+                )
+            )
+            agent = agent_result.scalar_one_or_none()
+            if not agent:
+                logger.error(f"[background_agent_setup] Agent {agent_id} not found before starting container")
+                return
+
+            await agent_manager.start_container(db, agent)
+
+            if agent.tenant_id:
+                await hook_new_agent(db, agent.id, agent.tenant_id)
+
+            await db.commit()
+    except Exception as e:
+        logger.exception(f"Error starting container for agent {agent_id}: {e}")
+        async with async_session() as db:
+            agent_result = await db.execute(
+                select(Agent).where(
+                    Agent.id == agent_id,
+                    Agent.deleted_at.is_(None),
+                )
+            )
+            agent = agent_result.scalar_one_or_none()
+            if agent:
+                agent.status = "error"
+                await db.commit()
+
+
 @router.post("/", status_code=status.HTTP_201_CREATED)
 async def create_agent(
     data: AgentCreate,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new digital employee (any authenticated user)."""
     # Check agent creation quota
-    from app.services.quota_guard import check_agent_creation_quota, QuotaExceeded
     try:
         await check_agent_creation_quota(current_user.id)
     except QuotaExceeded as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=e.message)
 
     # A TTL of 0 or less means the agent never expires.
-    from datetime import datetime, timedelta, timezone as tz
     ttl_hours = current_user.quota_agent_ttl_hours
 
     # Determine target tenant: normally user's tenant; admins can override via payload
@@ -293,7 +436,6 @@ async def create_agent(
     default_heartbeat_interval = 240  # model default
     tenant_default_model_id = None
     if target_tenant_id:
-        from app.models.tenant import Tenant
         tenant_result = await db.execute(select(Tenant).where(Tenant.id == target_tenant_id))
         tenant = tenant_result.scalar_one_or_none()
         if tenant:
@@ -304,12 +446,36 @@ async def create_agent(
             default_webhook_rate = tenant.max_webhook_rate_ceiling or 5
             tenant_default_model_id = tenant.default_model_id
             # Enforce heartbeat floor: new agents must respect company minimum
-            if tenant.min_heartbeat_interval_minutes and tenant.min_heartbeat_interval_minutes > default_heartbeat_interval:
+            if (
+                tenant.min_heartbeat_interval_minutes
+                and tenant.min_heartbeat_interval_minutes > default_heartbeat_interval
+            ):
                 default_heartbeat_interval = tenant.min_heartbeat_interval_minutes
 
-    # If the caller didn't pick a model, fall back to the tenant's default.
-    effective_primary_model_id = data.primary_model_id or tenant_default_model_id
-    expires_at = datetime.now(tz.utc) + timedelta(hours=ttl_hours) if ttl_hours and ttl_hours > 0 else None
+    # Use a requested model only after an Active check. A stale deleted tenant
+    # default is ignored without rewriting the historical Tenant reference.
+    effective_primary_model_id = data.primary_model_id
+    if effective_primary_model_id is not None:
+        await _validate_active_agent_model(
+            db,
+            model_id=effective_primary_model_id,
+            tenant_id=target_tenant_id,
+            field_name="primary_model_id",
+        )
+    elif tenant_default_model_id is not None:
+        active_default = await load_active_model(
+            db,
+            model_id=tenant_default_model_id,
+            tenant_id=target_tenant_id,
+        )
+        effective_primary_model_id = active_default.id if active_default is not None else None
+    await _validate_active_agent_model(
+        db,
+        model_id=data.fallback_model_id,
+        tenant_id=target_tenant_id,
+        field_name="fallback_model_id",
+    )
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=ttl_hours) if ttl_hours and ttl_hours > 0 else None
 
     agent = Agent(
         name=data.name,
@@ -339,11 +505,14 @@ async def create_agent(
     await db.flush()
 
     # Auto-create Participant identity for the new agent
-    from app.models.participant import Participant
-    db.add(Participant(
-        type="agent", ref_id=agent.id,
-        display_name=agent.name, avatar_url=agent.avatar_url,
-    ))
+    db.add(
+        Participant(
+            type="agent",
+            ref_id=agent.id,
+            display_name=agent.name,
+            avatar_url=agent.avatar_url,
+        )
+    )
     await db.flush()
 
     # Set permissions
@@ -359,10 +528,14 @@ async def create_agent(
         agent.company_access_level = access_level
         if data.permission_scope_ids:
             for scope_id in data.permission_scope_ids:
-                db.add(AgentPermission(agent_id=agent.id, scope_type="user", scope_id=scope_id, access_level=access_level))
+                db.add(
+                    AgentPermission(agent_id=agent.id, scope_type="user", scope_id=scope_id, access_level=access_level)
+                )
         else:
             # "仅自己" — insert creator as the only permitted user
-            db.add(AgentPermission(agent_id=agent.id, scope_type="user", scope_id=current_user.id, access_level="manage"))
+            db.add(
+                AgentPermission(agent_id=agent.id, scope_type="user", scope_id=current_user.id, access_level="manage")
+            )
     elif data.permission_scope_type == "custom":
         agent.access_mode = "custom"
         agent.company_access_level = access_level
@@ -378,7 +551,6 @@ async def create_agent(
         agent.status = "idle"
         await db.commit()
 
-        from app.services.okr_agent_hook import hook_new_agent
         if agent.tenant_id:
             await hook_new_agent(db, agent.id, agent.tenant_id)
             await db.commit()
@@ -388,124 +560,34 @@ async def create_agent(
         out["api_key"] = raw_key  # Return once on creation
         return out
 
-    # Initialize agent file system from template
-    from app.services.agent_manager import agent_manager
-    await agent_manager.initialize_agent_files(
-        db, agent,
-        personality=data.personality,
-        boundaries=data.boundaries,
-    )
-    from app.api.relationships import _regenerate_relationships_file
-    await _regenerate_relationships_file(db, agent.id)
-
-    # Copy selected skills + mandatory default skills into agent workspace
-    from app.models.skill import Skill
-    from sqlalchemy.orm import selectinload
-
-    # Always include global default skills (mcp-installer, skill-creator,
-    # complex-task-executor)
-    default_result = await db.execute(
-        select(Skill).where(Skill.is_default)
-    )
-    default_ids = {s.id for s in default_result.scalars().all()}
-
-    # Include the template's declared default skills (e.g. trading templates
-    # ship with `market-data` / `financial-calendar` in their meta.yaml).
-    # Without this, the SKILL.md never reaches `<agent_dir>/skills/<folder>/`,
-    # so the agent has no idea those MCP-backed skills exist and silently
-    # falls back to web search.
-    template_skill_ids: set = set()
+    # Resolve template settings
+    folder_names = []
+    template_mcp_servers = []
     if data.template_id:
-        tpl_r = await db.execute(
-            select(AgentTemplate).where(AgentTemplate.id == data.template_id)
-        )
+        tpl_r = await db.execute(select(AgentTemplate).where(AgentTemplate.id == data.template_id))
         tpl = tpl_r.scalar_one_or_none()
-        folder_names = list((tpl.default_skills if tpl else None) or [])
-        if folder_names:
-            tpl_skills_r = await db.execute(
-                select(Skill).where(Skill.folder_name.in_(folder_names))
-            )
-            template_skill_ids = {s.id for s in tpl_skills_r.scalars().all()}
+        if tpl:
+            folder_names = list(tpl.default_skills or [])
+            template_mcp_servers = list(tpl.default_mcp_servers or [])
 
-    # Merge user-selected + global default + template-default skill IDs
-    all_skill_ids = set(data.skill_ids or []) | default_ids | template_skill_ids
+    # Prepare return response before transaction is committed
+    out = await _agent_to_out(db, agent, current_user.id)
 
-    if all_skill_ids:
-        agent_dir = agent_manager._agent_dir(agent.id)
-        skills_dir = agent_dir / "skills"
-        skills_dir.mkdir(parents=True, exist_ok=True)
+    # Commit initial state to DB so background task can read the agent row
+    await db.commit()
 
-        for sid in all_skill_ids:
-            result = await db.execute(
-                select(Skill).where(Skill.id == sid).options(selectinload(Skill.files))
-            )
-            skill = result.scalar_one_or_none()
-            if not skill:
-                continue
-            # Create folder: skills/<folder_name>/
-            skill_folder = skills_dir / skill.folder_name
-            skill_folder.mkdir(parents=True, exist_ok=True)
-            # Write each file
-            for sf in skill.files:
-                file_path = skill_folder / sf.path
-                file_path.parent.mkdir(parents=True, exist_ok=True)
-                file_path.write_text(sf.content, encoding="utf-8")
+    # Dispatch heavy setup to background task
+    background_tasks.add_task(
+        _background_agent_setup,
+        agent_id=agent.id,
+        personality=data.personality or "",
+        boundaries=data.boundaries or "",
+        skill_ids=list(data.skill_ids or []),
+        template_skill_folder_names=folder_names,
+        template_mcp_servers=template_mcp_servers,
+    )
 
-    # Auto-install template-declared MCP servers using the system Smithery key.
-    # For trading agents, this means shibui/finance lands in the agent's tool
-    # list at creation time rather than relying on the agent to install it on
-    # first use via the MCP_INSTALLER skill (which depends on LLM compliance).
-    # Failures are logged and swallowed — agent creation must not fail because
-    # an external Smithery call did.
-    template_mcp_servers = list((tpl.default_mcp_servers if data.template_id and tpl else None) or [])
-    if template_mcp_servers:
-        # Commit the in-flight transaction first so the agent row exists in
-        # the database when import_mcp_from_smithery opens its own session
-        # to insert AgentTool rows. Without this commit the FK to agents.id
-        # is invisible to the parallel session and we get a FK violation.
-        await db.commit()
-        await db.refresh(agent)
-
-        from loguru import logger
-        from app.services.resource_discovery import import_mcp_from_smithery
-        for server_id in template_mcp_servers:
-            try:
-                result_msg = await import_mcp_from_smithery(
-                    server_id=server_id,
-                    agent_id=agent.id,
-                    config={},  # falls back to system Smithery key
-                )
-                if result_msg.startswith("❌"):
-                    logger.warning(
-                        f"[create_agent] MCP pre-install for '{server_id}' "
-                        f"on agent {agent.id} reported error: {result_msg[:200]}"
-                    )
-                else:
-                    logger.info(
-                        f"[create_agent] MCP pre-install '{server_id}' "
-                        f"succeeded for agent {agent.id}"
-                    )
-            except Exception as e:
-                logger.warning(
-                    f"[create_agent] MCP pre-install for '{server_id}' "
-                    f"on agent {agent.id} raised: {e}"
-                )
-
-    if agent.agent_type == "openclaw":
-        # Start container for OpenClaw edge node
-        await agent_manager.start_container(db, agent)
-    else:
-        # Native Agent. No container needs to be started.
-        agent.status = "idle"
-        agent.last_active_at = datetime.now(timezone.utc)
-    await db.flush()
-
-    from app.services.okr_agent_hook import hook_new_agent
-    if agent.tenant_id:
-        await hook_new_agent(db, agent.id, agent.tenant_id)
-        await db.commit()
-
-    return await _agent_to_out(db, agent, current_user.id)
+    return out
 
 
 @router.get("/{agent_id}")
@@ -530,10 +612,9 @@ async def get_agent(
     if agent.creator_id:
         from sqlalchemy.orm import selectinload
         from app.models.user import Identity  # noqa: F401
+
         creator_result = await db.execute(
-            select(User)
-            .where(User.id == agent.creator_id)
-            .options(selectinload(User.identity))
+            select(User).where(User.id == agent.creator_id).options(selectinload(User.identity))
         )
         creator = creator_result.scalar_one_or_none()
         out["creator_username"] = creator.username if creator else None
@@ -542,6 +623,7 @@ async def get_agent(
     effective_tz = agent.timezone
     if not effective_tz and agent.tenant_id:
         from app.models.tenant import Tenant
+
         t_result = await db.execute(select(Tenant).where(Tenant.id == agent.tenant_id))
         tenant = t_result.scalar_one_or_none()
         if tenant:
@@ -602,7 +684,13 @@ async def get_agent_permissions(
             if perm.scope_type == "user" and perm.scope_id
         }
         ordered_user_ids = [str(uid) for uid in display_user_ids]
-        ordered_user_ids.sort(key=lambda sid: (users_by_id.get(sid).display_name or users_by_id.get(sid).username or "") if users_by_id.get(sid) else "")
+        ordered_user_ids.sort(
+            key=lambda sid: (
+                (users_by_id.get(sid).display_name or users_by_id.get(sid).username or "")
+                if users_by_id.get(sid)
+                else ""
+            )
+        )
         for perm in perms:
             if perm.scope_type != "user" or not perm.scope_id:
                 continue
@@ -668,6 +756,7 @@ async def update_agent_permissions(
 
     # Delete existing permissions
     from sqlalchemy import delete as sql_delete
+
     await db.execute(sql_delete(AgentPermission).where(AgentPermission.agent_id == agent_id))
 
     # Insert new permissions
@@ -680,7 +769,14 @@ async def update_agent_permissions(
         agent.company_access_level = access_level
         # "Only me" means private to the agent creator, even when an org admin
         # is managing a company-visible agent created by someone else.
-        db.add(AgentPermission(agent_id=agent_id, scope_type="user", scope_id=agent.creator_id or current_user.id, access_level="manage"))
+        db.add(
+            AgentPermission(
+                agent_id=agent_id,
+                scope_type="user",
+                scope_id=agent.creator_id or current_user.id,
+                access_level="manage",
+            )
+        )
     elif scope_type == "custom":
         agent.access_mode = "custom"
         agent.company_access_level = access_level
@@ -706,12 +802,14 @@ async def update_agent_permissions(
             uid = uuid.UUID(str(sid))
             if uid not in seen_user_ids:
                 seen_user_ids.add(uid)
-                db.add(AgentPermission(
-                    agent_id=agent_id,
-                    scope_type="user",
-                    scope_id=uid,
-                    access_level="manage" if uid in required_manager_ids else access_level,
-                ))
+                db.add(
+                    AgentPermission(
+                        agent_id=agent_id,
+                        scope_type="user",
+                        scope_id=uid,
+                        access_level="manage" if uid in required_manager_ids else access_level,
+                    )
+                )
         for uid in required_manager_ids:
             if uid not in seen_user_ids:
                 db.add(AgentPermission(agent_id=agent_id, scope_type="user", scope_id=uid, access_level="manage"))
@@ -724,6 +822,7 @@ async def update_agent_permissions(
     )
     if relationships_changed:
         from app.api.relationships import _regenerate_relationships_file
+
         await _regenerate_relationships_file(db, agent_id)
 
     await db.commit()
@@ -737,32 +836,76 @@ async def get_agent_permission_candidates(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return platform users that can be granted custom access."""
+    """Return org members that can be granted custom access.
+
+    For members without a linked platform account (user_id is None), we call
+    get_platform_user_by_org_member which will find-or-create a User using the
+    member's email/phone, then link it back to the OrgMember row.
+    """
     agent, access_level = await check_agent_access(db, current_user, agent_id)
     if access_level != "manage":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only manager can change permissions")
 
-    user_query = select(User).where(User.tenant_id == agent.tenant_id, User.is_active == True)
+    member_query = select(OrgMember).where(
+        OrgMember.tenant_id == agent.tenant_id,
+        OrgMember.status == "active",
+    )
     if search:
         pattern = f"%{search}%"
-        user_query = user_query.where(
-            (User.username.ilike(pattern)) |
-            (User.display_name.ilike(pattern)) |
-            (User.email.ilike(pattern))
+        member_query = member_query.where(
+            OrgMember.name.ilike(pattern)
+            | OrgMember.email.ilike(pattern)
+            | OrgMember.name_translit_full.ilike(pattern)
+            | OrgMember.name_translit_initial.ilike(pattern)
         )
 
-    users_result = await db.execute(user_query.order_by(User.created_at.asc()).limit(50))
-    users = users_result.scalars().all()
-    return {
-        "users": [
+    members_result = await db.execute(member_query.order_by(OrgMember.name.asc()).limit(50))
+    members = members_result.scalars().all()
+
+    # For members already linked, batch-load User rows for display info.
+    linked_user_ids = [m.user_id for m in members if m.user_id]
+    users_by_id: dict[uuid.UUID, User] = {}
+    if linked_user_ids:
+        users_result = await db.execute(
+            select(User)
+            .where(User.id.in_(linked_user_ids), User.tenant_id == agent.tenant_id)
+            .options(selectinload(User.identity))
+        )
+        users_by_id = {u.id: u for u in users_result.scalars().all()}
+
+    from app.services.channel_user_service import get_platform_user_by_org_member
+
+    candidates = []
+    for m in members:
+        if m.user_id:
+            u = users_by_id.get(m.user_id)
+        else:
+            # No platform account yet — find-or-create one from OrgMember info
+            # and link it back so future lookups hit Case 1.
+            try:
+                u = await get_platform_user_by_org_member(db, m, agent_tenant_id=agent.tenant_id)
+            except Exception:
+                # If user creation fails for any reason, skip this member
+                continue
+
+        if u is None:
+            continue
+
+        candidates.append(
             {
-                "id": str(u.id),
-                "name": u.display_name or u.username,
-                "username": u.username,
-                "email": u.email,
+                "id": str(u.id),  # always a valid User.id
+                "name": m.name,
+                "username": u.username if u else None,
+                "email": m.email or (u.email if u else None),
+                "title": m.title or None,
+                "avatar_url": m.avatar_url or None,
             }
-            for u in users
-        ],
+        )
+
+    await db.commit()
+
+    return {
+        "users": candidates,
         "agents": [],
     }
 
@@ -780,15 +923,27 @@ async def update_agent(
     is_admin = current_user.role in ("platform_admin", "org_admin")
 
     if not is_agent_creator(current_user, agent) and not is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only creator or admin can update agent settings")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Only creator or admin can update agent settings"
+        )
 
     update_data = data.model_dump(exclude_unset=True)
+
+    for field_name in ("primary_model_id", "fallback_model_id"):
+        if field_name in update_data:
+            await _validate_active_agent_model(
+                db,
+                model_id=update_data[field_name],
+                tenant_id=agent.tenant_id,
+                field_name=field_name,
+            )
 
     # expires_at: admin only
     if "expires_at" in update_data:
         if not is_admin:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admin can modify agent expiry time")
         from datetime import datetime, timezone as tz
+
         new_expires = update_data["expires_at"]
         # Allow any value: extend, shorten, or null (permanent).
         # Re-activate the agent if new expiry is in the future or cleared.
@@ -801,21 +956,25 @@ async def update_agent(
     clamped_fields = []  # track fields adjusted by tenant floor
     if "heartbeat_interval_minutes" in update_data and current_user.tenant_id:
         from app.models.tenant import Tenant
+
         t_result = await db.execute(select(Tenant).where(Tenant.id == current_user.tenant_id))
         tenant = t_result.scalar_one_or_none()
         if tenant and update_data["heartbeat_interval_minutes"] < tenant.min_heartbeat_interval_minutes:
             update_data["heartbeat_interval_minutes"] = tenant.min_heartbeat_interval_minutes
-            clamped_fields.append({
-                "field": "heartbeat_interval_minutes",
-                "requested": update_data["heartbeat_interval_minutes"],
-                "applied": tenant.min_heartbeat_interval_minutes,
-                "reason": "company_floor",
-            })
+            clamped_fields.append(
+                {
+                    "field": "heartbeat_interval_minutes",
+                    "requested": update_data["heartbeat_interval_minutes"],
+                    "applied": tenant.min_heartbeat_interval_minutes,
+                    "reason": "company_floor",
+                }
+            )
 
     # Enforce trigger limit floors from tenant
     trigger_fields = {"min_poll_interval_min", "webhook_rate_limit", "max_triggers"}
     if trigger_fields & set(update_data.keys()) and current_user.tenant_id:
         from app.models.tenant import Tenant
+
         t_result = await db.execute(select(Tenant).where(Tenant.id == current_user.tenant_id))
         tenant = t_result.scalar_one_or_none()
         if tenant:
@@ -823,22 +982,26 @@ async def update_agent(
                 original = update_data["min_poll_interval_min"]
                 update_data["min_poll_interval_min"] = max(original, tenant.min_poll_interval_floor)
                 if update_data["min_poll_interval_min"] != original:
-                    clamped_fields.append({
-                        "field": "min_poll_interval_min",
-                        "requested": original,
-                        "applied": update_data["min_poll_interval_min"],
-                        "reason": "company_floor",
-                    })
+                    clamped_fields.append(
+                        {
+                            "field": "min_poll_interval_min",
+                            "requested": original,
+                            "applied": update_data["min_poll_interval_min"],
+                            "reason": "company_floor",
+                        }
+                    )
             if "webhook_rate_limit" in update_data:
                 original = update_data["webhook_rate_limit"]
                 update_data["webhook_rate_limit"] = min(original, tenant.max_webhook_rate_ceiling)
                 if update_data["webhook_rate_limit"] != original:
-                    clamped_fields.append({
-                        "field": "webhook_rate_limit",
-                        "requested": original,
-                        "applied": update_data["webhook_rate_limit"],
-                        "reason": "company_ceiling",
-                    })
+                    clamped_fields.append(
+                        {
+                            "field": "webhook_rate_limit",
+                            "requested": original,
+                            "applied": update_data["webhook_rate_limit"],
+                            "reason": "company_ceiling",
+                        }
+                    )
 
     for field, value in update_data.items():
         setattr(agent, field, value)
@@ -847,6 +1010,7 @@ async def update_agent(
     # Sync Participant display_name / avatar if changed
     if "name" in update_data or "avatar_url" in update_data:
         from app.models.participant import Participant
+
         p_r = await db.execute(select(Participant).where(Participant.type == "agent", Participant.ref_id == agent_id))
         p = p_r.scalar_one_or_none()
         if p:
@@ -869,9 +1033,18 @@ async def delete_agent(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a digital employee (creator only)."""
-    agent, _access = await check_agent_access(db, current_user, agent_id)
-    if not is_agent_creator(current_user, agent) and current_user.role not in ("super_admin", "org_admin", "platform_admin"):
+    """Logically delete an Agent while retaining its history and Workspace."""
+    agent, _access = await check_agent_access(
+        db,
+        current_user,
+        agent_id,
+        include_deleted=True,
+    )
+    if not is_agent_creator(current_user, agent) and current_user.role not in (
+        "super_admin",
+        "org_admin",
+        "platform_admin",
+    ):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only creator or admin can delete agent")
 
     # System agents (OKR Agent, etc.) cannot be deleted — they are seeded by the
@@ -882,96 +1055,67 @@ async def delete_agent(
             detail="System agents cannot be deleted. Disable the related feature (e.g. OKR) in Company Settings instead.",
         )
 
-    # Stop container and archive files (best effort)
-    from app.services.agent_manager import agent_manager
-    archive_dir: Path | None = None
-    try:
-        await agent_manager.remove_container(agent)
-    except Exception:
-        pass
-    try:
-        archive_dir = await agent_manager.archive_agent_files(agent.id)
-    except Exception:
-        pass
-    if archive_dir is not None:
-        try:
-            await _archive_agent_task_history(db, agent.id, archive_dir)
-        except Exception:
-            pass
-
-    # Delete related records that reference this agent
-    # Use savepoints so a failure in one table doesn't poison the whole transaction
-    from sqlalchemy import text
-
-    cleanup_tables = [
-        "agent_activity_logs",
-        "audit_logs",
-        "approval_requests",
-        "chat_messages",
-        "chat_sessions",
-        "agent_schedules",
-        "agent_triggers",
-        "channel_configs",
-        "agent_permissions",
-        "agent_tools",
-        "agent_relationships",
-        "gateway_messages",
-        "published_pages",
-        "notifications",
-        "daily_token_usage",
-    ]
-
-    for table in cleanup_tables:
-        try:
-            async with db.begin_nested():
-                await db.execute(text(f"DELETE FROM {table} WHERE agent_id = :aid"), {"aid": agent_id})
-        except Exception:
-            pass
-
-    # Clean up secondary FK columns that also reference agents table
-    secondary_fk_cleanups = [
-        "DELETE FROM task_logs WHERE task_id IN (SELECT id FROM tasks WHERE agent_id = :aid)",
-        "DELETE FROM tasks WHERE agent_id = :aid",
-        "DELETE FROM chat_sessions WHERE peer_agent_id = :aid",
-        "DELETE FROM gateway_messages WHERE sender_agent_id = :aid",
-        "UPDATE chat_messages SET sender_agent_id = NULL WHERE sender_agent_id = :aid",
-    ]
-    for sql in secondary_fk_cleanups:
-        try:
-            async with db.begin_nested():
-                await db.execute(text(sql), {"aid": agent_id})
-        except Exception:
-            pass
-
-    # Also clean agent_agent_relationships (has both agent_id and target_agent_id)
-    try:
-        async with db.begin_nested():
-            await db.execute(
-                text("DELETE FROM agent_agent_relationships WHERE agent_id = :aid OR target_agent_id = :aid"),
-                {"aid": agent_id},
+    if agent.deleted_at is None:
+        agent.deleted_at = datetime.now(timezone.utc)
+        agent.status = "stopped"
+        db.add(
+            AuditLog(
+                user_id=current_user.id,
+                agent_id=agent.id,
+                action="agent_deleted",
+                details={
+                    "resource_id": str(agent.id),
+                    "tenant_id": str(agent.tenant_id) if agent.tenant_id else None,
+                    "name": agent.name,
+                },
             )
-    except Exception:
-        pass
+        )
+        await db.commit()
 
-    # Also clear plaza posts by this agent
-    try:
-        async with db.begin_nested():
-            await db.execute(text("DELETE FROM plaza_posts WHERE author_id = :aid"), {"aid": str(agent_id)})
-    except Exception:
-        pass
-
-    # Clean up Participant identity
-    try:
-        async with db.begin_nested():
-            await db.execute(
-                text("DELETE FROM participants WHERE type = 'agent' AND ref_id = :aid"),
-                {"aid": agent_id},
+    if agent.tenant_id is not None:
+        run_result = await db.execute(
+            select(AgentRun.id)
+            .where(
+                AgentRun.tenant_id == agent.tenant_id,
+                AgentRun.agent_id == agent.id,
+                ~exists().where(
+                    AgentRunEvent.run_id == AgentRun.id,
+                    AgentRunEvent.event_type.in_(
+                        ("run_completed", "run_failed", "run_cancelled")
+                    ),
+                ),
             )
-    except Exception:
-        pass
+            .order_by(AgentRun.created_at, AgentRun.id)
+        )
+        for run_id in run_result.scalars().all():
+            await enqueue_cancel(
+                db,
+                tenant_id=agent.tenant_id,
+                run_id=run_id,
+                idempotency_key=f"agent-delete:{agent.id}:run:{run_id}",
+                reason="agent_deleted",
+                actor_user_id=current_user.id,
+            )
 
-    await db.delete(agent)
+    await db.execute(
+        delete(WorkspaceEditLock).where(WorkspaceEditLock.agent_id == agent.id)
+    )
     await db.commit()
+
+    try:
+        removed = await agent_manager.remove_container(agent)
+        if removed:
+            await db.commit()
+        else:
+            logger.warning(
+                "Container removal requires retry for logically deleted Agent {}",
+                agent.id,
+            )
+    except Exception:
+        logger.exception(
+            "Container removal failed for logically deleted Agent {}",
+            agent.id,
+        )
 
 
 @router.post("/{agent_id}/start", response_model=AgentOut)
@@ -986,6 +1130,7 @@ async def start_agent(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only manager can start agent")
 
     from app.services.agent_manager import agent_manager
+
     await agent_manager.start_container(db, agent)
     await db.flush()
     return await _agent_to_out(db, agent, current_user.id)
@@ -1003,6 +1148,7 @@ async def stop_agent(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only manager can stop agent")
 
     from app.services.agent_manager import agent_manager
+
     await agent_manager.stop_container(agent)
     await db.flush()
     return await _agent_to_out(db, agent, current_user.id)
@@ -1021,9 +1167,12 @@ async def list_agent_approvals(
     """List approval requests for a specific agent. Only creator or admin can view."""
     agent, _access = await check_agent_access(db, current_user, agent_id)
     if not is_agent_creator(current_user, agent) and current_user.role not in ("platform_admin", "org_admin"):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only agent creator or admin can view approvals")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Only agent creator or admin can view approvals"
+        )
 
     from app.models.audit import ApprovalRequest
+
     query = select(ApprovalRequest).where(ApprovalRequest.agent_id == agent_id)
     if status_filter:
         query = query.where(ApprovalRequest.status == status_filter)
@@ -1058,6 +1207,7 @@ async def resolve_agent_approval(
     agent, _access = await check_agent_access(db, current_user, agent_id)
 
     from app.services.autonomy_service import autonomy_service
+
     action = data.get("action", "reject")
     try:
         approval = await autonomy_service.resolve_approval(db, approval_id, current_user, action)
@@ -1105,6 +1255,7 @@ async def list_gateway_messages(
     agent, _access = await check_agent_access(db, current_user, agent_id)
 
     from app.models.gateway_message import GatewayMessage
+
     result = await db.execute(
         select(GatewayMessage)
         .where(GatewayMessage.agent_id == agent_id)
@@ -1119,14 +1270,16 @@ async def list_gateway_messages(
         if m.sender_agent_id:
             r = await db.execute(select(Agent.name).where(Agent.id == m.sender_agent_id))
             sender_name = r.scalar_one_or_none()
-        out.append({
-            "id": str(m.id),
-            "sender_agent_name": sender_name,
-            "content": m.content,
-            "status": m.status,
-            "result": m.result,
-            "created_at": m.created_at.isoformat() if m.created_at else None,
-            "delivered_at": m.delivered_at.isoformat() if m.delivered_at else None,
-            "completed_at": m.completed_at.isoformat() if m.completed_at else None,
-        })
+        out.append(
+            {
+                "id": str(m.id),
+                "sender_agent_name": sender_name,
+                "content": m.content,
+                "status": m.status,
+                "result": m.result,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+                "delivered_at": m.delivered_at.isoformat() if m.delivered_at else None,
+                "completed_at": m.completed_at.isoformat() if m.completed_at else None,
+            }
+        )
     return out

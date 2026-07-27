@@ -1,14 +1,16 @@
-"""Agent relationship management API — human + agent-to-agent."""
+"""Legacy agent relationship management API.
 
-import json
+These endpoints are retained for OKR, gateway, and historical compatibility.
+They do not decide who appears in the Agent Directory; roster visibility does.
+"""
+
 import uuid
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import delete, or_, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
 from app.config import get_settings
 from app.core.permissions import (
@@ -23,12 +25,12 @@ from app.core.security import get_current_user
 from app.database import get_db
 from app.models.agent import Agent
 from app.models.org import AgentRelationship, AgentAgentRelationship, OrgMember
+from app.models.user import Identity, User
 from app.services.access_relationships import ensure_access_granted_platform_relationships
 from app.services.org_sync_adapter import derive_member_department_paths
-from app.models.user import Identity, User
+from app.services.storage import store_agent_bytes
 
-settings = get_settings()
-router = APIRouter(prefix="/agents/{agent_id}/relationships", tags=["relationships"])
+router = APIRouter(prefix="/agents/{agent_id}/relationships", tags=["legacy-relationships"])
 
 RELATION_LABELS = {
     "direct_leader": "直属上级",
@@ -63,6 +65,24 @@ def _display_provider_name(provider_name: str | None, provider_type: str | None)
 
 async def _can_manage_agent(db: AsyncSession, user_id: uuid.UUID, agent: Agent) -> bool:
     return (await get_agent_access_level_for_user_id(db, user_id, agent)) == "manage"
+
+
+async def _get_valid_member_user_id(
+    db: AsyncSession,
+    member: OrgMember,
+    tenant_id: uuid.UUID | None,
+) -> uuid.UUID | None:
+    """Return the linked platform user only when it belongs to the same tenant."""
+    if not member.user_id:
+        return None
+    result = await db.execute(
+        select(User.id).where(
+            User.id == member.user_id,
+            User.tenant_id == tenant_id,
+            User.is_active == True,  # noqa: E712
+        )
+    )
+    return result.scalar_one_or_none()
 
 
 # ─── Schemas ───────────────────────────────────────────
@@ -103,7 +123,7 @@ def _dedupe_agent_relationships(items: list[AgentRelationshipIn], agent_id: uuid
     return list(deduped.values())
 
 
-# ─── Human Relationships (existing) ───────────────────
+# ─── Legacy Human Relationships ────────────────────────
 
 @router.get("/")
 async def get_relationships(
@@ -111,7 +131,7 @@ async def get_relationships(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get all human relationships for this agent."""
+    """Legacy: get manually stored human relationship rows for this agent."""
     from app.models.identity import IdentityProvider
     source_agent, _access_level = await check_agent_access(db, current_user, agent_id)
     if await ensure_access_granted_platform_relationships(
@@ -137,8 +157,10 @@ async def get_relationships(
         db,
         [r.member for r, _provider_name, _provider_type in rows if r.member],
     )
-    return [
-        {
+    out = []
+    for r, provider_name, provider_type in rows:
+        linked_user_id = await _get_valid_member_user_id(db, r.member, source_agent.tenant_id) if r.member else None
+        out.append({
             "id": str(r.id),
             "member_id": str(r.member_id),
             "relation": r.relation,
@@ -153,12 +175,11 @@ async def get_relationships(
                 "email": r.member.email,
                 "provider_name": _display_provider_name(provider_name, provider_type),
                 "provider_type": "platform" if (provider_type or "").lower() == "web" else provider_type,
-                "user_id": str(r.member.user_id) if r.member.user_id else None,
-                "is_platform_user": bool(r.member.user_id),
+                "user_id": str(linked_user_id) if linked_user_id else None,
+                "is_platform_user": bool(linked_user_id),
             } if r.member else None,
-        }
-        for r, provider_name, provider_type in rows
-    ]
+        })
+    return out
 
 
 @router.get("/member-candidates")
@@ -168,22 +189,37 @@ async def search_human_relationship_candidates(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Search org members that are eligible for this agent's human relationships."""
+    """Legacy: search org members that can be stored as relationship rows."""
     from app.models.identity import IdentityProvider
 
     agent, access_level = await check_agent_access(db, current_user, agent_id)
     if not _can_manage_relationships(current_user, access_level):
-        raise HTTPException(status_code=403, detail="Only org admins or managers can modify relationships")
+        raise HTTPException(status_code=403, detail="Only org admins or managers can modify legacy relationships")
 
-    allowed_user_ids = await get_agent_accessible_user_ids(db, agent)
     search_text = (search or "").strip()
+    access_mode = getattr(agent, "access_mode", None) or "company"
+    LinkedUser = aliased(User)
 
     query = (
-        select(OrgMember, IdentityProvider.name.label("provider_name"), IdentityProvider.provider_type)
+        select(
+            OrgMember,
+            IdentityProvider.name.label("provider_name"),
+            IdentityProvider.provider_type,
+            LinkedUser.id.label("linked_user_id"),
+        )
         .outerjoin(IdentityProvider, OrgMember.provider_id == IdentityProvider.id)
+        .outerjoin(
+            LinkedUser,
+            and_(
+                OrgMember.user_id == LinkedUser.id,
+                LinkedUser.tenant_id == agent.tenant_id,
+                LinkedUser.is_active == True,  # noqa: E712
+            ),
+        )
         .where(
             OrgMember.tenant_id == agent.tenant_id,
             OrgMember.status == "active",
+            or_(OrgMember.user_id.is_(None), LinkedUser.id.isnot(None)),
         )
     )
     if search_text:
@@ -197,76 +233,39 @@ async def search_human_relationship_candidates(
             )
         )
 
+    allowed_user_ids: set[uuid.UUID] | None = None
+    if access_mode != "company":
+        allowed_user_ids = await get_agent_accessible_user_ids(db, agent)
+        query = query.where(
+            or_(
+                OrgMember.user_id.is_(None),
+                LinkedUser.id.in_(allowed_user_ids),
+            )
+        )
+
     result = await db.execute(query.order_by(OrgMember.name).limit(200))
     rows = result.all()
-    filtered = [
-        (m, provider_name, provider_type)
-        for m, provider_name, provider_type in rows
-        if not m.user_id or m.user_id in allowed_user_ids
-    ]
     deduped_filtered = []
-    by_user_id: dict[uuid.UUID, tuple[OrgMember, str | None, str | None]] = {}
-    for row in filtered:
-        member, provider_name, provider_type = row
-        if not member.user_id:
+    by_user_id: dict[uuid.UUID, tuple[OrgMember, str | None, str | None, uuid.UUID | None]] = {}
+    for row in rows:
+        member, provider_name, provider_type, linked_user_id = row
+        if not linked_user_id:
             deduped_filtered.append(row)
             continue
-        existing = by_user_id.get(member.user_id)
+        existing = by_user_id.get(linked_user_id)
         if not existing:
-            by_user_id[member.user_id] = row
+            by_user_id[linked_user_id] = row
             continue
         existing_type = (existing[2] or "").lower()
         current_type = (provider_type or "").lower()
         if existing_type in ("", "web", "platform") and current_type not in ("", "web", "platform"):
-            by_user_id[member.user_id] = row
+            by_user_id[linked_user_id] = row
     filtered = [*deduped_filtered, *by_user_id.values()]
-
-    existing_platform_user_ids = {m.user_id for m, _provider_name, _provider_type in filtered if m.user_id}
-    missing_platform_user_ids = allowed_user_ids - existing_platform_user_ids
-    virtual_platform_members = []
-    if missing_platform_user_ids:
-        from sqlalchemy.orm import selectinload as _selectinload
-
-        users_query = (
-            select(User)
-            .where(
-                User.id.in_(missing_platform_user_ids),
-                User.tenant_id == agent.tenant_id,
-                User.is_active == True,  # noqa: E712
-            )
-            .options(_selectinload(User.identity))
-        )
-        if search_text:
-            pattern = f"%{search_text}%"
-            users_query = users_query.where(
-                or_(
-                    User.display_name.ilike(pattern),
-                    User.identity.has(Identity.username.ilike(pattern)),
-                    User.identity.has(Identity.email.ilike(pattern)),
-                )
-            )
-        users_result = await db.execute(users_query.order_by(User.created_at.asc()).limit(200))
-        for user in users_result.scalars().all():
-            virtual_platform_members.append({
-                "id": f"platform-user:{user.id}",
-                "name": user.display_name or user.username or user.email or str(user.id),
-                "email": user.email,
-                "title": user.title or "",
-                "department_path": "",
-                "avatar_url": user.avatar_url,
-                "external_id": f"platform:{user.id}",
-                "provider_id": None,
-                "provider_name": "Platform",
-                "provider_type": "platform",
-                "user_id": str(user.id),
-                "is_platform_user": True,
-                "platform_access_level": await get_agent_access_level_for_user_id(db, user.id, agent),
-            })
 
     filtered = sorted(filtered, key=lambda row: (row[0].name or "").lower())[:100]
     member_paths = await derive_member_department_paths(
         db,
-        [m for m, _provider_name, _provider_type in filtered],
+        [m for m, _provider_name, _provider_type, _linked_user_id in filtered],
     )
     org_member_candidates = [
         {
@@ -280,20 +279,17 @@ async def search_human_relationship_candidates(
             "provider_id": str(m.provider_id) if m.provider_id else None,
             "provider_name": _display_provider_name(provider_name, provider_type) if m.provider_id else None,
             "provider_type": "platform" if (provider_type or "").lower() == "web" else provider_type if m.provider_id else None,
-            "user_id": str(m.user_id) if m.user_id else None,
-            "is_platform_user": bool(m.user_id),
+            "user_id": str(linked_user_id) if linked_user_id else None,
+            "is_platform_user": bool(linked_user_id),
             "platform_access_level": (
-                await get_agent_access_level_for_user_id(db, m.user_id, agent)
-                if m.user_id
+                await get_agent_access_level_for_user_id(db, linked_user_id, agent)
+                if linked_user_id
                 else None
             ),
         }
-        for m, provider_name, provider_type in filtered
+        for m, provider_name, provider_type, linked_user_id in filtered
     ]
-    return sorted(
-        [*org_member_candidates, *virtual_platform_members],
-        key=lambda item: (item.get("name") or "").lower(),
-    )[:100]
+    return sorted(org_member_candidates, key=lambda item: (item.get("name") or "").lower())[:100]
 
 
 @router.put("/")
@@ -303,10 +299,10 @@ async def save_relationships(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Replace all human relationships for this agent."""
+    """Legacy: replace all manually stored human relationship rows."""
     _agent, access_level = await check_agent_access(db, current_user, agent_id)
     if not _can_manage_relationships(current_user, access_level):
-        raise HTTPException(status_code=403, detail="Only org admins or managers can modify relationships")
+        raise HTTPException(status_code=403, detail="Only org admins or managers can modify legacy relationships")
 
     existing_result = await db.execute(select(AgentRelationship).where(AgentRelationship.agent_id == agent_id))
     existing_by_member = {r.member_id: r for r in existing_result.scalars().all()}
@@ -355,7 +351,10 @@ async def save_relationships(
             member = member_result.scalar_one_or_none()
         if not member or member.tenant_id != _agent.tenant_id or member.status != "active":
             raise HTTPException(status_code=400, detail="Relationship member is not available")
-        if member.user_id and not await get_agent_access_level_for_user_id(db, member.user_id, _agent):
+        linked_user_id = await _get_valid_member_user_id(db, member, _agent.tenant_id)
+        if member.user_id and not linked_user_id:
+            raise HTTPException(status_code=400, detail="Relationship member is linked to an unavailable platform user")
+        if linked_user_id and not await get_agent_access_level_for_user_id(db, linked_user_id, _agent):
             raise HTTPException(status_code=403, detail="Platform user does not have access to this agent")
         existing = existing_by_member.get(member_id)
         db.add(AgentRelationship(
@@ -385,7 +384,7 @@ async def delete_relationship(
     """Delete a single human relationship."""
     _agent, access_level = await check_agent_access(db, current_user, agent_id)
     if not _can_manage_relationships(current_user, access_level):
-        raise HTTPException(status_code=403, detail="Only org admins or managers can modify relationships")
+        raise HTTPException(status_code=403, detail="Only org admins or managers can modify legacy relationships")
     result = await db.execute(
         select(AgentRelationship).where(AgentRelationship.id == rel_id, AgentRelationship.agent_id == agent_id)
     )
@@ -411,7 +410,7 @@ async def search_visible_agents(
     """Search manageable agent candidates for relationship creation."""
     source_agent, access_level = await check_agent_access(db, current_user, agent_id)
     if not _can_manage_relationships(current_user, access_level):
-        raise HTTPException(status_code=403, detail="Only org admins or managers can modify relationships")
+        raise HTTPException(status_code=403, detail="Only org admins or managers can modify legacy relationships")
 
     stmt = build_visible_agents_query(current_user, tenant_id=source_agent.tenant_id).where(Agent.id != agent_id)
     if search:
@@ -448,7 +447,7 @@ async def get_agent_relationships(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get all agent-to-agent relationships."""
+    """Legacy: get manually stored agent-to-agent relationship rows."""
     await check_agent_access(db, current_user, agent_id)
     result = await db.execute(
         select(AgentAgentRelationship)
@@ -483,7 +482,7 @@ async def get_agent_relationship_candidates(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Backward-compatible alias for searchable agent candidates."""
+    """Legacy: backward-compatible alias for searchable agent candidates."""
     return await search_visible_agents(
         agent_id=agent_id,
         search=None,
@@ -499,10 +498,10 @@ async def save_agent_relationships(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Replace all agent-to-agent relationships."""
+    """Legacy: replace all manually stored agent-to-agent relationship rows."""
     source_agent, access_level = await check_agent_access(db, current_user, agent_id)
     if not _can_manage_relationships(current_user, access_level):
-        raise HTTPException(status_code=403, detail="Only org admins or managers can modify relationships")
+        raise HTTPException(status_code=403, detail="Only org admins or managers can modify legacy relationships")
 
     existing_result = await db.execute(select(AgentAgentRelationship).where(AgentAgentRelationship.agent_id == agent_id))
     existing_by_target = {r.target_agent_id: r for r in existing_result.scalars().all()}
@@ -544,10 +543,10 @@ async def delete_agent_relationship(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a single agent-to-agent relationship."""
+    """Legacy: delete a single manually stored agent-to-agent relationship row."""
     _agent, access_level = await check_agent_access(db, current_user, agent_id)
     if not _can_manage_relationships(current_user, access_level):
-        raise HTTPException(status_code=403, detail="Only org admins or managers can modify relationships")
+        raise HTTPException(status_code=403, detail="Only org admins or managers can modify legacy relationships")
     result = await db.execute(
         select(AgentAgentRelationship).where(
             AgentAgentRelationship.id == rel_id,
@@ -564,83 +563,8 @@ async def delete_agent_relationship(
     return {"status": "ok"}
 
 
-# ─── relationships.md Generation ──────────────────────
+# ─── Legacy relationships.md Generation ────────────────
 
 async def _regenerate_relationships_file(db: AsyncSession, agent_id: uuid.UUID):
-    """Regenerate relationships.md with both human and agent relationships."""
-    from app.models.identity import IdentityProvider
-    # Load human relationships with provider name
-    h_result = await db.execute(
-        select(
-            AgentRelationship,
-            IdentityProvider.name.label("provider_name"),
-            IdentityProvider.provider_type.label("provider_type"),
-        )
-        .outerjoin(OrgMember, AgentRelationship.member_id == OrgMember.id)
-        .outerjoin(IdentityProvider, OrgMember.provider_id == IdentityProvider.id)
-        .where(AgentRelationship.agent_id == agent_id)
-        .options(selectinload(AgentRelationship.member))
-    )
-    human_rows = []
-    for rel, provider_name, provider_type in h_result.all():
-        status_info = await evaluate_human_relationship_status(db, rel)
-        if status_info["access_status"] == "active":
-            human_rows.append((rel, _display_provider_name(provider_name, provider_type)))
-
-    # Load agent relationships
-    a_result = await db.execute(
-        select(AgentAgentRelationship)
-        .where(AgentAgentRelationship.agent_id == agent_id)
-        .options(selectinload(AgentAgentRelationship.target_agent))
-    )
-    agent_rels = []
-    for rel in a_result.scalars().all():
-        status_info = await evaluate_agent_relationship_status(db, rel)
-        if status_info["access_status"] == "active":
-            agent_rels.append(rel)
-
-    ws = Path(settings.AGENT_DATA_DIR) / str(agent_id)
-    ws.mkdir(parents=True, exist_ok=True)
-
-    if not human_rows and not agent_rels:
-        (ws / "relationships.md").write_text("# 关系网络\n\n_暂无配置的关系。_\n", encoding="utf-8")
-        return
-
-    lines = ["# 关系网络\n"]
-
-    # Human relationships
-    if human_rows:
-        lines.append("## 👤 人类同事\n")
-        for r, provider_name in human_rows:
-            m = r.member
-            if not m:
-                continue
-            label = RELATION_LABELS.get(r.relation, r.relation)
-            source = f"（通过 {provider_name} 同步）" if provider_name else ""
-            lines.append(f"### {m.name} — {m.title or '未设置职位'}{source}")
-            lines.append(f"- 部门：{m.department_path or '未设置'}")
-            lines.append(f"- 关系：{label}")
-            if m.open_id:
-                lines.append(f"- OpenID：{m.open_id}")
-            if m.email:
-                lines.append(f"- 邮箱：{m.email}")
-            if r.description:
-                lines.append(f"- {r.description}")
-            lines.append("")
-
-    # Agent relationships
-    if agent_rels:
-        lines.append("## 🤖 数字员工同事\n")
-        for r in agent_rels:
-            a = r.target_agent
-            if not a:
-                continue
-            label = AGENT_RELATION_LABELS.get(r.relation, r.relation)
-            lines.append(f"### {a.name} — {a.role_description or '数字员工'}")
-            lines.append(f"- 关系：{label}")
-            lines.append(f"- 可以用 send_message_to_agent 工具给 {a.name} 发消息协作")
-            if r.description:
-                lines.append(f"- {r.description}")
-            lines.append("")
-
-    (ws / "relationships.md").write_text("\n".join(lines), encoding="utf-8")
+    """Obsolete. relationships.md is no longer generated as relationships are read directly from the database."""
+    pass

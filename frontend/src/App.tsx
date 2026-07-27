@@ -1,26 +1,30 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from './stores';
-import { useEffect, useLayoutEffect, useState, useRef } from 'react';
+import { Suspense, lazy, useEffect, useLayoutEffect, useState, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { authApi } from './services/api';
-import Login from './pages/Login';
-import ForgotPassword from './pages/ForgotPassword';
-import ResetPassword from './pages/ResetPassword';
-import VerifyEmail from './pages/VerifyEmail';
-import CompanySetup from './pages/CompanySetup';
-import Layout from './pages/Layout';
-import Dashboard from './pages/Dashboard';
-import Plaza from './pages/Plaza';
-import AgentDetail from './pages/AgentDetail';
-import AgentCreate from './pages/AgentCreate';
-import Messages from './pages/Messages';
-import EnterpriseSettings from './pages/EnterpriseSettings';
-import InvitationCodes from './pages/InvitationCodes';
-import AdminCompanies from './pages/AdminCompanies';
-import SSOEntry from './pages/SSOEntry';
-import OKR from './pages/OKR';
-import CredentialConnect from './pages/CredentialConnect';
-import ExternalConnections from './pages/ExternalConnections';
+
+const Login = lazy(() => import('./pages/Login'));
+const ForgotPassword = lazy(() => import('./pages/ForgotPassword'));
+const ResetPassword = lazy(() => import('./pages/ResetPassword'));
+const VerifyEmail = lazy(() => import('./pages/VerifyEmail'));
+const CompanySetup = lazy(() => import('./pages/CompanySetup'));
+const Onboarding = lazy(() => import('./pages/Onboarding'));
+const Layout = lazy(() => import('./pages/Layout'));
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const Plaza = lazy(() => import('./pages/Plaza'));
+const AgentDetail = lazy(() => import('./pages/AgentDetail'));
+const AgentCreate = lazy(() => import('./pages/AgentCreate'));
+const Messages = lazy(() => import('./pages/Messages'));
+const EnterpriseSettings = lazy(() => import('./pages/EnterpriseSettings'));
+const InvitationCodes = lazy(() => import('./pages/InvitationCodes'));
+const AdminCompanies = lazy(() => import('./pages/AdminCompanies'));
+const OAuthCallback = lazy(() => import('./pages/OAuthCallback'));
+const SSOEntry = lazy(() => import('./pages/SSOEntry'));
+const OKR = lazy(() => import('./pages/OKR'));
+const GroupsPage = lazy(() => import('./pages/groups/GroupsPage'));
+const CredentialConnect = lazy(() => import('./pages/CredentialConnect'));
+const ExternalConnections = lazy(() => import('./pages/ExternalConnections'));
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
     const token = useAuthStore((s) => s.token);
@@ -213,7 +217,7 @@ export default function App() {
 
     useEffect(() => {
         // Initialize theme on app mount (ensures login page gets correct theme)
-        const savedTheme = localStorage.getItem('theme') || 'dark';
+        const savedTheme = localStorage.getItem('theme') || 'light';
         document.documentElement.setAttribute('data-theme', savedTheme);
 
         // Cross-domain tenant switch: the backend appends ?token=<jwt> to the redirect URL
@@ -269,22 +273,29 @@ export default function App() {
     return (
         <>
             <NotificationBar />
+            <Suspense fallback={<div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', color: 'var(--text-tertiary)' }}>加载中...</div>}>
             <Routes>
                 <Route path="/login" element={<Login />} />
                 <Route path="/forgot-password" element={<ForgotPassword />} />
                 <Route path="/reset-password" element={<ResetPassword />} />
                 <Route path="/verify-email" element={<VerifyEmail />} />
+                <Route path="/oauth/callback/:provider" element={<OAuthCallback />} />
                 <Route path="/sso/entry" element={<SSOEntry />} />
                 <Route path="/setup-company" element={<CompanySetup />} />
                 <Route path="/credentials/connect" element={<CredentialConnect />} />
+                <Route path="/onboarding" element={<ProtectedRoute><Onboarding /></ProtectedRoute>} />
                 <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-                    <Route index element={<Navigate to="/plaza" replace />} />
+                    <Route index element={<Navigate to="/dashboard" replace />} />
                     <Route path="dashboard" element={<Dashboard />} />
                     <Route path="plaza" element={<Plaza />} />
                     <Route path="agents/new" element={<AgentCreate />} />
                     <Route path="agents/:id" element={<Navigate to="chat" replace />} />
                     <Route path="agents/:id/chat" element={<AgentDetail />} />
+                    <Route path="agents/:id/directory" element={<AgentDetail />} />
                     <Route path="agents/:id/settings" element={<AgentDetail />} />
+                    <Route path="groups" element={<GroupsPage />} />
+                    <Route path="groups/:groupId" element={<GroupsPage />} />
+                    <Route path="groups/:groupId/:sessionId" element={<GroupsPage />} />
                     <Route path="messages" element={<Messages />} />
                     <Route path="enterprise" element={<CompanyAdminRoute><EnterpriseSettings /></CompanyAdminRoute>} />
                     <Route path="okr" element={<OKR />} />
@@ -293,6 +304,7 @@ export default function App() {
                     <Route path="admin/platform-settings" element={<AdminCompanies />} />
                 </Route>
             </Routes>
+            </Suspense>
         </>
     );
 }

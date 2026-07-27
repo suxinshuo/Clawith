@@ -1,8 +1,13 @@
 """Application configuration."""
 
 from functools import lru_cache
+import os
 from pathlib import Path
+import socket
+from typing import Self
+import uuid
 
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 from app.services.sandbox.config import SandboxConfig, SandboxType
@@ -32,6 +37,14 @@ def _default_agent_data_dir() -> str:
     return str(Path.home() / ".clawith" / "data" / "agents")
 
 
+def _default_instance_id() -> str:
+    """Generate a stable-enough per-process instance identifier."""
+    host = socket.gethostname() or "unknown"
+    pid = os.getpid()
+    suffix = uuid.uuid4().hex[:8]
+    return f"{host}-{pid}-{suffix}"
+
+
 def _default_agent_template_dir() -> str:
     """Locate the agent template directory for both Docker and source deployments.
 
@@ -44,6 +57,11 @@ def _default_agent_template_dir() -> str:
     # Source layout: backend/app/config.py -> ../.. = backend/ -> agent_template
     source_path = Path(__file__).resolve().parent.parent / "agent_template"
     return str(source_path)
+
+
+def _default_allow_unsafe_bwrap_fallback() -> bool:
+    """Allow local source runs to work without bubblewrap by default."""
+    return not _running_in_container()
 
 
 def _read_version() -> str:
@@ -70,9 +88,11 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://clawith:clawith@localhost:5432/clawith"
+    DATABASE_AUTO_CREATE_TABLES: bool = False
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
+    INSTANCE_ID: str = _default_instance_id()
 
     # JWT
     JWT_SECRET_KEY: str = "change-me-jwt-secret"
@@ -83,9 +103,63 @@ class Settings(BaseSettings):
     EMAIL_VERIFICATION_REQUIRED: bool = False  # Require email verification for login
 
     # File Storage
+    STORAGE_BACKEND: str = "local"
     AGENT_DATA_DIR: str = _default_agent_data_dir()
     AGENT_DATA_HOST_DIR: str = ""  # Host-side path for AGENT_DATA_DIR (Docker-in-Docker)
     AGENT_TEMPLATE_DIR: str = _default_agent_template_dir()
+    STORAGE_LOCAL_ROOT: str = _default_agent_data_dir()
+    STORAGE_LOCAL_FALLBACK_ENABLED: bool = True
+    S3_BUCKET: str = ""
+    S3_REGION: str = ""
+    S3_ENDPOINT_URL: str = ""
+    S3_ACCESS_KEY_ID: str = ""
+    S3_SECRET_ACCESS_KEY: str = ""
+    S3_PREFIX: str = "agents"
+    S3_PRESIGN_TTL_SECONDS: int = 3600
+    S3_MAX_POOL_CONNECTIONS: int = 50
+    S3_WRITE_WORKERS: int = 32
+
+    # Process role
+    PROCESS_ROLE: str = "all"
+
+    # Agent Runtime
+    AGENT_RUNTIME_V2_ENABLED: bool = True
+    AGENT_RUNTIME_V2_AGENT_IDS: str = ""
+    AGENT_RUNTIME_V2_SOURCE_TYPES: str = "task"
+    AGENT_RUNTIME_GRAPH_NAME: str = "clawith_agent_runtime"
+    AGENT_RUNTIME_GRAPH_VERSION: str = "v1"
+    LANGGRAPH_CHECKPOINT_DATABASE_URL: str | None = None
+    LANGGRAPH_AES_KEY: str | None = None
+    # Maximum number of Agent Run commands executed concurrently by one
+    # Runtime worker process. Thread/lane locks still serialize conflicting
+    # Runs; this is the shared capacity across all eligible Agents.
+    AGENT_RUNTIME_COMMAND_CONCURRENCY: int = Field(default=10, gt=0, le=100)
+    AGENT_RUNTIME_COMMAND_CLAIM_TTL_SECONDS: int = Field(default=60, gt=0)
+    AGENT_RUNTIME_COMMAND_CLAIM_RENEW_SECONDS: int = Field(default=20, gt=0)
+    AGENT_RUNTIME_COMMAND_MAX_ATTEMPTS: int = Field(default=5, gt=0)
+    AGENT_RUNTIME_ASYNC_TOOL_POLL_SCAN_SECONDS: float = Field(default=0.25, gt=0)
+    AGENT_RUNTIME_CHANNEL_DELIVERY_CLAIM_TTL_SECONDS: int = Field(default=120, gt=0)
+    AGENT_RUNTIME_CHANNEL_DELIVERY_MAX_ATTEMPTS: int = Field(default=8, gt=0)
+    AGENT_RUNTIME_CHANNEL_DELIVERY_SCAN_SECONDS: float = Field(default=0.5, gt=0)
+    AGENT_RUNTIME_SUMMARY_THRESHOLD_RATIO: float = Field(default=0.85, gt=0, le=1)
+    AGENT_RUNTIME_SESSION_RECENT_MESSAGES: int = Field(default=20, gt=0)
+    AGENT_RUNTIME_SESSION_COMPACT_MESSAGE_THRESHOLD: int | None = Field(default=None, gt=0)
+    AGENT_RUNTIME_SESSION_COMPACT_SCAN_SECONDS: float = Field(default=5.0, gt=0)
+    AGENT_RUNTIME_SESSION_COMPACT_SCAN_BATCH_SIZE: int = Field(default=50, gt=0, le=500)
+    AGENT_RUNTIME_RUN_COMPACT_MESSAGE_THRESHOLD: int | None = Field(default=None, gt=0)
+    AGENT_RUNTIME_RUN_COMPACT_TOOL_RESULT_BYTES: int | None = Field(default=None, gt=0)
+    AGENT_RUNTIME_VERIFY_REPAIR_COMPACT_ROUNDS: int | None = Field(default=None, gt=0)
+    AGENT_RUNTIME_MODEL_CAPABILITY_REFRESH_SECONDS: int = Field(default=86400, gt=0)
+    AGENT_RUNTIME_FALLBACK_CONTEXT_WINDOW_TOKENS: int = Field(default=131072, gt=0)
+    MULTI_AGENT_COMPACT_MODEL_ID: uuid.UUID | None = None
+    MULTI_AGENT_PLANNING_MODEL_ID: uuid.UUID | None = None
+    GROUP_CONTEXT_ANNOUNCEMENT_MAX_CHARS: int = Field(default=12000, gt=0)
+    GROUP_CONTEXT_MEMORY_MAX_CHARS: int = Field(default=12000, gt=0)
+    GROUP_CONTEXT_WORKSPACE_MAX_ENTRIES: int = Field(default=100, gt=0)
+    AGENT_RUNTIME_CHECKPOINT_RETENTION_DAYS: int = Field(default=30, gt=0)
+    AGENT_RUNTIME_EVENT_PAYLOAD_MAX_BYTES: int = Field(default=16384, gt=0)
+    AGENT_RUNTIME_TOOL_RESULT_INLINE_MAX_BYTES: int = Field(default=8192, gt=0)
+    MAX_AGENT_CYCLE_COUNT: int = Field(default=5, gt=0)
 
     # Docker (for Agent containers)
     DOCKER_NETWORK: str = "clawith_network"
@@ -116,8 +190,44 @@ class Settings(BaseSettings):
     SANDBOX_CPU_LIMIT: str = "0.5"
     SANDBOX_MEMORY_LIMIT: str = "256m"
     SANDBOX_ALLOW_NETWORK: bool = False
+    SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING: bool = _default_allow_unsafe_bwrap_fallback()
     SANDBOX_DEFAULT_TIMEOUT: int = 30
     SANDBOX_MAX_TIMEOUT: int = 60
+
+    @field_validator(
+        "LANGGRAPH_CHECKPOINT_DATABASE_URL",
+        "LANGGRAPH_AES_KEY",
+        "MULTI_AGENT_COMPACT_MODEL_ID",
+        "MULTI_AGENT_PLANNING_MODEL_ID",
+        "AGENT_RUNTIME_SESSION_COMPACT_MESSAGE_THRESHOLD",
+        "AGENT_RUNTIME_RUN_COMPACT_MESSAGE_THRESHOLD",
+        "AGENT_RUNTIME_RUN_COMPACT_TOOL_RESULT_BYTES",
+        "AGENT_RUNTIME_VERIFY_REPAIR_COMPACT_ROUNDS",
+        mode="before",
+    )
+    @classmethod
+    def _blank_optional_runtime_values(cls, value: object) -> object | None:
+        """Treat blank optional environment variables as unset."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("AGENT_RUNTIME_GRAPH_NAME", "AGENT_RUNTIME_GRAPH_VERSION")
+    @classmethod
+    def _nonempty_runtime_identifiers(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Runtime graph name and version must not be blank")
+        return normalized
+
+    @model_validator(mode="after")
+    def _claim_renewal_precedes_expiry(self) -> Self:
+        if self.AGENT_RUNTIME_COMMAND_CLAIM_RENEW_SECONDS >= self.AGENT_RUNTIME_COMMAND_CLAIM_TTL_SECONDS:
+            raise ValueError(
+                "AGENT_RUNTIME_COMMAND_CLAIM_RENEW_SECONDS must be less than "
+                "AGENT_RUNTIME_COMMAND_CLAIM_TTL_SECONDS"
+            )
+        return self
 
     model_config = {
         "env_file": [".env", "../.env"],
@@ -144,6 +254,7 @@ def get_sandbox_config() -> SandboxConfig:
         cpu_limit=settings.SANDBOX_CPU_LIMIT,
         memory_limit=settings.SANDBOX_MEMORY_LIMIT,
         allow_network=settings.SANDBOX_ALLOW_NETWORK,
+        allow_unsafe_fallback_when_bwrap_missing=settings.SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING,
         default_timeout=settings.SANDBOX_DEFAULT_TIMEOUT,
         max_timeout=settings.SANDBOX_MAX_TIMEOUT,
     )

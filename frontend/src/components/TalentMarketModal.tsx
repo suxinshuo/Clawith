@@ -16,7 +16,6 @@ interface Template {
     category: string;
     is_builtin: boolean;
     capability_bullets?: string[];
-    has_bootstrap?: boolean;
 }
 
 interface Props {
@@ -28,6 +27,7 @@ interface Props {
 // (personal assistant, project management, marketing, engineering, research, trading).
 // Matches `AgentTemplate.name` exactly.
 const FEATURED_TEMPLATE_NAMES = new Set<string>([
+    'Private Assistant',
     'Chief of Staff',
     'Project Manager',
     'Growth Hacker',

@@ -274,13 +274,17 @@ start_backend() {
 
     # Auto-run schema migrations via alembic
     echo -e "${YELLOW}🔄 Running schema migrations...${NC}"
-    .venv/bin/alembic upgrade head 2>/dev/null || true
+    .venv/bin/alembic upgrade head
 
-    # Auto-run data migrations (idempotent)
-    echo -e "${YELLOW}🔄 Running data migrations...${NC}"
-    .venv/bin/python -m app.scripts.migrate_schedules_to_triggers || true
+    # Auto-run LangGraph checkpoint migrations (idempotent and serialized)
+    echo -e "${YELLOW}🔄 Running LangGraph checkpoint migrations...${NC}"
+    .venv/bin/python -m app.scripts.setup_langgraph_checkpoints
+
     start_detached "$BACKEND_DIR" "$BACKEND_LOG" "$BACKEND_PID" \
         env PYTHONUNBUFFERED=1 \
+            AGENT_RUNTIME_V2_ENABLED=true \
+            AGENT_RUNTIME_V2_AGENT_IDS= \
+            AGENT_RUNTIME_V2_SOURCE_TYPES= \
             PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}" \
             DATABASE_URL="$DATABASE_URL" \
             .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port $BACKEND_PORT
@@ -297,7 +301,7 @@ start_frontend() {
     # closes stdin. Setting CI=true disables that stdin-end shutdown path while
     # keeping the normal dev server behavior.
     start_detached "$FRONTEND_DIR" "$FRONTEND_LOG" "$FRONTEND_PID" \
-        env CI=true node_modules/.bin/vite --host 0.0.0.0 --port $FRONTEND_PORT --strictPort
+        env CI=true BACKEND_PORT=$BACKEND_PORT node_modules/.bin/vite --host 0.0.0.0 --port $FRONTEND_PORT --strictPort
     wait_for_port $FRONTEND_PORT "Frontend" 8
 }
 

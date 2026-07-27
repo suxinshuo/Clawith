@@ -2,12 +2,14 @@
 
 import uuid
 import logging
-
-logger = logging.getLogger(__name__)
+from dataclasses import dataclass
+from datetime import UTC, datetime
+import hashlib
+import json
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Request
 from pydantic import BaseModel
-from sqlalchemy import select, func, update
+from sqlalchemy import select, func, update, or_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,11 +31,22 @@ from app.schemas.schemas import (
 from app.services.autonomy_service import autonomy_service
 from app.services.enterprise_sync import enterprise_sync_service
 from app.services.llm import get_provider_manifest, get_model_api_key, create_llm_client, LLMMessage
+from app.services.llm.finish import FINISH_TOOL_DEFINITION, find_finish_call
 from app.services.platform_service import platform_service
 from app.services.sso_service import sso_service
+from app.services.agent_runtime.runtime_model_settings import (
+    resolve_runtime_model_settings,
+    runtime_model_setting_key,
+)
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/enterprise", tags=["enterprise"])
 settings = get_settings()
+
+
+def _is_platform_admin_user(user: User) -> bool:
+    """Return true for tenant-role or identity-level platform admins."""
+    return user.role == "platform_admin" or bool(getattr(getattr(user, "identity", None), "is_platform_admin", False))
 
 
 # ─── Public: Check Email Exists ────────────────────────
@@ -77,15 +90,124 @@ class LLMTestRequest(BaseModel):
     model_id: str | None = None  # existing model ID to use stored API key
 
 
-async def _load_llm_test_api_key(model_id: str | None) -> str | None:
-    """Load the stored API key for llm-test using a short-lived independent session."""
-    if not model_id:
-        return None
+@dataclass(frozen=True, slots=True)
+class LLMTestTarget:
+    """Exact configuration tested without holding a DB transaction over I/O."""
 
+    model_id: uuid.UUID | None
+    provider: str
+    model: str
+    api_key: str
+    base_url: str | None
+    stored_config_fingerprint: str | None = None
+
+
+def _llm_config_fingerprint(model: LLMModel) -> str:
+    payload = json.dumps(
+        {
+            "provider": model.provider,
+            "model": model.model,
+            "base_url": model.base_url,
+            "api_key_encrypted": model.api_key_encrypted,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _normalized_base_url(value: str | None) -> str:
+    return (value or "").strip().rstrip("/")
+
+
+async def _resolve_llm_test_target(
+    data: LLMTestRequest,
+    current_user: User,
+) -> LLMTestTarget:
+    """Resolve either an unsaved draft or the exact persisted model identity."""
+    if not data.model_id:
+        api_key = (
+            data.api_key
+            if data.api_key and not data.api_key.startswith("****")
+            else ""
+        )
+        return LLMTestTarget(
+            model_id=None,
+            provider=data.provider.strip(),
+            model=data.model.strip(),
+            api_key=api_key,
+            base_url=data.base_url or None,
+        )
+
+    try:
+        model_id = uuid.UUID(data.model_id)
+    except ValueError as exc:
+        raise ValueError("model_id must be a valid UUID") from exc
     async with async_session() as session:
-        result = await session.execute(select(LLMModel).where(LLMModel.id == model_id))
+        result = await session.execute(
+            select(LLMModel).where(
+                LLMModel.id == model_id,
+                LLMModel.deleted_at.is_(None),
+            )
+        )
         existing = result.scalar_one_or_none()
-        return get_model_api_key(existing) if existing else None
+    if existing is None:
+        raise ValueError("Stored model does not exist")
+    if (
+        not _is_platform_admin_user(current_user)
+        and existing.tenant_id != current_user.tenant_id
+    ):
+        raise PermissionError("Stored model is outside the current tenant")
+    if data.api_key and not data.api_key.startswith("****"):
+        raise ValueError("Save the API key change before testing this model")
+    if (
+        data.provider.strip() != existing.provider
+        or data.model.strip() != existing.model
+        or _normalized_base_url(data.base_url)
+        != _normalized_base_url(existing.base_url)
+    ):
+        raise ValueError("Save provider, model, and Base URL changes before testing")
+    return LLMTestTarget(
+        model_id=existing.id,
+        provider=existing.provider,
+        model=existing.model,
+        api_key=get_model_api_key(existing),
+        base_url=existing.base_url,
+        stored_config_fingerprint=_llm_config_fingerprint(existing),
+    )
+
+
+async def _record_llm_tool_capability(
+    target: LLMTestTarget,
+    *,
+    supported: bool | None,
+    error: str | None,
+) -> bool:
+    """Record a probe only if the persisted model configuration is unchanged."""
+    if target.model_id is None or target.stored_config_fingerprint is None:
+        return False
+    async with async_session() as session:
+        result = await session.execute(
+            select(LLMModel)
+            .where(
+                LLMModel.id == target.model_id,
+                LLMModel.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+        existing = result.scalar_one_or_none()
+        if (
+            existing is None
+            or _llm_config_fingerprint(existing)
+            != target.stored_config_fingerprint
+        ):
+            return False
+        existing.supports_tool_calling = supported
+        existing.tool_calling_capability_source = "probe"
+        existing.tool_calling_checked_at = datetime.now(UTC)
+        existing.tool_calling_error = error[:500] if error else None
+        await session.commit()
+        return True
 
 
 @router.post("/llm-test")
@@ -93,35 +215,120 @@ async def test_llm_model(
     data: LLMTestRequest,
     current_user: User = Depends(get_current_admin),
 ):
-    """Test an LLM model configuration by making a simple API call."""
+    """Test connectivity and native ``finish`` tool calling independently."""
     import time
-
-    # Resolve API key: use provided key, or look up from stored model
-    api_key = data.api_key if data.api_key and not data.api_key.startswith('****') else None
-    if not api_key and data.model_id:
-        api_key = await _load_llm_test_api_key(data.model_id)
-    if not api_key:
-        return {"success": False, "latency_ms": 0, "error": "API Key is required"}
 
     start = time.time()
     try:
+        target = await _resolve_llm_test_target(data, current_user)
+    except (PermissionError, ValueError) as exc:
+        return {
+            "success": False,
+            "connection_success": False,
+            "latency_ms": 0,
+            "connection_latency_ms": 0,
+            "tool_calling_supported": None,
+            "tool_calling_latency_ms": 0,
+            "capability_recorded": False,
+            "error": str(exc),
+        }
+    if not target.api_key:
+        return {
+            "success": False,
+            "connection_success": False,
+            "latency_ms": 0,
+            "connection_latency_ms": 0,
+            "tool_calling_supported": None,
+            "tool_calling_latency_ms": 0,
+            "capability_recorded": False,
+            "error": "API Key is required",
+        }
+
+    client = None
+    try:
         client = create_llm_client(
-            provider=data.provider,
-            model=data.model,
-            api_key=api_key,
-            base_url=data.base_url or None,
+            provider=target.provider,
+            model=target.model,
+            api_key=target.api_key,
+            base_url=target.base_url,
         )
-        # Simple test: ask model to say "ok"
+        connection_start = time.time()
         response = await client.complete(
             messages=[LLMMessage(role="user", content="Say 'ok' and nothing else.")],
+            tools=None,
             max_tokens=16,
         )
-        latency_ms = int((time.time() - start) * 1000)
+        connection_latency_ms = int((time.time() - connection_start) * 1000)
         reply = (response.content or "")[:100] if response else ""
-        return {"success": True, "latency_ms": latency_ms, "reply": reply}
+        tool_start = time.time()
+        tool_error: str | None = None
+        try:
+            tool_response = await client.complete(
+                messages=[
+                    LLMMessage(
+                        role="system",
+                        content=(
+                            "This is a native tool-calling protocol test. Call the "
+                            "provided finish tool exactly once and do not answer in text."
+                        ),
+                    ),
+                    LLMMessage(
+                        role="user",
+                        content="Call finish now with content set to ok.",
+                    ),
+                ],
+                tools=[FINISH_TOOL_DEFINITION],
+                max_tokens=128,
+            )
+            tool_calls = list(tool_response.tool_calls or [])
+            finish_call = find_finish_call(tool_calls)
+            tool_supported = bool(
+                len(tool_calls) == 1
+                and finish_call is not None
+                and finish_call.valid
+            )
+            if not tool_supported:
+                tool_error = (
+                    "Model returned plain text or an invalid tool call instead of "
+                    "exactly one valid finish tool call."
+                )
+        except Exception as exc:
+            tool_supported = None
+            tool_error = f"Native finish tool probe failed: {type(exc).__name__}: {exc}"[:500]
+        tool_latency_ms = int((time.time() - tool_start) * 1000)
+        capability_recorded = await _record_llm_tool_capability(
+            target,
+            supported=tool_supported,
+            error=tool_error,
+        )
+        latency_ms = int((time.time() - start) * 1000)
+        return {
+            "success": tool_supported is True,
+            "connection_success": True,
+            "latency_ms": latency_ms,
+            "connection_latency_ms": connection_latency_ms,
+            "reply": reply,
+            "tool_calling_supported": tool_supported,
+            "tool_calling_latency_ms": tool_latency_ms,
+            "tool_calling_error": tool_error,
+            "capability_recorded": capability_recorded,
+            "error": tool_error,
+        }
     except Exception as e:
         latency_ms = int((time.time() - start) * 1000)
-        return {"success": False, "latency_ms": latency_ms, "error": str(e)[:500]}
+        return {
+            "success": False,
+            "connection_success": False,
+            "latency_ms": latency_ms,
+            "connection_latency_ms": latency_ms,
+            "tool_calling_supported": None,
+            "tool_calling_latency_ms": 0,
+            "capability_recorded": False,
+            "error": str(e)[:500],
+        }
+    finally:
+        if client is not None:
+            await client.close()
 
 
 
@@ -138,7 +345,11 @@ async def list_llm_models(
             raise HTTPException(status_code=403, detail="Cannot access other tenant's models")
 
     tid = tenant_id or str(current_user.tenant_id) if current_user.tenant_id else None
-    query = select(LLMModel).order_by(LLMModel.created_at.desc())
+    query = (
+        select(LLMModel)
+        .where(LLMModel.deleted_at.is_(None))
+        .order_by(LLMModel.created_at.desc())
+    )
     if tid:
         query = query.where(LLMModel.tenant_id == uuid.UUID(tid))
     result = await db.execute(query)
@@ -197,7 +408,12 @@ async def set_default_llm_model(
     db: AsyncSession = Depends(get_db),
 ):
     """Mark this model as the tenant's default for new agents."""
-    result = await db.execute(select(LLMModel).where(LLMModel.id == model_id))
+    result = await db.execute(
+        select(LLMModel).where(
+            LLMModel.id == model_id,
+            LLMModel.deleted_at.is_(None),
+        )
+    )
     model = result.scalar_one_or_none()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -242,44 +458,35 @@ async def set_default_llm_model(
 @router.delete("/llm-models/{model_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def remove_llm_model(
     model_id: uuid.UUID,
-    force: bool = False,
     current_user: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Remove an LLM model from the pool."""
-    result = await db.execute(select(LLMModel).where(LLMModel.id == model_id))
+    """Logically delete an LLM model while retaining every historical reference."""
+    query = select(LLMModel).where(LLMModel.id == model_id)
+    if not _is_platform_admin_user(current_user):
+        query = query.where(LLMModel.tenant_id == current_user.tenant_id)
+    result = await db.execute(query)
     model = result.scalar_one_or_none()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    # Check if any agents reference this model
-    from sqlalchemy import or_
-    ref_result = await db.execute(
-        select(Agent.name).where(
-            or_(Agent.primary_model_id == model_id, Agent.fallback_model_id == model_id)
+    if model.deleted_at is None:
+        model.deleted_at = datetime.now(UTC)
+        model.enabled = False
+        db.add(
+            AuditLog(
+                user_id=current_user.id,
+                action="llm_model_deleted",
+                details={
+                    "resource_id": str(model.id),
+                    "tenant_id": str(model.tenant_id) if model.tenant_id else None,
+                    "label": model.label,
+                    "provider": model.provider,
+                    "model": model.model,
+                },
+            )
         )
-    )
-    agent_names = [row[0] for row in ref_result.all()]
-
-    if agent_names and not force:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "message": f"This model is used by {len(agent_names)} agent(s)",
-                "agents": agent_names,
-            },
-        )
-
-    # Nullify FK references in agents before deleting
-    if agent_names:
-        await db.execute(
-            update(Agent).where(Agent.primary_model_id == model_id).values(primary_model_id=None)
-        )
-        await db.execute(
-            update(Agent).where(Agent.fallback_model_id == model_id).values(fallback_model_id=None)
-        )
-    await db.delete(model)
-    await db.commit()
+        await db.commit()
 
 
 @router.put("/llm-models/{model_id}", response_model=LLMModelOut)
@@ -290,12 +497,18 @@ async def update_llm_model(
     db: AsyncSession = Depends(get_db),
 ):
     """Update an existing LLM model in the pool (admin)."""
-    result = await db.execute(select(LLMModel).where(LLMModel.id == model_id))
+    result = await db.execute(
+        select(LLMModel).where(
+            LLMModel.id == model_id,
+            LLMModel.deleted_at.is_(None),
+        )
+    )
     model = result.scalar_one_or_none()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
     try:
+        original_config_fingerprint = _llm_config_fingerprint(model)
         if data.provider:
             model.provider = data.provider
         if data.model:
@@ -319,10 +532,18 @@ async def update_llm_model(
         if hasattr(data, 'request_timeout') and data.request_timeout is not None:
             model.request_timeout = data.request_timeout
 
+        if _llm_config_fingerprint(model) != original_config_fingerprint:
+            model.supports_tool_calling = None
+            model.tool_calling_capability_source = None
+            model.tool_calling_checked_at = None
+            model.tool_calling_error = (
+                "Model configuration changed; rerun the native tool-calling test."
+            )
+
         await db.commit()
         await db.refresh(model)
         return LLMModelOut.model_validate(model)
-    except SQLAlchemyError as e:
+    except SQLAlchemyError:
         await db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update model")
 
@@ -590,11 +811,32 @@ async def send_test_email_endpoint(
     db: AsyncSession = Depends(get_db),
 ):
     """Send a test email to verify SMTP configuration (admin only)."""
+    import smtplib
+    import socket
+    import ssl
+
     from app.services.system_email_service import send_test_email
 
     try:
         await send_test_email(data.email, db=db)
         return {"success": True, "message": f"Test email sent to {data.email}"}
+    except smtplib.SMTPAuthenticationError:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "SMTP authentication failed. Please check that the SMTP username is the full email address "
+                "and that the password/app password is valid for this mailbox."
+            ),
+        )
+    except (TimeoutError, socket.timeout, ssl.SSLError) as e:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"SMTP TLS/connect timed out: {e}. Please verify the SMTP host, port, and SSL/TLS mode. "
+                "For Zoho, the SMTP host depends on the account data center, for example smtp.zoho.com "
+                "or smtp.zoho.com.cn."
+            ),
+        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -611,7 +853,7 @@ async def get_email_templates_endpoint(
         DEFAULT_EMAIL_TEMPLATES,
     )
 
-    templates = await get_email_templates(db=db)
+    templates = await get_email_templates()
     return {
         "templates": templates,
         "variables": EMAIL_TEMPLATE_VARIABLES,
@@ -662,6 +904,119 @@ class SettingUpdate(BaseModel):
     value: dict
 
 
+class RuntimeModelSettingsUpdate(BaseModel):
+    planning_model_id: uuid.UUID
+    compact_model_id: uuid.UUID
+
+
+def _runtime_settings_tenant_id(current_user: User, requested_tenant_id: str | None) -> uuid.UUID:
+    raw_tenant_id = requested_tenant_id or current_user.tenant_id
+    if raw_tenant_id is None:
+        raise HTTPException(status_code=422, detail="A tenant must be selected")
+    try:
+        tenant_id = uuid.UUID(str(raw_tenant_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid tenant ID") from exc
+    if not _is_platform_admin_user(current_user):
+        if current_user.role != "org_admin" or current_user.tenant_id != tenant_id:
+            raise HTTPException(status_code=403, detail="Cannot manage another tenant's Runtime models")
+    return tenant_id
+
+
+async def _runtime_model_settings_payload(db: AsyncSession, *, tenant_id: uuid.UUID) -> dict:
+    configured = await resolve_runtime_model_settings(
+        db,
+        tenant_id=tenant_id,
+        environment_planning_model_id=settings.MULTI_AGENT_PLANNING_MODEL_ID,
+        environment_compact_model_id=settings.MULTI_AGENT_COMPACT_MODEL_ID,
+    )
+    result = await db.execute(
+        select(LLMModel)
+        .where(
+            or_(LLMModel.tenant_id.is_(None), LLMModel.tenant_id == tenant_id),
+            LLMModel.enabled.is_(True),
+            LLMModel.deleted_at.is_(None),
+        )
+        .order_by(LLMModel.created_at.desc())
+    )
+    candidates = [
+        {
+            "id": str(model.id),
+            "label": model.label,
+            "provider": model.provider,
+            "model": model.model,
+        }
+        for model in result.scalars().all()
+    ]
+    return {
+        "tenant_id": str(tenant_id),
+        "planning_model_id": (
+            str(configured.planning_model_id) if configured.planning_model_id else None
+        ),
+        "compact_model_id": (
+            str(configured.compact_model_id) if configured.compact_model_id else None
+        ),
+        "planning_source": configured.planning_source,
+        "compact_source": configured.compact_source,
+        "candidates": candidates,
+    }
+
+
+@router.get("/runtime-model-settings")
+async def get_runtime_model_settings(
+    tenant_id: str | None = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the selected tenant's eligible Group Runtime model choices."""
+    resolved_tenant_id = _runtime_settings_tenant_id(current_user, tenant_id)
+    return await _runtime_model_settings_payload(db, tenant_id=resolved_tenant_id)
+
+
+@router.put("/runtime-model-settings")
+async def update_runtime_model_settings(
+    data: RuntimeModelSettingsUpdate,
+    tenant_id: str | None = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Persist tenant-scoped Group Runtime models, effective immediately."""
+    resolved_tenant_id = _runtime_settings_tenant_id(current_user, tenant_id)
+
+    requested_ids = {data.planning_model_id, data.compact_model_id}
+    result = await db.execute(
+        select(LLMModel).where(
+            LLMModel.id.in_(requested_ids),
+            LLMModel.deleted_at.is_(None),
+        )
+    )
+    models = {model.id: model for model in result.scalars().all()}
+    for model_id in requested_ids:
+        model = models.get(model_id)
+        if model is None:
+            raise HTTPException(status_code=422, detail=f"Model {model_id} does not exist")
+        if model.tenant_id not in {None, resolved_tenant_id}:
+            raise HTTPException(status_code=422, detail=f"Model {model_id} belongs to another tenant")
+        if not model.enabled:
+            raise HTTPException(status_code=422, detail=f"Model {model_id} is disabled")
+    result = await db.execute(
+        select(SystemSetting).where(
+            SystemSetting.key == runtime_model_setting_key(resolved_tenant_id)
+        )
+    )
+    setting = result.scalar_one_or_none()
+    value = {
+        "planning_model_id": str(data.planning_model_id),
+        "compact_model_id": str(data.compact_model_id),
+    }
+    if setting:
+        setting.value = value
+    else:
+        db.add(SystemSetting(key=runtime_model_setting_key(resolved_tenant_id), value=value))
+    await db.commit()
+    return await _runtime_model_settings_payload(db, tenant_id=resolved_tenant_id)
+
+
 @router.get("/system-settings/notification_bar/public")
 async def get_notification_bar_public(
     db: AsyncSession = Depends(get_db),
@@ -703,7 +1058,7 @@ async def update_system_setting(
 ):
     """Create or update a system setting."""
     # Platform-level settings (e.g. PUBLIC_BASE_URL) require platform_admin
-    if key == "platform" and current_user.role != "platform_admin":
+    if key == "platform" and not _is_platform_admin_user(current_user):
         raise HTTPException(status_code=403, detail="Only platform admin can modify platform settings")
     result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
     setting = result.scalar_one_or_none()
@@ -817,28 +1172,28 @@ async def _regenerate_all_sso_domains(db: AsyncSession):
 @router.get("/identity-providers", response_model=list[IdentityProviderOut])
 async def list_identity_providers(
     tenant_id: str | None = None,
+    global_only: bool = False,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """List identity providers configured for the tenant."""
     # Authorization: non-platform admins can only see their own tenant's providers
-    if tenant_id and current_user.role != "platform_admin":
+    if tenant_id and not _is_platform_admin_user(current_user):
         if str(current_user.tenant_id) != tenant_id:
             raise HTTPException(status_code=403, detail="Cannot access other tenant's providers")
 
     query = select(IdentityProvider).order_by(IdentityProvider.created_at.desc())
     tid = tenant_id or (str(current_user.tenant_id) if current_user.tenant_id else None)
 
-    # Require tenant context
-    if not tid:
-        if current_user.role == "platform_admin":
-            # Admin without tenant_id filter sees all
-            pass
-        else:
-            raise HTTPException(status_code=400, detail="tenant_id is required for identity providers")
-    else:
+    if global_only:
+        if not _is_platform_admin_user(current_user):
+            raise HTTPException(status_code=403, detail="Only platform admin can access global identity providers")
+        query = query.where(IdentityProvider.tenant_id.is_(None))
+    elif tid:
         import uuid as _uuid
         query = query.where(IdentityProvider.tenant_id == _uuid.UUID(tid))
+    elif not _is_platform_admin_user(current_user):
+        raise HTTPException(status_code=400, detail="tenant_id is required for identity providers")
 
     result = await db.execute(query)
     providers = []
@@ -942,6 +1297,11 @@ def validate_provider_config(provider_type: str, config: dict):
     """Validate identity provider config. Specific field checks are handled by the frontend."""
     if not isinstance(config, dict):
         raise HTTPException(status_code=422, detail="Configuration must be a JSON object")
+    if provider_type in {"google", "github"}:
+        client_id = config.get("client_id") or config.get("app_id")
+        client_secret = config.get("client_secret") or config.get("app_secret")
+        if not client_id or not client_secret:
+            raise HTTPException(status_code=422, detail=f"{provider_type} requires client_id and client_secret")
     return
 
 
@@ -978,7 +1338,8 @@ async def create_identity_provider(
     
     # Validate and determine tenant_id
     tid = data.tenant_id
-    if current_user.role == "platform_admin":
+    is_platform_admin = _is_platform_admin_user(current_user)
+    if is_platform_admin:
         # Platform admins can use any tenant_id (including None for global providers)
         pass
     else:
@@ -989,7 +1350,7 @@ async def create_identity_provider(
             # Validate they can only manage their own tenant
             raise HTTPException(status_code=403, detail="Can only create providers for your own tenant")
 
-    if not tid:
+    if not tid and not (is_platform_admin and data.provider_type in {"google", "github"}):
         raise HTTPException(status_code=400, detail="tenant_id is required to create an identity provider")
         
     if data.sso_login_enabled:
@@ -1039,7 +1400,7 @@ async def create_oauth2_provider(
 
     # Validate and determine tenant_id
     tid = data.tenant_id
-    if current_user.role == "platform_admin":
+    if _is_platform_admin_user(current_user):
         # Platform admins can use any tenant_id (including None for global providers)
         pass
     else:
@@ -1097,7 +1458,7 @@ async def update_oauth2_provider(
     if provider.provider_type != "oauth2":
         raise HTTPException(status_code=400, detail="Provider is not an OAuth2 provider")
 
-    if current_user.role != "platform_admin" and provider.tenant_id != current_user.tenant_id:
+    if not _is_platform_admin_user(current_user) and provider.tenant_id != current_user.tenant_id:
         raise HTTPException(status_code=403, detail="Not authorized to update this provider")
 
     # Update name and is_active
@@ -1162,7 +1523,7 @@ async def update_identity_provider(
     if not provider:
         raise HTTPException(status_code=404, detail="Provider not found")
         
-    if current_user.role != "platform_admin" and provider.tenant_id != current_user.tenant_id:
+    if not _is_platform_admin_user(current_user) and provider.tenant_id != current_user.tenant_id:
         raise HTTPException(status_code=403, detail="Not authorized to update this provider")
         
     if data.name is not None:
@@ -1217,7 +1578,7 @@ async def delete_identity_provider(
     if not provider:
         raise HTTPException(status_code=404, detail="Provider not found")
         
-    if current_user.role != "platform_admin" and provider.tenant_id != current_user.tenant_id:
+    if not _is_platform_admin_user(current_user) and provider.tenant_id != current_user.tenant_id:
         raise HTTPException(status_code=403, detail="Not authorized to delete this provider")
         
     try:
@@ -1307,8 +1668,6 @@ async def list_org_departments(
     }
 
 
-
-from sqlalchemy import or_
 
 @router.get("/org/members")
 async def list_org_members(
@@ -1421,7 +1780,7 @@ async def trigger_org_sync(
     if not provider.tenant_id:
         raise HTTPException(status_code=400, detail="Provider must be bound to a tenant")
 
-    if current_user.role != "platform_admin" and provider.tenant_id != current_user.tenant_id:
+    if not _is_platform_admin_user(current_user) and provider.tenant_id != current_user.tenant_id:
         raise HTTPException(status_code=403, detail="Cannot sync other tenant's provider")
 
     return await org_sync_service.sync_provider(db, provider_id)
@@ -1558,6 +1917,23 @@ def _require_tenant_admin(current_user: User) -> None:
         raise HTTPException(status_code=400, detail="No company assigned")
 
 
+async def _ensure_invitation_email_enabled(db: AsyncSession) -> None:
+    """Require enabled system email before accepting email invitations."""
+    from app.services.system_email_service import resolve_email_config_async
+
+    if await resolve_email_config_async(db):
+        return
+    if await resolve_email_config_async(db, include_disabled=True):
+        raise HTTPException(
+            status_code=400,
+            detail="System email SMTP is configured but disabled. Enable system email before sending invitations.",
+        )
+    raise HTTPException(
+        status_code=400,
+        detail="System email SMTP settings are not configured. Configure system email before sending invitations.",
+    )
+
+
 @router.post("/invitation-codes")
 async def create_invitation_codes(
     data: InvitationCodeCreate,
@@ -1608,6 +1984,8 @@ async def invite_users(
     tenant = tenant_result.scalar_one_or_none()
     if not tenant:
         raise HTTPException(status_code=404, detail="Company not found")
+
+    await _ensure_invitation_email_enabled(db)
 
     base_url = await platform_service.get_public_base_url(db, request=request)
     

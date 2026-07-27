@@ -5,7 +5,7 @@ import hmac
 import time
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +16,11 @@ from app.database import get_db
 from app.models.channel_config import ChannelConfig
 from app.models.user import User
 from app.schemas.schemas import ChannelConfigOut
+from app.services.agent_runtime.channel_chat import (
+    channel_message_id,
+    enqueue_channel_chat_runtime,
+)
+from app.services.storage import store_agent_upload
 
 router = APIRouter(tags=["slack"])
 
@@ -222,21 +227,18 @@ async def slack_event_webhook(
 
     logger.info(f"[Slack] Message from={sender_id}, channel={channel_id}: {user_text[:80]}")
 
-    # Load history
-    from app.models.audit import ChatMessage
+    from app.api.feishu import _load_agent_and_model
     from app.models.agent import Agent as AgentModel
     from app.services.channel_session import find_or_create_channel_session
+
     agent_r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
     agent_obj = agent_r.scalar_one_or_none()
+    if agent_obj is None:
+        return Response(status_code=404)
     creator_id = agent_obj.creator_id if agent_obj else agent_id
-    from app.models.agent import DEFAULT_CONTEXT_WINDOW_SIZE
-    ctx_size = (agent_obj.context_window_size or DEFAULT_CONTEXT_WINDOW_SIZE) if agent_obj else DEFAULT_CONTEXT_WINDOW_SIZE
 
     # Find-or-create platform user for this Slack sender via unified service
     from app.services.channel_user_service import channel_user_service
-    from app.models.agent import Agent as AgentModel
-    agent_r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
-    agent_obj = agent_r.scalar_one_or_none()
 
     # Resolve real display name and email from Slack API
     _bot_token_for_info = config.app_secret or ""
@@ -295,29 +297,12 @@ async def slack_event_webhook(
         first_message_title=user_text,
         is_group=_is_group_slack,
         group_name=f"Slack Channel {channel_id[:8]}" if _is_group_slack else None,
+        created_by_user_id=platform_user_id,
     )
-    session_conv_id = str(sess.id)
-
-    history_r = await db.execute(
-        select(ChatMessage)
-        .where(ChatMessage.agent_id == agent_id, ChatMessage.conversation_id == session_conv_id)
-        .order_by(ChatMessage.created_at.desc())
-        .limit(ctx_size)
-    )
-    history = [{"role": m.role, "content": m.content} for m in reversed(history_r.scalars().all())]
-
-    # Handle file attachments: save to workspace/uploads/ and send ack
-    from app.config import get_settings as _gs
-    import asyncio as _asyncio
-    import random as _random
-    from pathlib import Path as _Path
+    # Handle file attachments: save to workspace/uploads/ before Runtime intake.
     import httpx as _httpx
-    from datetime import datetime, timezone
-    from app.api.feishu import _FILE_ACK_MESSAGES
+
     _file_user_messages = []
-    _settings = _gs()
-    _upload_dir = _Path(_settings.AGENT_DATA_DIR) / str(agent_id) / "workspace" / "uploads"
-    _upload_dir.mkdir(parents=True, exist_ok=True)
     _bot_token = config.app_secret or ""
     for _sf in slack_files:
         _fname = _sf.get("name") or _sf.get("title") or f"slack_file_{_sf.get('id', 'unk')}.bin"
@@ -332,8 +317,13 @@ async def slack_event_webhook(
                 _ct = _r.headers.get("content-type", "")
                 if "text/html" in _ct or _r.content[:15].lower().startswith(b"<!doctype html"):
                     raise ValueError(f"Got HTML response (SSO redirect) — Slack App needs 'files:read' scope. Content-Type: {_ct}")
-                (_upload_dir / _fname).write_bytes(_r.content)
-            _file_user_messages.append(f"workspace/uploads/{_fname}")
+                _, _workspace_path, _ = await store_agent_upload(
+                    agent_id,
+                    _fname,
+                    _r.content,
+                    content_type=_ct or None,
+                )
+            _file_user_messages.append(_workspace_path)
             logger.info(f"[Slack] Saved file {_fname} ({len(_r.content)} bytes)")
         except Exception as _e:
             logger.error(f"[Slack] Failed to download file {_fname}: {_e}")
@@ -343,85 +333,35 @@ async def slack_event_webhook(
         # Files were present but all downloads failed — still send ack so user knows we got the file event
         _file_names = ", ".join(_sf.get("name", "file") for _sf in slack_files)
         _ack = f"收到了文件 {_file_names}，不过我暂时无法下载其内容，请检查 Slack App 是否已授权 files:read 权限。"
-        db.add(ChatMessage(agent_id=agent_id, user_id=platform_user_id, role="assistant",
-                           content=_ack, conversation_id=session_conv_id))
-        sess.last_message_at = datetime.now(timezone.utc)
         await db.commit()
         if _bot_token and channel_id:
             await _send_slack_messages(_bot_token, channel_id, _ack)
         return {"ok": True}
 
     if _file_user_messages and not user_text:
-        # Files downloaded, no text — store file paths as user message & send ack
-        _file_content = " ".join(f"[file:{p.split('/')[-1]}]" for p in _file_user_messages)
-        db.add(ChatMessage(agent_id=agent_id, user_id=platform_user_id, role="user",
-                           content=_file_content, conversation_id=session_conv_id))
-        await _asyncio.sleep(_random.uniform(1.0, 2.0))
-        _ack = _random.choice(_FILE_ACK_MESSAGES)
-        db.add(ChatMessage(agent_id=agent_id, user_id=platform_user_id, role="assistant",
-                           content=_ack, conversation_id=session_conv_id))
-        sess.last_message_at = datetime.now(timezone.utc)
-        await db.commit()
-        if _bot_token and channel_id:
-            await _send_slack_messages(_bot_token, channel_id, _ack)
-        return {"ok": True}
+        user_text = " ".join(f"[file:{p.split('/')[-1]}]" for p in _file_user_messages)
 
     # Append uploaded file paths to user message for context
     if _file_user_messages and user_text:
         user_text += "\n" + " ".join(f"[file:{p.split('/')[-1]}]" for p in _file_user_messages)
 
-    # Save user message
-    db.add(ChatMessage(agent_id=agent_id, user_id=platform_user_id, role="user", content=user_text, conversation_id=session_conv_id))
-    sess.last_message_at = datetime.now(timezone.utc)
+    _, model, _ = await _load_agent_and_model(db, agent_id)
+    await enqueue_channel_chat_runtime(
+        db,
+        agent=agent_obj,
+        user=platform_user,
+        session=sess,
+        model=model,
+        content=user_text,
+        source_channel="slack",
+        channel_delivery_target={"channel_id": channel_id},
+        message_id=channel_message_id(
+            agent_id,
+            "slack",
+            event_id or event.get("client_msg_id") or event.get("event_ts"),
+        ),
+    )
     await db.commit()
-
-    # Set channel_file_sender contextvar for agent → user file delivery
-    from app.services.agent_tools import channel_file_sender as _cfs_s
-    async def _slack_file_sender(file_path, msg: str = ""):
-        from pathlib import Path as _P
-        _fp = _P(file_path)
-        if not _bot_token or not channel_id:
-            return
-        async with _httpx.AsyncClient(timeout=60) as _hc:
-            _upload_url_resp = await _hc.post(
-                "https://slack.com/api/files.getUploadURLExternal",
-                headers={"Authorization": f"Bearer {_bot_token}"},
-                data={"filename": _fp.name, "length": str(_fp.stat().st_size)},
-            )
-            _ud = _upload_url_resp.json()
-            if not _ud.get("ok"):
-                raise RuntimeError(f"Slack upload URL error: {_ud}")
-            _upload_url = _ud["upload_url"]
-            _file_id = _ud["file_id"]
-            await _hc.post(_upload_url, content=_fp.read_bytes(),
-                            headers={"Content-Type": "application/octet-stream"})
-            _complete = await _hc.post(
-                "https://slack.com/api/files.completeUploadExternal",
-                headers={"Authorization": f"Bearer {_bot_token}"},
-                json={"files": [{"id": _file_id}], "channel_id": channel_id,
-                      "initial_comment": msg or ""},
-            )
-            if not _complete.json().get("ok"):
-                raise RuntimeError(f"Slack upload complete error: {_complete.json()}")
-    _cfs_s_token = _cfs_s.set(_slack_file_sender)
-
-    # Call LLM
-    from app.api.feishu import _call_agent_llm
-    reply_text = await _call_agent_llm(db, agent_id, user_text, history=history)
-    _cfs_s.reset(_cfs_s_token)
-    logger.info(f"[Slack] LLM reply: {reply_text[:80]}")
-
-    # Save reply
-    db.add(ChatMessage(agent_id=agent_id, user_id=platform_user_id, role="assistant", content=reply_text, conversation_id=session_conv_id))
-    sess.last_message_at = datetime.now(timezone.utc)
-    await db.commit()
-
-    # Send to Slack (chunked)
-    bot_token = config.app_secret or ""
-    if bot_token and channel_id:
-        try:
-            await _send_slack_messages(bot_token, channel_id, reply_text)
-        except Exception as e:
-            logger.error(f"[Slack] Failed to send: {e}")
+    await db.close()
 
     return {"ok": True}

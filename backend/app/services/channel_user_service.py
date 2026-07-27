@@ -11,8 +11,8 @@ from typing import Any
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
-from app.core.security import hash_password
 from app.models.agent import Agent
 from app.models.identity import IdentityProvider
 from app.models.org import OrgMember
@@ -408,11 +408,22 @@ class ChannelUserService:
         """Create a new Identity + User for channel identity (lazy registration).
 
         Creates a global Identity first, then a tenant-scoped User linked to it.
-        This ensures compatibility with the Phase 2 user model where username,
-        email, and password_hash live on the Identity table.
+        Both objects are added to the SAME ``db`` session so the FK constraint
+        (users.identity_id → identities.id) is satisfied within one transaction.
+
+        The previous implementation called ``registration_service.find_or_create_identity``
+        which delegates to ``identity_dao.create_identity``.  That DAO method uses its own
+        ``async with self.session()`` context.  When ``_session_ctx`` is not set (all
+        background channel handlers use raw ``async_session()`` directly, not FastAPI
+        ``Depends(get_db)``), the DAO opens a **separate** session, flushes the Identity
+        there, and exits — but SQLAlchemy does NOT auto-commit on session close, so the
+        Identity is **rolled back**.  The User INSERT that follows on the outer ``db``
+        session then violates the FK constraint.
         """
-        # Generate username and email
+        import re as _re
+
         email = extra_info.get("email")
+        mobile = extra_info.get("mobile")
         identity_seed = (
             external_user_id
             or (extra_info.get("open_id") or "").strip()
@@ -440,15 +451,34 @@ class ChannelUserService:
 
         email = email or f"{username}@{channel_type}.local"
 
-        # Step 1: Find or create global Identity using unified registration service
-        from app.services.registration_service import registration_service
-        identity = await registration_service.find_or_create_identity(
-            db,
-            email=email,
-            phone=extra_info.get("mobile"),
-            username=username,
-            password=uuid.uuid4().hex,
+        # ── Step 1: Find or create Identity on the SAME session ──────────────
+        # First try to find an existing Identity by email / phone so we don't
+        # create duplicate identities for the same person across channels.
+        from sqlalchemy import or_
+        identity: Identity | None = None
+
+        lookup_conditions = [Identity.email == email]
+        if mobile:
+            normalized_mobile = _re.sub(r"[\s\-\+]", "", mobile)
+            lookup_conditions.append(Identity.phone == normalized_mobile)
+
+        id_result = await db.execute(
+            select(Identity).where(or_(*lookup_conditions)).limit(1)
         )
+        identity = id_result.scalar_one_or_none()
+
+        if not identity:
+            normalized_phone = _re.sub(r"[\s\-\+]", "", mobile) if mobile else None
+            identity = Identity(
+                email=email,
+                phone=normalized_phone,
+                username=username,
+                password_hash=None,
+                is_platform_admin=False,
+                email_verified=True,  # auto-verify channel users
+            )
+            db.add(identity)
+            await db.flush()  # assigns identity.id within this transaction
 
         # Step 2: Check if a User already exists for this identity + tenant
         # This prevents duplicate User records when OrgMember lookup misses
@@ -474,7 +504,7 @@ class ChannelUserService:
             )
             return existing_user
 
-        # Step 3: Create tenant-scoped User linked to Identity
+        # ── Step 3: Create tenant-scoped User linked to Identity ─────────────
         user = User(
             identity_id=identity.id,
             display_name=name,
@@ -487,6 +517,7 @@ class ChannelUserService:
         db.add(user)
         await db.flush()
         return user
+
 
 
 # Global service instance
@@ -515,7 +546,15 @@ async def get_platform_user_by_org_member(
     """
     # Case 1: OrgMember already linked to User
     if org_member.user_id:
-        user = await db.get(User, org_member.user_id)
+        query = (
+            select(User)
+            .where(User.id == org_member.user_id)
+            .options(selectinload(User.identity))
+        )
+        if agent_tenant_id:
+            query = query.where(User.tenant_id == agent_tenant_id)
+        user_res = await db.execute(query)
+        user = user_res.scalar_one_or_none()
         if user:
             return user
 
@@ -530,7 +569,11 @@ async def get_platform_user_by_org_member(
         # Link existing User to OrgMember
         org_member.user_id = user.id
         await db.flush()
-        return user
+        # Eagerly load/refresh User.identity before returning
+        user_res = await db.execute(
+            select(User).where(User.id == user.id).options(selectinload(User.identity))
+        )
+        return user_res.scalar_one()
 
     # Case 3: Create new User and link to OrgMember
     # Determine channel type from provider
@@ -566,16 +609,36 @@ async def get_platform_user_by_org_member(
 
     email = email or f"{username}@{channel_type}.local"
 
-    # Step 3: Create new User and link to OrgMember
-    from app.services.registration_service import registration_service
-    # Use unified find_or_create_identity with dual lookup (email/phone)
-    identity = await registration_service.find_or_create_identity(
-        db,
-        email=email,
-        phone=org_member.phone,
-        username=username,
-        password=uuid.uuid4().hex,
+    # Step 3: Create new Identity on the SAME session, then User + link OrgMember.
+    # Using registration_service.find_or_create_identity would route through
+    # identity_dao which opens its own session (no _session_ctx here), causing
+    # the Identity to be rolled back before the User FK reference is resolved.
+    from sqlalchemy import or_
+    import re as _re_pu
+
+    identity: Identity | None = None
+    lookup_conditions = [Identity.email == email]
+    if org_member.phone:
+        normalized_ph = _re_pu.sub(r"[\s\-\+]", "", org_member.phone)
+        lookup_conditions.append(Identity.phone == normalized_ph)
+
+    id_result = await db.execute(
+        select(Identity).where(or_(*lookup_conditions)).limit(1)
     )
+    identity = id_result.scalar_one_or_none()
+
+    if not identity:
+        normalized_phone = _re_pu.sub(r"[\s\-\+]", "", org_member.phone) if org_member.phone else None
+        identity = Identity(
+            email=email,
+            phone=normalized_phone,
+            username=username,
+            password_hash=None,
+            is_platform_admin=False,
+            email_verified=True,
+        )
+        db.add(identity)
+        await db.flush()
 
     # Check if a User already exists for this identity + tenant before creating
     if agent_tenant_id:
@@ -602,7 +665,7 @@ async def get_platform_user_by_org_member(
         return existing_user
 
     user = User(
-        identity_id=identity.id,
+        identity=identity,
         display_name=name,
         avatar_url=org_member.avatar_url,
         role="member",
@@ -619,4 +682,9 @@ async def get_platform_user_by_org_member(
     await db.flush()
 
     logger.info(f"[channel_user_service] Created User {user.id} for OrgMember {org_member.id} ({name})")
-    return user
+    
+    # Eagerly load/refresh User.identity before returning
+    user_res = await db.execute(
+        select(User).where(User.id == user.id).options(selectinload(User.identity))
+    )
+    return user_res.scalar_one()

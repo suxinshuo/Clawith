@@ -12,6 +12,7 @@ from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.core.permissions import check_agent_access, is_agent_creator
 from app.core.security import get_current_user
 from app.database import get_db
@@ -22,6 +23,13 @@ from app.services.wechat_channel import WECHAT_CHANNEL_VERSION, WECHAT_ILINK_BAS
 
 
 router = APIRouter(tags=["wechat"])
+settings = get_settings()
+
+
+def _role_enabled(*required: str) -> bool:
+    raw = (settings.PROCESS_ROLE or "all").strip().lower()
+    roles = {part.strip() for part in raw.split(",") if part.strip()} or {"all"}
+    return "all" in roles or any(role in roles for role in required)
 
 
 def _route_tag(data: dict | None = None) -> str | None:
@@ -53,6 +61,8 @@ async def create_wechat_qrcode(
     agent, _ = await check_agent_access(db, current_user, agent_id)
     if not is_agent_creator(current_user, agent):
         raise HTTPException(status_code=403, detail="Only creator can configure channel")
+    # Release connection before slow HTTP call
+    await db.close()
 
     route_tag = _route_tag(data)
     async with httpx.AsyncClient(timeout=20) as client:
@@ -78,6 +88,8 @@ async def get_wechat_qrcode_status(
     agent, _ = await check_agent_access(db, current_user, agent_id)
     if not is_agent_creator(current_user, agent):
         raise HTTPException(status_code=403, detail="Only creator can configure channel")
+    # Release connection before slow HTTP call (timeout=40s)
+    await db.close()
 
     async with httpx.AsyncClient(timeout=40) as client:
         resp = await client.get(
@@ -133,7 +145,8 @@ async def get_wechat_qrcode_status(
             await db.flush()
 
         await db.commit()
-        asyncio.create_task(wechat_poll_manager.start_client(agent_id))
+        if _role_enabled("connector"):
+            asyncio.create_task(wechat_poll_manager.start_client(agent_id))
 
     return payload
 
