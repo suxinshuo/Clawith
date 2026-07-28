@@ -7,6 +7,7 @@ import json
 import os
 
 import httpx
+from loguru import logger
 from sqlalchemy import select
 
 from app.models.channel_config import ChannelConfig
@@ -106,7 +107,7 @@ class DatabaseChannelDeliverySender:
         envelope: ChannelDeliveryEnvelope,
         config: _ProviderConfig,
     ) -> ChannelSendResult:
-        from app.services.feishu_service import feishu_service
+        from app.services.feishu_progress_card import build_progress_card
 
         receive_id = _required(envelope.target, "receive_id")
         receive_id_type = _required(envelope.target, "receive_id_type")
@@ -115,6 +116,75 @@ class DatabaseChannelDeliverySender:
                 "channel_target_invalid",
                 "Unsupported Feishu receive_id_type",
             )
+        # A Feishu `text` message renders markdown literally; a card does not.
+        card = build_progress_card(
+            agent_name=str(envelope.target.get("agent_name") or "AI 回复"),
+            answer_text=envelope.content,
+            done=True,
+        )
+        message_id = await self._send_feishu_reply(
+            envelope,
+            config,
+            receive_id=receive_id,
+            receive_id_type=receive_id_type,
+            card=card,
+        )
+        await self._remove_feishu_typing_reaction(envelope, config)
+        return ChannelSendResult(
+            provider_message_id=str(message_id) if message_id else None,
+        )
+
+    @staticmethod
+    async def _send_feishu_reply(
+        envelope: ChannelDeliveryEnvelope,
+        config: _ProviderConfig,
+        *,
+        receive_id: str,
+        receive_id_type: str,
+        card: dict,
+    ) -> str | None:
+        """Render the reply into the run's progress card, else post a new one.
+
+        Degrades card patch → fresh card → plain text. Only the last step may
+        raise: the user must still receive the answer when Feishu refuses the
+        richer rendering, and failing here would retry the whole delivery and
+        risk a duplicate message.
+        """
+        from app.services.feishu_service import feishu_service
+
+        progress_message_id = envelope.target.get("progress_message_id")
+        if isinstance(progress_message_id, str) and progress_message_id.strip():
+            target_id = progress_message_id.strip()
+            try:
+                await feishu_service.patch_message(
+                    config.app_id,
+                    config.app_secret,
+                    target_id,
+                    json.dumps(card, ensure_ascii=False),
+                    stage="runtime_channel_delivery_card_patch",
+                )
+                return target_id
+            except Exception as e:
+                logger.warning(
+                    f"[Feishu] Progress card patch failed for {target_id}: {e}; "
+                    "posting the reply as a new card"
+                )
+
+        try:
+            response = await feishu_service.send_card_message(
+                config.app_id,
+                config.app_secret,
+                receive_id,
+                card,
+                receive_id_type=receive_id_type,
+                stage="runtime_channel_delivery_card",
+            )
+            return (response.get("data") or {}).get("message_id")
+        except Exception as e:
+            logger.warning(
+                f"[Feishu] Card delivery failed: {e}; falling back to plain text"
+            )
+
         response = await feishu_service.send_message(
             config.app_id,
             config.app_secret,
@@ -124,10 +194,30 @@ class DatabaseChannelDeliverySender:
             receive_id_type=receive_id_type,
             stage="runtime_channel_delivery",
         )
-        message_id = (response.get("data") or {}).get("message_id")
-        return ChannelSendResult(
-            provider_message_id=str(message_id) if message_id else None,
-        )
+        return (response.get("data") or {}).get("message_id")
+
+    @staticmethod
+    async def _remove_feishu_typing_reaction(
+        envelope: ChannelDeliveryEnvelope,
+        config: _ProviderConfig,
+    ) -> None:
+        source_message_id = envelope.target.get("source_message_id")
+        if not source_message_id or not config.app_id:
+            return
+        reaction_id = envelope.target.get("typing_reaction_id")
+        try:
+            from app.services.feishu_reaction import remove_typing_reaction
+
+            await remove_typing_reaction(
+                config.app_id,
+                config.app_secret,
+                str(source_message_id),
+                reaction_id=str(reaction_id) if reaction_id else None,
+            )
+        except Exception:
+            # Reaction cleanup is cosmetic and must not turn a confirmed reply
+            # into a retry that could duplicate the provider message.
+            return
 
     async def _dingtalk(
         self,

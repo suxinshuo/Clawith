@@ -103,11 +103,20 @@ async def test_feishu_group_message_uses_runtime_intake(monkeypatch) -> None:
         calls["intake"] = kwargs
         return intake
 
+    async def start_progress(**kwargs):
+        calls["progress"] = kwargs
+        return "om_progress_card"
+
+    def spawn(**kwargs):
+        calls["spawn"] = kwargs
+
     monkeypatch.setattr(feishu, "_async_session", _SessionFactory(db))
     monkeypatch.setattr(feishu, "_resolve_feishu_sender", resolve_sender)
     monkeypatch.setattr(channel_session, "find_or_create_channel_session", find_session)
     monkeypatch.setattr(feishu, "_load_agent_and_model", load_model)
     monkeypatch.setattr(feishu, "enqueue_channel_chat_runtime", enqueue)
+    monkeypatch.setattr(feishu, "_start_feishu_progress", start_progress)
+    monkeypatch.setattr(feishu, "_spawn_feishu_progress_updater", spawn)
 
     result = await feishu._accept_feishu_runtime_message(
         agent_id=agent_id,
@@ -119,6 +128,7 @@ async def test_feishu_group_message_uses_runtime_intake(monkeypatch) -> None:
         content="Hello Feishu",
         display_content="Hello Feishu",
         external_event_id=event_id,
+        source_message_id="om_user_1",
     )
 
     assert db.commits == 1
@@ -134,12 +144,80 @@ async def test_feishu_group_message_uses_runtime_intake(monkeypatch) -> None:
     assert intake_call["channel_delivery_target"] == {
         "receive_id": "oc_group_1",
         "receive_id_type": "chat_id",
+        "agent_name": "Runtime Agent",
+        "progress_message_id": "om_progress_card",
+        "source_message_id": "om_user_1",
     }
     assert intake_call["message_id"] == feishu.channel_message_id(
         agent_id,
         "feishu",
         event_id,
     )
+    # The tracker must only start once the run is committed and visible.
+    assert calls["spawn"]["card_message_id"] == "om_progress_card"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_feishu_intake_survives_a_refused_progress_card(monkeypatch) -> None:
+    """No card means no tracker, and the reply still goes out as a fresh card."""
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    agent = SimpleNamespace(
+        id=agent_id,
+        tenant_id=tenant_id,
+        creator_id=uuid.uuid4(),
+        name="Runtime Agent",
+    )
+    user = SimpleNamespace(id=uuid.uuid4(), display_name="Alice")
+    model = SimpleNamespace(id=uuid.uuid4())
+    config = SimpleNamespace(app_id="app-1", app_secret="secret-1")
+    db = _Session(agent)
+    intake = _runtime(tenant_id)
+    calls: dict[str, object] = {}
+
+    async def resolve_sender(_db, **_kwargs):
+        return user
+
+    async def find_session(**_kwargs):
+        return SimpleNamespace(id=uuid.uuid4())
+
+    async def load_model(_db, _agent_id):
+        return agent, model, None
+
+    async def enqueue(_db, **kwargs):
+        calls["intake"] = kwargs
+        return intake
+
+    async def start_progress(**_kwargs):
+        return None
+
+    def spawn(**_kwargs):
+        raise AssertionError("no progress card means nothing to track")
+
+    monkeypatch.setattr(feishu, "_async_session", _SessionFactory(db))
+    monkeypatch.setattr(feishu, "_resolve_feishu_sender", resolve_sender)
+    monkeypatch.setattr(channel_session, "find_or_create_channel_session", find_session)
+    monkeypatch.setattr(feishu, "_load_agent_and_model", load_model)
+    monkeypatch.setattr(feishu, "enqueue_channel_chat_runtime", enqueue)
+    monkeypatch.setattr(feishu, "_start_feishu_progress", start_progress)
+    monkeypatch.setattr(feishu, "_spawn_feishu_progress_updater", spawn)
+
+    await feishu._accept_feishu_runtime_message(
+        agent_id=agent_id,
+        config=config,  # type: ignore[arg-type]
+        sender_open_id="ou_sender",
+        sender_user_id="feishu-user-1",
+        chat_type="p2p",
+        chat_id="oc_chat_1",
+        content="Hello Feishu",
+        display_content="Hello Feishu",
+        external_event_id="event-1",
+        source_message_id="om_user_1",
+    )
+
+    target = calls["intake"]["channel_delivery_target"]  # type: ignore[index]
+    assert "progress_message_id" not in target
+    assert target["source_message_id"] == "om_user_1"
 
 
 @pytest.mark.asyncio
