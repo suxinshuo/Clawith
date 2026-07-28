@@ -191,15 +191,10 @@ _RUNTIME_WAIT_TOOL_DEFINITION: dict = {
                 },
             },
             "required": ["waiting_type", "reason"],
-            "allOf": [
-                {
-                    "if": {
-                        "properties": {"waiting_type": {"const": "user"}},
-                        "required": ["waiting_type"],
-                    },
-                    "then": {"required": ["question"]},
-                }
-            ],
+            # The "user waits must carry a question" rule stays in the question
+            # description instead of a top-level if/then combinator: Anthropic
+            # rejects anyOf/oneOf/allOf there, and complete_once already
+            # downgrades a user wait that arrives without a question to text.
             "additionalProperties": False,
         },
     },
@@ -314,6 +309,28 @@ def _is_group_agent_run(state: RuntimeGraphState) -> bool:
     )
 
 
+_UNSUPPORTED_TOP_LEVEL_SCHEMA_KEYWORDS = ("anyOf", "oneOf", "allOf")
+
+
+def _strip_top_level_schema_combinators(tool: dict) -> dict:
+    """Drop schema keywords Anthropic refuses at the top level of input_schema.
+
+    Only the builtin catalog is ours to police — MCP servers and Skills supply
+    schemas this codebase never authored — so the guard sits on the one path
+    every runtime tool takes to the model. Nested combinators stay untouched;
+    the provider only rejects them at the top level.
+    """
+    function = tool.get("function")
+    if not isinstance(function, dict):
+        return tool
+    parameters = function.get("parameters")
+    if not isinstance(parameters, dict):
+        return tool
+    for keyword in _UNSUPPORTED_TOP_LEVEL_SCHEMA_KEYWORDS:
+        parameters.pop(keyword, None)
+    return tool
+
+
 def _with_runtime_tools(
     tools: list[dict],
     *,
@@ -343,7 +360,7 @@ def _with_runtime_tools(
                 "enum"
             ] = ["agent", "external"]
         resolved.append(wait_tool)
-    return resolved
+    return [_strip_top_level_schema_combinators(tool) for tool in resolved]
 
 
 def _application_tools_for_model(

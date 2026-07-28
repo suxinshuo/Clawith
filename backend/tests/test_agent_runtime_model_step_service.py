@@ -2093,13 +2093,49 @@ def test_wait_schema_requires_a_question_only_for_user_waits() -> None:
 
     parameters = _RUNTIME_WAIT_TOOL_DEFINITION["function"]["parameters"]
     assert parameters["properties"]["question"]["minLength"] == 1
-    assert {
-        "if": {
-            "properties": {"waiting_type": {"const": "user"}},
-            "required": ["waiting_type"],
+    # The conditional requirement is stated in the description rather than in a
+    # top-level allOf: Anthropic rejects combinators there, and complete_once
+    # already downgrades a user wait that arrives without a question.
+    assert "waiting_type is user" in parameters["properties"]["question"]["description"]
+    assert not {"anyOf", "oneOf", "allOf"} & set(parameters)
+
+
+def test_runtime_tools_never_send_top_level_schema_combinators() -> None:
+    """Anthropic rejects anyOf/oneOf/allOf at the top level of input_schema.
+
+    MCP servers and Skills supply schemas this codebase does not author, so the
+    guard belongs at the assembly boundary instead of in the builtin catalog.
+    """
+    from app.services.agent_runtime.model_step_service import _with_runtime_tools
+
+    mcp_tool = {
+        "type": "function",
+        "function": {
+            "name": "third_party_lookup",
+            "description": "Supplied by an MCP server.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "anyOf": [{"required": ["query"]}],
+                "oneOf": [{"required": ["query"]}],
+                "allOf": [{"required": ["query"]}],
+            },
         },
-        "then": {"required": ["question"]},
-    } in parameters["allOf"]
+    }
+
+    resolved = _with_runtime_tools(
+        [mcp_tool],
+        allow_user_wait=True,
+        allow_group_handoff=False,
+    )
+
+    assert {"finish", "wait"} <= {tool["function"]["name"] for tool in resolved}
+    for tool in resolved:
+        parameters = tool["function"].get("parameters", {})
+        assert not {"anyOf", "oneOf", "allOf"} & set(parameters), tool["function"]["name"]
+
+    # The caller's definition must not be sanitized in place.
+    assert "anyOf" in mcp_tool["function"]["parameters"]
 
 
 @pytest.mark.asyncio
