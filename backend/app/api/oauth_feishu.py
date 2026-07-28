@@ -104,45 +104,37 @@ async def feishu_credential_callback(
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=expires_in) if expires_in else None
 
-    async with async_session() as db:
-        result = await db.execute(
-            select(UserExternalCredential).where(
-                UserExternalCredential.user_id == user_id,
-                UserExternalCredential.tenant_id == tenant_id,
-                UserExternalCredential.provider == provider,
-            )
+    try:
+        await _store_feishu_credential(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            provider=provider,
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_at=expires_at,
+            scope=scope,
+            open_id=open_id,
+            name=name,
+            now=now,
+            secret_key=settings.SECRET_KEY,
         )
-        existing = result.scalar_one_or_none()
-
-        if existing:
-            existing.access_token_encrypted = encrypt_data(access_token, settings.SECRET_KEY)
-            existing.credential_type = "oauth2"
-            existing.status = "active"
-            existing.token_expires_at = expires_at
-            existing.external_user_id = open_id or existing.external_user_id
-            existing.external_username = name or existing.external_username
-            if refresh_token:
-                existing.refresh_token_encrypted = encrypt_data(refresh_token, settings.SECRET_KEY)
-            if scope:
-                existing.scopes = scope
-            existing.updated_at = now
-        else:
-            cred = UserExternalCredential(
-                user_id=user_id,
-                tenant_id=tenant_id,
-                provider=provider,
-                credential_type="oauth2",
-                access_token_encrypted=encrypt_data(access_token, settings.SECRET_KEY),
-                refresh_token_encrypted=encrypt_data(refresh_token, settings.SECRET_KEY) if refresh_token else None,
-                token_expires_at=expires_at,
-                scopes=scope,
-                external_user_id=open_id,
-                external_username=name,
-                status="active",
-            )
-            db.add(cred)
-
-        await db.commit()
+    except Exception as e:
+        # Feishu already recorded the grant, so re-authorizing lands here again.
+        # Say that plainly instead of leaving the user with a bare 500.
+        logger.exception(
+            f"[FeishuOAuth] Authorization succeeded but storing the credential failed "
+            f"for user={user_id}, provider={provider}: {e}"
+        )
+        return HTMLResponse(
+            content=(
+                "<html><body style='font-family: sans-serif; text-align: center; padding: 60px;'>"
+                "<h2>授权失败</h2>"
+                "<p>飞书已确认您的授权，但系统保存凭证时出错，本次授权未生效。</p>"
+                "<p style='color: #888;'>重新授权通常无法解决此问题，请联系管理员查看后端日志。</p>"
+                "</body></html>"
+            ),
+            status_code=500,
+        )
 
     # Audit
     from app.services.audit_logger import write_audit_log
@@ -165,3 +157,63 @@ async def feishu_credential_callback(
         ),
         status_code=200,
     )
+
+
+async def _store_feishu_credential(
+    *,
+    user_id,
+    tenant_id,
+    provider: str,
+    access_token: str,
+    refresh_token: str,
+    expires_at: datetime | None,
+    scope: str,
+    open_id: str,
+    name: str,
+    now: datetime,
+    secret_key: str,
+) -> None:
+    """Upsert the user's Feishu credential.
+
+    ``scope`` is whatever Feishu granted and can run to several thousand
+    characters, so the column it lands in must stay untyped-length (TEXT).
+    """
+    async with async_session() as db:
+        result = await db.execute(
+            select(UserExternalCredential).where(
+                UserExternalCredential.user_id == user_id,
+                UserExternalCredential.tenant_id == tenant_id,
+                UserExternalCredential.provider == provider,
+            )
+        )
+        existing = result.scalar_one_or_none()
+
+        if existing:
+            existing.access_token_encrypted = encrypt_data(access_token, secret_key)
+            existing.credential_type = "oauth2"
+            existing.status = "active"
+            existing.token_expires_at = expires_at
+            existing.external_user_id = open_id or existing.external_user_id
+            existing.external_username = name or existing.external_username
+            if refresh_token:
+                existing.refresh_token_encrypted = encrypt_data(refresh_token, secret_key)
+            if scope:
+                existing.scopes = scope
+            existing.updated_at = now
+        else:
+            cred = UserExternalCredential(
+                user_id=user_id,
+                tenant_id=tenant_id,
+                provider=provider,
+                credential_type="oauth2",
+                access_token_encrypted=encrypt_data(access_token, secret_key),
+                refresh_token_encrypted=encrypt_data(refresh_token, secret_key) if refresh_token else None,
+                token_expires_at=expires_at,
+                scopes=scope,
+                external_user_id=open_id,
+                external_username=name,
+                status="active",
+            )
+            db.add(cred)
+
+        await db.commit()
