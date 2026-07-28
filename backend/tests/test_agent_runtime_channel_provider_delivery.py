@@ -2,12 +2,13 @@
 
 from collections import deque
 from types import SimpleNamespace
+import json
 import uuid
 
 import pytest
 
 from app.api import teams
-from app.services import feishu_service, wechat_channel, wecom_stream
+from app.services import feishu_reaction, feishu_service, wechat_channel, wecom_stream
 from app.services.agent_runtime import channel_provider_delivery
 from app.services.agent_runtime.channel_delivery import ChannelDeliveryEnvelope
 from app.services.agent_runtime.channel_provider_delivery import (
@@ -117,18 +118,56 @@ def _sender(config) -> DatabaseChannelDeliverySender:
     )
 
 
-@pytest.mark.asyncio
-async def test_feishu_delivery_loads_credentials_but_persists_only_destination(
+def _feishu_stub(
     monkeypatch,
-) -> None:
-    calls: dict[str, object] = {}
+    *,
+    send_card=None,
+    patch_card=None,
+    send_text=None,
+    remove_reaction=None,
+) -> dict:
+    """Stub every Feishu egress the delivery may reach, recording the calls."""
+    seen: dict[str, object] = {}
 
-    async def send_message(*args, **kwargs):
-        calls["args"] = args
-        calls["kwargs"] = kwargs
-        return {"code": 0, "data": {"message_id": "om-1"}}
+    async def _send_card_message(app_id, app_secret, receive_id, card_dict, **kwargs):
+        seen["send_card"] = (app_id, app_secret, receive_id, card_dict, kwargs)
+        if send_card is not None:
+            return send_card(card_dict)
+        return {"code": 0, "data": {"message_id": "om-card"}}
 
-    monkeypatch.setattr(feishu_service.feishu_service, "send_message", send_message)
+    async def _patch_message(app_id, app_secret, message_id, content, **kwargs):
+        seen["patch"] = (app_id, app_secret, message_id, content, kwargs)
+        if patch_card is not None:
+            return patch_card(content)
+        return {"code": 0, "msg": "ok"}
+
+    async def _send_message(app_id, app_secret, receive_id, msg_type, content, **kwargs):
+        seen["send_text"] = (app_id, app_secret, receive_id, msg_type, content, kwargs)
+        if send_text is not None:
+            return send_text(content)
+        return {"code": 0, "data": {"message_id": "om-text"}}
+
+    async def _remove_typing_reaction(app_id, app_secret, message_id, reaction_id=None):
+        seen["reaction"] = (app_id, app_secret, message_id, reaction_id)
+        if remove_reaction is not None:
+            remove_reaction()
+
+    monkeypatch.setattr(
+        feishu_service.feishu_service, "send_card_message", _send_card_message
+    )
+    monkeypatch.setattr(feishu_service.feishu_service, "patch_message", _patch_message)
+    monkeypatch.setattr(feishu_service.feishu_service, "send_message", _send_message)
+    monkeypatch.setattr(
+        feishu_reaction, "remove_typing_reaction", _remove_typing_reaction
+    )
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_feishu_delivery_sends_a_markdown_card(monkeypatch) -> None:
+    """Plain text does not render markdown in Feishu; an interactive card does."""
+    seen = _feishu_stub(monkeypatch)
+
     result = await _sender(_config()).send(
         _envelope(
             "feishu",
@@ -136,9 +175,175 @@ async def test_feishu_delivery_loads_credentials_but_persists_only_destination(
         )
     )
 
-    assert result.provider_message_id == "om-1"
-    assert calls["args"][:3] == ("app-1", "secret-1", "oc-1")  # type: ignore[index]
-    assert calls["kwargs"]["stage"] == "runtime_channel_delivery"  # type: ignore[index]
+    assert result.provider_message_id == "om-card"
+    app_id, app_secret, receive_id, card, _kwargs = seen["send_card"]  # type: ignore[misc]
+    assert (app_id, app_secret, receive_id) == ("app-1", "secret-1", "oc-1")
+    assert card["config"]["update_multi"] is True
+    assert "Durable provider reply" in json.dumps(card, ensure_ascii=False)
+    assert "send_text" not in seen
+
+
+@pytest.mark.asyncio
+async def test_feishu_delivery_patches_the_run_progress_card(monkeypatch) -> None:
+    """The reply replaces the in-place progress card instead of adding a bubble."""
+    seen = _feishu_stub(monkeypatch)
+
+    result = await _sender(_config()).send(
+        _envelope(
+            "feishu",
+            {
+                "receive_id": "oc-1",
+                "receive_id_type": "chat_id",
+                "progress_message_id": "om-progress",
+            },
+        )
+    )
+
+    assert result.provider_message_id == "om-progress"
+    _app_id, _secret, message_id, content, _kwargs = seen["patch"]  # type: ignore[misc]
+    assert message_id == "om-progress"
+    assert "Durable provider reply" in content
+    # Patching in place must not also post a second message.
+    assert "send_card" not in seen
+    assert "send_text" not in seen
+
+
+@pytest.mark.asyncio
+async def test_feishu_delivery_posts_a_fresh_card_when_the_patch_fails(
+    monkeypatch,
+) -> None:
+    """A stale or recalled progress card must not swallow the answer."""
+
+    def _reject(_content):
+        raise RuntimeError("Feishu refused the patch: code=230011")
+
+    seen = _feishu_stub(monkeypatch, patch_card=_reject)
+
+    result = await _sender(_config()).send(
+        _envelope(
+            "feishu",
+            {
+                "receive_id": "oc-1",
+                "receive_id_type": "chat_id",
+                "progress_message_id": "om-progress",
+            },
+        )
+    )
+
+    assert result.provider_message_id == "om-card"
+    assert "Durable provider reply" in json.dumps(seen["send_card"][3], ensure_ascii=False)  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_feishu_delivery_falls_back_to_plain_text_when_cards_are_rejected(
+    monkeypatch,
+) -> None:
+    """Tenants whose Feishu app cannot post cards still need the answer."""
+
+    def _reject(_card):
+        raise RuntimeError("Feishu refused the card: code=230006")
+
+    seen = _feishu_stub(monkeypatch, send_card=_reject)
+
+    result = await _sender(_config()).send(
+        _envelope(
+            "feishu",
+            {"receive_id": "oc-1", "receive_id_type": "chat_id"},
+        )
+    )
+
+    assert result.provider_message_id == "om-text"
+    _app_id, _secret, _receive_id, msg_type, content, _kwargs = seen["send_text"]  # type: ignore[misc]
+    assert msg_type == "text"
+    assert "Durable provider reply" in content
+
+
+@pytest.mark.asyncio
+async def test_feishu_delivery_removes_the_typing_reaction(monkeypatch) -> None:
+    """No reaction_id travels with the envelope, so cleanup resolves it itself."""
+    seen = _feishu_stub(monkeypatch)
+
+    await _sender(_config()).send(
+        _envelope(
+            "feishu",
+            {
+                "receive_id": "oc-1",
+                "receive_id_type": "chat_id",
+                "source_message_id": "om-user",
+            },
+        )
+    )
+
+    assert seen["reaction"] == ("app-1", "secret-1", "om-user", None)
+
+
+@pytest.mark.asyncio
+async def test_feishu_delivery_uses_a_carried_reaction_id_when_present(
+    monkeypatch,
+) -> None:
+    seen = _feishu_stub(monkeypatch)
+
+    await _sender(_config()).send(
+        _envelope(
+            "feishu",
+            {
+                "receive_id": "oc-1",
+                "receive_id_type": "chat_id",
+                "source_message_id": "om-user",
+                "typing_reaction_id": "reaction-1",
+            },
+        )
+    )
+
+    assert seen["reaction"] == ("app-1", "secret-1", "om-user", "reaction-1")
+
+
+@pytest.mark.asyncio
+async def test_feishu_delivery_skips_reaction_cleanup_without_a_source_message(
+    monkeypatch,
+) -> None:
+    seen = _feishu_stub(monkeypatch)
+
+    await _sender(_config()).send(
+        _envelope("feishu", {"receive_id": "oc-1", "receive_id_type": "chat_id"})
+    )
+
+    assert "reaction" not in seen
+
+
+@pytest.mark.asyncio
+async def test_feishu_delivery_survives_a_failed_reaction_cleanup(monkeypatch) -> None:
+    """Cosmetic cleanup must not fail a confirmed reply into a duplicate retry."""
+
+    def _boom():
+        raise RuntimeError("Feishu reaction delete failed")
+
+    _feishu_stub(monkeypatch, remove_reaction=_boom)
+
+    result = await _sender(_config()).send(
+        _envelope(
+            "feishu",
+            {
+                "receive_id": "oc-1",
+                "receive_id_type": "chat_id",
+                "source_message_id": "om-user",
+            },
+        )
+    )
+
+    assert result.provider_message_id == "om-card"
+
+
+@pytest.mark.asyncio
+async def test_feishu_delivery_rejects_an_unsupported_receive_id_type(
+    monkeypatch,
+) -> None:
+    _feishu_stub(monkeypatch)
+
+    with pytest.raises(channel_provider_delivery.ChannelProviderDeliveryError):
+        await _sender(_config()).send(
+            _envelope("feishu", {"receive_id": "oc-1", "receive_id_type": "email"})
+        )
 
 
 @pytest.mark.asyncio

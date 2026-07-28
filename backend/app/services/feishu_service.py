@@ -690,6 +690,31 @@ class FeishuService:
                     return uid
             return None
 
+    async def send_card_message(
+        self,
+        app_id: str,
+        app_secret: str,
+        receive_id: str,
+        card_dict: dict,
+        receive_id_type: str = "open_id",
+        stage: str = "send_card_message",
+    ) -> dict:
+        """Send a card inline as an `interactive` message.
+
+        Unlike the CardKit entity flow this keeps the card JSON in the IM
+        message itself, so the returned `message_id` can later be handed to
+        `patch_message` to update the very same bubble in place.
+        """
+        return await self.send_message(
+            app_id=app_id,
+            app_secret=app_secret,
+            receive_id=receive_id,
+            msg_type="interactive",
+            content=json.dumps(card_dict, ensure_ascii=False),
+            receive_id_type=receive_id_type,
+            stage=stage,
+        )
+
     async def send_markdown_message(
         self,
         app_id: str,
@@ -1240,13 +1265,17 @@ class FeishuService:
         receive_id: str,
         card_id: str,
         receive_id_type: str = "open_id",
-    ) -> None:
-        """Send an interactive message referencing an existing card_id."""
+    ) -> dict:
+        """Send an interactive message referencing an existing card_id.
+
+        Returns the raw send response so callers can keep the Feishu
+        `message_id` — patching or reacting to the card later needs it.
+        """
         content = json.dumps({
             "type": "card",
             "data": {"card_id": card_id},
         })
-        await self.send_message(
+        return await self.send_message(
             app_id=app_id,
             app_secret=app_secret,
             receive_id=receive_id,
@@ -1417,6 +1446,101 @@ class FeishuService:
                 raise
             logger.error(f"[Feishu CardKit] update_cardkit_card error: {e}")
             raise RuntimeError(f"Feishu CardKit update_cardkit_card error: {e}") from e
+
+    async def add_message_reaction(
+        self,
+        app_id: str,
+        app_secret: str,
+        message_id: str,
+        emoji_type: str,
+    ) -> str:
+        """Add one emoji reaction to a message and return its reaction_id.
+
+        `emoji_type` must be one of Feishu's documented keys and is
+        case-sensitive (e.g. "Typing", "THUMBSUP").
+        """
+        from lark_oapi.api.im.v1.model import (
+            CreateMessageReactionRequest, CreateMessageReactionRequestBody, Emoji,
+        )
+
+        client = self._get_lark_client(app_id, app_secret)
+        body = CreateMessageReactionRequestBody.builder() \
+            .reaction_type(Emoji.builder().emoji_type(emoji_type).build()) \
+            .build()
+        request = CreateMessageReactionRequest.builder() \
+            .message_id(message_id) \
+            .request_body(body) \
+            .build()
+
+        try:
+            resp = await client.im.v1.message_reaction.acreate(request)
+            if not resp.success():
+                raise RuntimeError(
+                    f"Feishu add_message_reaction failed: code={resp.code}, msg={resp.msg}"
+                )
+            return resp.data.reaction_id
+        except Exception as e:
+            if isinstance(e, RuntimeError):
+                raise
+            logger.error(f"[Feishu] add_message_reaction error: {e}")
+            raise RuntimeError(f"Feishu add_message_reaction error: {e}") from e
+
+    async def list_message_reactions(
+        self,
+        app_id: str,
+        app_secret: str,
+        message_id: str,
+        emoji_type: str,
+    ) -> list:
+        """List a message's reactions of one emoji type."""
+        from lark_oapi.api.im.v1.model import ListMessageReactionRequest
+
+        client = self._get_lark_client(app_id, app_secret)
+        request = ListMessageReactionRequest.builder() \
+            .message_id(message_id) \
+            .reaction_type(emoji_type) \
+            .build()
+
+        try:
+            resp = await client.im.v1.message_reaction.alist(request)
+            if not resp.success():
+                raise RuntimeError(
+                    f"Feishu list_message_reactions failed: code={resp.code}, msg={resp.msg}"
+                )
+            return list(getattr(resp.data, "items", None) or [])
+        except Exception as e:
+            if isinstance(e, RuntimeError):
+                raise
+            logger.error(f"[Feishu] list_message_reactions error: {e}")
+            raise RuntimeError(f"Feishu list_message_reactions error: {e}") from e
+
+    async def delete_message_reaction(
+        self,
+        app_id: str,
+        app_secret: str,
+        message_id: str,
+        reaction_id: str,
+    ) -> None:
+        """Remove one reaction this app previously added to a message."""
+        from lark_oapi.api.im.v1.model import DeleteMessageReactionRequest
+
+        client = self._get_lark_client(app_id, app_secret)
+        request = DeleteMessageReactionRequest.builder() \
+            .message_id(message_id) \
+            .reaction_id(reaction_id) \
+            .build()
+
+        try:
+            resp = await client.im.v1.message_reaction.adelete(request)
+            if not resp.success():
+                raise RuntimeError(
+                    f"Feishu delete_message_reaction failed: code={resp.code}, msg={resp.msg}"
+                )
+        except Exception as e:
+            if isinstance(e, RuntimeError):
+                raise
+            logger.error(f"[Feishu] delete_message_reaction error: {e}")
+            raise RuntimeError(f"Feishu delete_message_reaction error: {e}") from e
 
 
 feishu_service = FeishuService()

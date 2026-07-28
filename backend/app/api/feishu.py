@@ -1,8 +1,8 @@
 """Feishu OAuth and Channel API routes."""
 
 import asyncio
+import json
 import uuid
-from collections.abc import Awaitable, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
@@ -21,6 +21,12 @@ from app.services.agent_runtime.channel_chat import (
     enqueue_channel_chat_runtime,
 )
 from app.services.agent_runtime.chat_intake import ChatRuntimeIntake
+from app.services.agent_runtime.event_stream import DatabaseRuntimeEventStream
+from app.services.feishu_progress_card import (
+    build_progress_card,
+    run_progress_card_updater,
+)
+from app.services.feishu_reaction import add_typing_reaction
 from app.services.feishu_service import feishu_service
 from app.services.llm.model_resolution import active_agent_model_candidates
 from app.services.storage import store_agent_upload
@@ -31,58 +37,100 @@ router = APIRouter(tags=["feishu"])
 # The per-model request_timeout field takes precedence — see _get_llm_timeout().
 _LLM_TIMEOUT_SECONDS_DEFAULT = 180.0
 
-# Number of tool status lines to keep visible in the Feishu card.
-# Shows the last N non-running lines plus any active "running" entry.
-_TOOL_STATUS_KEEP_LINES = 20
-
 _USER_RESOLUTION_ERROR_TIP = (
     "抱歉，我暂时无法稳定识别你的飞书账号，已停止本次处理以避免重复创建账号。"
     "请稍后重试，或联系管理员检查飞书 Contact API 权限。"
 )
 
 
-# ─── Fork streaming interactive card infra ──────────────────────────────
-# These helpers back the fork's streaming interactive Feishu cards (post an
-# initial card, then PATCH / CardKit-stream it as the reply is generated).
-# Upstream's runtime delivers Feishu replies one-shot via
-# agent_runtime/channel_provider_delivery.py `_feishu`. These helpers are kept
-# defined (and importable) so the streaming feature code is retained.
-# TODO(merge): re-wire Feishu streaming cards onto runtime delivery
-def _build_card(
-    answer_text: str,
-    thinking_text: str = "",
-    streaming: bool = False,
-    tool_status_lines: list[str] | None = None,
-    agent_name: str = "AI 回复",
-) -> dict:
-    """Build a Feishu interactive card for streaming replies."""
-    elements = []
+# ─── Progress card + typing reaction ────────────────────────────────────
+# Upstream's Runtime delivers a Feishu reply one-shot once the whole run
+# finishes (agent_runtime/channel_provider_delivery.py `_feishu`), and it never
+# streams tokens. To keep the channel responsive we acknowledge the message
+# immediately with a 敲键盘 reaction plus a progress card, then patch that card
+# from the Runtime's per-round activity events until the reply lands.
 
-    if tool_status_lines:
-        elements.append({
-            "tag": "markdown",
-            "content": "\n".join(tool_status_lines[-_TOOL_STATUS_KEEP_LINES:]),
-        })
-        elements.append({"tag": "hr"})
+# Background progress trackers, kept referenced so asyncio cannot collect them.
+_progress_tasks: set[asyncio.Task] = set()
 
-    if thinking_text:
-        think_preview = thinking_text[:200].replace("\n", " ")
-        elements.append({
-            "tag": "markdown",
-            "content": f"<font color='grey'>💭 **Thinking**\n{think_preview}{'...' if len(thinking_text) > 200 else ''}</font>",
-        })
-        elements.append({"tag": "hr"})
 
-    body = answer_text + ("▌" if streaming and answer_text else ("..." if streaming else ""))
-    elements.append({"tag": "markdown", "content": body or "..."})
-    return {
-        "config": {"update_multi": True},
-        "header": {
-            "template": "blue",
-            "title": {"content": agent_name, "tag": "plain_text"},
-        },
-        "elements": elements,
-    }
+async def _start_feishu_progress(
+    *,
+    app_id: str,
+    app_secret: str,
+    agent_name: str,
+    reply_target: str,
+    receive_id_type: str,
+    source_message_id: str | None,
+) -> str | None:
+    """Acknowledge a Feishu message before its Runtime run starts.
+
+    Adds the 敲键盘 reaction to the user's message and posts the progress card
+    that the reply will later be patched into. Returns the card's message_id, or
+    None when Feishu refused it — the reply still lands, as a fresh card.
+
+    Both calls are issued concurrently to keep the webhook ack path short, and
+    the reaction is awaited rather than fired off so a fast run cannot try to
+    remove it before it exists.
+    """
+
+    async def _add_reaction() -> None:
+        if source_message_id:
+            await add_typing_reaction(app_id, app_secret, source_message_id)
+
+    async def _send_card() -> str | None:
+        response = await feishu_service.send_card_message(
+            app_id,
+            app_secret,
+            reply_target,
+            build_progress_card(agent_name=agent_name),
+            receive_id_type=receive_id_type,
+            stage="feishu_progress_card_init",
+        )
+        return (response.get("data") or {}).get("message_id")
+
+    # Nothing here may fail the message: a refused ack would 500 the webhook and
+    # make Feishu redeliver the very message we already accepted.
+    _reaction, card = await asyncio.gather(
+        _add_reaction(), _send_card(), return_exceptions=True
+    )
+    if isinstance(card, BaseException):
+        logger.warning(f"[Feishu] Progress card init failed: {card}")
+        return None
+    return card
+
+
+def _spawn_feishu_progress_updater(
+    *,
+    app_id: str,
+    app_secret: str,
+    agent_name: str,
+    card_message_id: str,
+    intake: ChatRuntimeIntake,
+) -> None:
+    """Follow a committed run in the background and patch its progress card."""
+
+    async def _patch(card: dict) -> None:
+        await feishu_service.patch_message(
+            app_id,
+            app_secret,
+            card_message_id,
+            json.dumps(card, ensure_ascii=False),
+            stage="feishu_progress_card_patch",
+        )
+
+    task = asyncio.create_task(
+        run_progress_card_updater(
+            agent_name=agent_name,
+            handle=intake.handle,
+            event_source=DatabaseRuntimeEventStream(session_factory=_async_session),
+            patcher=_patch,
+            after=intake.stream_after,
+        ),
+        name=f"feishu-progress-card-{intake.handle.run_id}",
+    )
+    _progress_tasks.add(task)
+    task.add_done_callback(_progress_tasks.discard)
 
 
 def _normalize_history_messages(history: list[dict] | None) -> list[dict]:
@@ -110,30 +158,6 @@ def _get_llm_timeout(model) -> float:
     if timeout and float(timeout) > 0:
         return float(timeout)
     return _LLM_TIMEOUT_SECONDS_DEFAULT
-
-
-class _SerialPatchQueue:
-    """Serialize patch requests for one Feishu message to prevent out-of-order overwrite."""
-
-    def __init__(self):
-        self._tail: asyncio.Task | None = None
-
-    def enqueue(self, job_factory: Callable[[], Awaitable[None]]) -> None:
-        prev = self._tail
-
-        async def _runner():
-            if prev:
-                try:
-                    await prev
-                except Exception as e:
-                    logger.warning(f"[Feishu] Previous patch job failed before next job: {e}")
-            await job_factory()
-
-        self._tail = asyncio.create_task(_runner())
-
-    async def drain(self) -> None:
-        if self._tail:
-            await self._tail
 
 
 def _build_llm_history_from_chat_messages(history_messages: list) -> list[dict]:
@@ -508,6 +532,7 @@ async def _accept_feishu_runtime_message(
     content: str,
     display_content: str,
     external_event_id: str | None,
+    source_message_id: str | None = None,
 ) -> ChatRuntimeIntake:
     """Persist a Feishu message and Runtime Command before acknowledging it."""
     from app.models.agent import Agent
@@ -551,6 +576,31 @@ async def _accept_feishu_runtime_message(
         executable_content = (
             f"[发送者: {sender_name}] {content}" if sender_name else content
         )
+        app_id = config.app_id or ""
+        app_secret = config.app_secret or ""
+        agent_name = (getattr(agent, "name", None) or "AI 回复").strip() or "AI 回复"
+        reply_target = chat_id if is_group else sender_open_id
+        receive_id_type = "chat_id" if is_group else "open_id"
+        progress_message_id = await _start_feishu_progress(
+            app_id=app_id,
+            app_secret=app_secret,
+            agent_name=agent_name,
+            reply_target=reply_target,
+            receive_id_type=receive_id_type,
+            source_message_id=source_message_id,
+        )
+        delivery_target: dict = {
+            "receive_id": reply_target,
+            "receive_id_type": receive_id_type,
+            "agent_name": agent_name,
+        }
+        if progress_message_id:
+            delivery_target["progress_message_id"] = progress_message_id
+        if source_message_id:
+            # The reaction_id is deliberately not carried across: the delivery
+            # resolves this app's 敲键盘 reactions by emoji type instead, which
+            # also clears any duplicate left by a redelivered webhook.
+            delivery_target["source_message_id"] = source_message_id
         intake = await enqueue_channel_chat_runtime(
             db,
             agent=agent,
@@ -560,10 +610,7 @@ async def _accept_feishu_runtime_message(
             content=executable_content,
             display_content=display_content,
             source_channel="feishu",
-            channel_delivery_target={
-                "receive_id": chat_id if is_group else sender_open_id,
-                "receive_id_type": "chat_id" if is_group else "open_id",
-            },
+            channel_delivery_target=delivery_target,
             message_id=channel_message_id(
                 agent_id,
                 "feishu",
@@ -571,6 +618,17 @@ async def _accept_feishu_runtime_message(
             ),
         )
         await db.commit()
+
+    # Spawn only after the commit: the tracker polls agent_run_events and needs
+    # the run to be visible in its own read session.
+    if progress_message_id:
+        _spawn_feishu_progress_updater(
+            app_id=app_id,
+            app_secret=app_secret,
+            agent_name=agent_name,
+            card_message_id=progress_message_id,
+            intake=intake,
+        )
     return intake
 
 
@@ -749,6 +807,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict):
                 content=user_text,
                 display_content=display_content,
                 external_event_id=event_id or message.get("message_id"),
+                source_message_id=message.get("message_id"),
             )
         except Exception as exc:
             from app.services.channel_user_service import ChannelUserResolutionError
@@ -867,6 +926,7 @@ async def _accept_feishu_file_runtime(
             content=executable_content,
             display_content=display_content,
             external_event_id=external_event_id or provider_message_id,
+            source_message_id=provider_message_id or None,
         )
     except Exception as exc:
         from app.services.channel_user_service import ChannelUserResolutionError
