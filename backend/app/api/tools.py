@@ -451,7 +451,9 @@ async def get_agent_tools(
     db: AsyncSession = Depends(get_db),
 ):
     """Get tools for a specific agent with their enabled status."""
-    from app.services.agent_tools import _agent_has_feishu
+    # Imported lazily: agent_tools pulls in the whole tool execution layer, and
+    # importing it at module scope would invert the API/service import order.
+    from app.services.agent_tools import _HIDDEN_FROM_LLM_TOOL_NAMES, _agent_has_feishu
     has_feishu = await _agent_has_feishu(agent_id)
 
     # Determine if this is a system agent (e.g. OKR Agent).
@@ -468,7 +470,10 @@ async def get_agent_tools(
         .where(Tool.enabled.is_(True), _agent_visible_tool_clause(agent_obj.tenant_id, assignments))
         .order_by(Tool.category, Tool.name)
     )
-    all_tools = all_tools_r.scalars().all()
+    # Drop tools the LLM can never receive. Listing them would render a switch
+    # that writes an AgentTool record and still changes nothing, because
+    # get_agent_tools_for_llm filters the same names out of every workset.
+    all_tools = [t for t in all_tools_r.scalars().all() if t.name not in _HIDDEN_FROM_LLM_TOOL_NAMES]
 
     # ── Backfill: create missing AgentTool records ──────────────────────
     # For agents that already have at least one AgentTool assignment (i.e.

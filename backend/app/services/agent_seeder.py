@@ -19,6 +19,7 @@ from app.models.user import User
 from app.models.okr import OKRSettings
 from app.config import get_settings
 from app.services.agent_manager import agent_manager
+from app.services.builtin_tool_definitions import OKR_AGENT_TOOL_NAMES
 from app.services.storage import get_storage_backend, store_agent_bytes
 
 settings = get_settings()
@@ -557,26 +558,9 @@ async def seed_okr_agent():
         for tool in default_tools:
             db.add(AgentTool(agent_id=okr_agent.id, tool_id=tool.id, enabled=True))
 
-        # OKR-specific tools: assigned explicitly (is_default=False)
-        # All 10 OKR tools: 3 global read/self-report + 3 scheduler + 4 management (OKR Agent exclusive)
-        okr_tool_names = [
-            # Global tools (all agents can use these)
-            "get_okr",
-            "get_my_okr",
-            "update_kr_progress",
-            "update_kr_content",
-            # Scheduler tools (OKR Agent uses these during heartbeat)
-            "collect_okr_progress",
-            "generate_okr_report",
-            "get_okr_settings",
-            # Management tools (OKR Agent exclusive — create/modify objectives for any member)
-            "create_objective",
-            "create_key_result",
-            "update_objective",
-            "update_any_kr_progress",
-            "upsert_member_daily_report",
-        ]
-        for tool_name in okr_tool_names:
+        # OKR-specific tools: assigned explicitly because most are is_default=False.
+        # The roster is derived from the canonical tool catalog, not hand-listed.
+        for tool_name in OKR_AGENT_TOOL_NAMES:
             tool_result = await db.execute(select(Tool).where(Tool.name == tool_name))
             tool = tool_result.scalar_one_or_none()
             if tool:
@@ -850,14 +834,8 @@ async def patch_existing_okr_agent() -> None:
             if not agents:
                 return  # OKR Agent not seeded yet, nothing to patch
 
-        all_okr_tools = [
-            "get_okr", "get_my_okr", "update_kr_progress", "update_kr_content",
-            "collect_okr_progress", "generate_okr_report", "get_okr_settings",
-            "create_objective", "create_key_result", "update_objective", "update_any_kr_progress",
-            "upsert_member_daily_report",
-            "generate_monthly_okr_report",
-        ]
-        tools_by_name = await _ensure_okr_tool_rows_exist(all_okr_tools)
+        all_okr_tools = OKR_AGENT_TOOL_NAMES
+        tools_by_name = await _ensure_okr_tool_rows_exist(list(all_okr_tools))
 
         changed_any = False
         for agent in agents:
@@ -1015,13 +993,8 @@ async def seed_okr_agent_for_tenant(tenant_id: uuid.UUID, creator_id: uuid.UUID)
             db.add(AgentTool(agent_id=okr_agent.id, tool_id=tool.id, enabled=True))
 
         # ── Assign OKR-specific tools ──
-        okr_tool_names = [
-            "get_okr", "get_my_okr", "update_kr_progress", "update_kr_content",
-            "collect_okr_progress", "generate_okr_report", "get_okr_settings",
-            "create_objective", "create_key_result", "update_objective",
-            "update_any_kr_progress", "upsert_member_daily_report", "generate_monthly_okr_report",
-        ]
-        tools_by_name = await _ensure_okr_tool_rows_exist(okr_tool_names)
+        okr_tool_names = OKR_AGENT_TOOL_NAMES
+        tools_by_name = await _ensure_okr_tool_rows_exist(list(okr_tool_names))
         for tool_name in okr_tool_names:
             tool = tools_by_name.get(tool_name)
             if tool:

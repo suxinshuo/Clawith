@@ -30,6 +30,7 @@ from app.services.feishu_reaction import add_typing_reaction
 from app.services.feishu_service import feishu_service
 from app.services.llm.model_resolution import active_agent_model_candidates
 from app.services.storage import store_agent_upload
+from app.services.tool_assignment import assign_feishu_tool_records
 
 router = APIRouter(tags=["feishu"])
 
@@ -368,7 +369,9 @@ async def configure_channel(
         existing.extra_config = data.extra_config or {}
         existing.is_configured = True
         await db.flush()
-        
+        await assign_feishu_tool_records(db, agent_id)
+        await db.flush()
+
         # Start/Stop WS client in background
         from app.services.feishu_ws import feishu_ws_manager
         import asyncio
@@ -391,6 +394,8 @@ async def configure_channel(
         is_configured=True,
     )
     db.add(config)
+    await db.flush()
+    await assign_feishu_tool_records(db, agent_id)
     await db.flush()
 
     # Start WS client in background

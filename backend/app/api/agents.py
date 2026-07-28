@@ -24,6 +24,7 @@ from app.models.chat_session import ChatSession
 from app.models.user import User
 from app.schemas.schemas import AgentCreate, AgentOut, AgentUpdate
 from app.services.storage import get_storage_backend
+from app.services.tool_assignment import assign_default_tool_records
 from app.services.access_relationships import ensure_access_granted_platform_relationships
 from app.services.quota_guard import check_agent_creation_quota, QuotaExceeded
 from app.models.tenant import Tenant
@@ -543,6 +544,12 @@ async def create_agent(
 
     await db.flush()
     await ensure_access_granted_platform_relationships(db, agent, created_by_user_id=current_user.id)
+
+    # Materialize the default tool decisions. Without these rows the agent would
+    # rely on the implicit is_default fallback, and the tool panel's backfill
+    # (guarded by `if assignments:`) would never run for it.
+    await assign_default_tool_records(db, agent.id)
+    await db.flush()
 
     # For OpenClaw agents: skip file system and container setup, generate API key
     if agent.agent_type == "openclaw":
