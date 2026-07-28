@@ -36,7 +36,10 @@ class UserExternalCredential(Base):
 
     # OAuth lifecycle
     token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    scopes: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Written verbatim from the provider's grant response, which no request schema
+    # bounds — a Feishu app holding a large permission set returns several
+    # thousand characters — so this must stay uncapped.
+    scopes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # External system user identity
     external_user_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
@@ -76,7 +79,8 @@ class TenantExternalCredential(Base):
 
     # OAuth lifecycle
     token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    scopes: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Uncapped for the same reason as UserExternalCredential.scopes.
+    scopes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Metadata
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
@@ -114,7 +118,8 @@ class AgentExternalCredential(Base):
 
     # OAuth lifecycle
     token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    scopes: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Uncapped for the same reason as UserExternalCredential.scopes.
+    scopes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # External system user identity
     external_user_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
