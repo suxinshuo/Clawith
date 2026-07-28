@@ -2,6 +2,7 @@
 
 import json
 from collections import OrderedDict
+from contextvars import ContextVar
 
 import httpx
 from loguru import logger
@@ -26,6 +27,68 @@ FEISHU_TOKEN_URL = "https://open.feishu.cn/open-apis/authen/v1/oidc/access_token
 FEISHU_USER_INFO_URL = "https://open.feishu.cn/open-apis/authen/v1/user_info"
 FEISHU_APP_TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"
 FEISHU_SEND_MSG_URL = "https://open.feishu.cn/open-apis/im/v1/messages"
+
+# --- Per-user identity fallback -----------------------------------------------
+# Agent tools call Feishu with the app identity.  When the app was never granted
+# a scope, Feishu answers with a permission error and the caller may retry under
+# the end user's own Feishu identity.  These context variables carry that retry
+# across the whole call tree without threading a token through every signature:
+#
+#   feishu_user_token_override  set for the duration of a user-identity retry, so
+#                               every token lookup returns the user token
+#   feishu_permission_denied    set when Feishu rejected a call for lack of
+#                               permission, so the caller knows a retry is worth
+#                               attempting
+#   feishu_calls_succeeded      how many calls already took effect, so a
+#                               partially applied write is never replayed under
+#                               a second identity
+feishu_user_token_override: ContextVar[str | None] = ContextVar(
+    "feishu_user_token_override",
+    default=None,
+)
+feishu_permission_denied: ContextVar[bool] = ContextVar(
+    "feishu_permission_denied",
+    default=False,
+)
+feishu_calls_succeeded: ContextVar[int] = ContextVar(
+    "feishu_calls_succeeded",
+    default=0,
+)
+
+# Feishu reports a missing scope or a forbidden resource through several codes;
+# 99991672 is the one returned for "app has not been granted this scope".
+FEISHU_PERMISSION_CODES = frozenset(
+    {
+        99991672,
+        99991663,
+        99991661,
+        99991668,
+        10006,
+        91403,
+        1063001,
+        1063004,
+        230002,
+    }
+)
+FEISHU_PERMISSION_KEYWORDS = (
+    "permission",
+    "forbidden",
+    "no access",
+    "access denied",
+    "scope",
+    "403",
+)
+
+
+def feishu_denies_permission(code: object, msg: object) -> bool:
+    """Return whether a Feishu code/msg pair means "identity lacks access"."""
+    if code is None or code == 0:
+        return False
+    if code in FEISHU_PERMISSION_CODES:
+        return True
+    msg_lower = str(msg or "").lower()
+    return any(keyword in msg_lower for keyword in FEISHU_PERMISSION_KEYWORDS)
+
 
 class FeishuAPIError(RuntimeError):
     """Structured Feishu API error that preserves provider-returned details."""
@@ -330,6 +393,8 @@ class FeishuService:
                 f"[Feishu] {stage} HTTP failure "
                 f"(http_status={resp.status_code}, message_id={message_id}, body={str(data)[:300]})"
             )
+            if resp.status_code == 403 or feishu_denies_permission(code, msg):
+                feishu_permission_denied.set(True)
             raise FeishuAPIError(
                 stage=stage,
                 http_status=resp.status_code,
@@ -345,6 +410,8 @@ class FeishuService:
                 f"[Feishu] {stage} business failure "
                 f"(message_id={message_id}, code={code}, msg={msg})"
             )
+            if feishu_denies_permission(code, msg):
+                feishu_permission_denied.set(True)
             raise FeishuAPIError(
                 stage=stage,
                 http_status=resp.status_code,
@@ -355,6 +422,9 @@ class FeishuService:
                 message_id=message_id,
             )
 
+        # Counted so a caller retrying under another identity can tell whether
+        # any call in the current operation already took effect.
+        feishu_calls_succeeded.set(feishu_calls_succeeded.get() + 1)
         return data
 
     async def get_app_access_token(self) -> str:
@@ -362,7 +432,15 @@ class FeishuService:
         return await self.get_tenant_access_token(self.app_id, self.app_secret)
         
     async def get_tenant_access_token(self, app_id: str = None, app_secret: str = None) -> str:
-        """Get or refresh the app-level access token (tenant_access_token)."""
+        """Get or refresh the app-level access token (tenant_access_token).
+
+        While a user-identity retry is in flight the override wins, so every call
+        in that retry — including nested lookups — acts as the authorizing user.
+        """
+        override = feishu_user_token_override.get()
+        if override:
+            return override
+
         target_app_id = app_id or self.app_id
         target_app_secret = app_secret or self.app_secret
         

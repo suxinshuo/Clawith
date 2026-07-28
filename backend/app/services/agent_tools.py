@@ -55,6 +55,15 @@ from app.models.task import Task
 from app.models.user import User as UserModel
 from app.services.channel_session import find_or_create_channel_session
 from app.services.channel_user_service import get_platform_user_by_org_member
+from app.services.feishu_service import (
+    FEISHU_PERMISSION_CODES,
+    FEISHU_PERMISSION_KEYWORDS,
+    FeishuAPIError,
+    feishu_calls_succeeded,
+    feishu_denies_permission,
+    feishu_permission_denied,
+    feishu_user_token_override,
+)
 from app.services.document_conversion import (
     convert_html_to_pdf as convert_html_file_to_pdf,
     convert_html_to_pptx as convert_html_file_to_pptx,
@@ -2784,39 +2793,16 @@ async def execute_builtin_tool_outcome(
             agent_id,
             arguments,
         )
-    if tool_name == "feishu_wiki_list":
-        return await _feishu_wiki_list_outcome(agent_id, arguments)
-    if tool_name == "feishu_doc_search":
-        return await _feishu_doc_search_outcome(agent_id, arguments)
-    if tool_name == "feishu_doc_read":
-        return await _feishu_doc_read_outcome(agent_id, arguments)
-    if tool_name == "feishu_doc_create":
-        return await _feishu_doc_create_outcome(agent_id, arguments)
-    if tool_name == "feishu_doc_append":
-        return await _feishu_doc_append_outcome(agent_id, arguments)
-    if tool_name == "feishu_drive_share":
-        return await _feishu_drive_share_outcome(agent_id, arguments)
-    if tool_name == "feishu_drive_delete":
-        return await _feishu_drive_delete_outcome(agent_id, arguments)
+    if tool_name in _FEISHU_USER_FALLBACK_SCOPES:
+        return await _feishu_outcome_with_user_fallback(
+            tool_name,
+            agent_id,
+            user_id,
+            session_id,
+            lambda: _feishu_scoped_outcome(tool_name, agent_id, arguments),
+        )
     if tool_name == "feishu_user_search":
         return await _feishu_user_search_outcome(agent_id, arguments)
-    if tool_name == "feishu_approval_query":
-        return await _feishu_approval_query_outcome(agent_id, arguments)
-    if tool_name == "feishu_approval_get":
-        return await _feishu_approval_get_outcome(agent_id, arguments)
-    if tool_name in {
-        "bitable_list_tables",
-        "bitable_list_fields",
-        "bitable_query_records",
-    }:
-        return await _bitable_read_outcome(tool_name, agent_id, arguments)
-    if tool_name in {
-        "bitable_create_app",
-        "bitable_create_record",
-        "bitable_update_record",
-        "bitable_delete_record",
-    }:
-        return await _bitable_write_outcome(tool_name, agent_id, arguments)
     if tool_name == "get_activity_log":
         return await _get_activity_log_outcome(agent_id, arguments)
 
@@ -5596,6 +5582,42 @@ async def _build_feishu_oauth_url(agent_id: uuid.UUID, user_id: uuid.UUID, scope
     return f"https://open.feishu.cn/open-apis/authen/v1/authorize?{urlencode(params)}"
 
 
+async def _feishu_session_channel(session_id: str) -> tuple[str, str | None]:
+    """Resolve the delivery channel for a session, defaulting to the web UI."""
+    if not session_id:
+        return "web", None
+    try:
+        _sid = uuid.UUID(session_id)
+        async with async_session() as db:
+            r = await db.execute(
+                select(ChatSession.source_channel, ChatSession.external_conv_id)
+                .where(ChatSession.id == _sid)
+            )
+            row = r.one_or_none()
+            if row:
+                return row[0], row[1]
+    except Exception as e:
+        logger.warning(
+            f"[FeishuUserFallback] Failed to look up session channel for session_id={session_id}: {e}"
+        )
+    return "web", None
+
+
+async def _resolve_feishu_user_credential(
+    user_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    provider: str,
+):
+    """Return the stored per-user Feishu credential, or None when absent."""
+    from app.services.credential_resolver import CredentialResolver
+
+    try:
+        return await CredentialResolver().resolve(user_id, tenant_id, provider)
+    except Exception as e:
+        logger.warning(f"[FeishuUserFallback] Failed to resolve user credential: {e}")
+        return None
+
+
 async def _feishu_with_user_fallback(
     agent_id: uuid.UUID,
     user_id: uuid.UUID,
@@ -5628,14 +5650,16 @@ async def _feishu_with_user_fallback(
     logger.info(f"[FeishuUserFallback] Permission error with app token for agent={agent_id}, trying user credential")
 
     # Step 3: Resolve user credential
-    from app.services.credential_resolver import CredentialResolver
-    resolver = CredentialResolver()
     tenant_id_str = await _get_agent_tenant_id(agent_id)
     if not tenant_id_str:
         return f"Failed: Could not resolve tenant for agent {agent_id}"
 
     provider = f"feishu:{agent_id}"
-    credential = await resolver.resolve(user_id, uuid.UUID(tenant_id_str), provider)
+    credential = await _resolve_feishu_user_credential(
+        user_id,
+        uuid.UUID(tenant_id_str),
+        provider,
+    )
 
     if credential:
         # Step 3a: Retry with user token
@@ -5660,23 +5684,7 @@ async def _feishu_with_user_fallback(
         return "❌ 无法生成飞书授权链接，请检查 Agent 的飞书配置。"
 
     # Determine channel and send directly
-    _external_conv_id = None
-    _source_channel = "web"
-    if session_id:
-        try:
-            from app.models.chat_session import ChatSession
-            _sid = uuid.UUID(session_id)
-            async with async_session() as db:
-                r = await db.execute(
-                    select(ChatSession.source_channel, ChatSession.external_conv_id)
-                    .where(ChatSession.id == _sid)
-                )
-                row = r.one_or_none()
-                if row:
-                    _source_channel = row[0]
-                    _external_conv_id = row[1]
-        except Exception as e:
-            logger.warning(f"[FeishuUserFallback] Failed to lookup session channel for session_id={session_id}: {e}")
+    _source_channel, _external_conv_id = await _feishu_session_channel(session_id)
 
     if _source_channel == "feishu" and _external_conv_id:
         sent = await _send_feishu_credential_card(
@@ -5693,6 +5701,225 @@ async def _feishu_with_user_fallback(
     return (
         "⏳ 需要用户飞书授权才能执行此操作。已向用户发送授权请求，请等待用户完成授权后重试。\n"
         f"授权链接: {oauth_url}"
+    )
+
+
+# OAuth scopes requested when a typed Feishu tool has to fall back to the end
+# user's identity.  Membership in this mapping is also what marks a tool as
+# eligible for that fallback.
+_FEISHU_USER_FALLBACK_SCOPES: dict[str, list[str]] = {
+    "feishu_doc_read": ["docx:document:readonly"],
+    "feishu_doc_search": ["docs:doc:readonly"],
+    "feishu_wiki_list": ["wiki:wiki:readonly"],
+    "feishu_doc_create": ["docx:document", "wiki:wiki"],
+    "feishu_doc_append": ["docx:document"],
+    "feishu_drive_share": ["drive:drive"],
+    "feishu_drive_delete": ["drive:drive"],
+    "feishu_approval_query": ["approval:instance:readonly"],
+    "feishu_approval_get": ["approval:instance:readonly"],
+    "bitable_list_tables": ["bitable:app:readonly"],
+    "bitable_list_fields": ["bitable:app:readonly"],
+    "bitable_query_records": ["bitable:app:readonly"],
+    "bitable_create_app": ["bitable:app"],
+    "bitable_create_record": ["bitable:app"],
+    "bitable_update_record": ["bitable:app"],
+    "bitable_delete_record": ["bitable:app"],
+}
+
+
+async def _deliver_feishu_oauth_link(
+    agent_id: uuid.UUID,
+    user_id: uuid.UUID,
+    session_id: str,
+    scopes: list[str],
+) -> ToolExecutionOutcome | None:
+    """Put a Feishu OAuth link in front of the user who triggered the tool.
+
+    Returns the outcome to report, or None when no link could be produced (the
+    caller then keeps the provider's own rejection).
+    """
+    oauth_url = await _build_feishu_oauth_url(agent_id, user_id, scopes)
+    if not oauth_url:
+        return None
+
+    source_channel, external_conv_id = await _feishu_session_channel(session_id)
+    if source_channel == "feishu" and external_conv_id:
+        sent = await _send_feishu_credential_card(
+            agent_id=agent_id,
+            external_conv_id=external_conv_id,
+            provider="feishu",
+            link=oauth_url,
+            user_id=user_id,
+        )
+        if sent:
+            return _typed_failure(
+                "⏳ 需要用户飞书授权才能执行此操作。已向用户发送授权请求，"
+                "请等待用户完成授权后重试。",
+                "feishu_authorization_required",
+            )
+
+    # Web sessions, or a card that could not be delivered: carry the link in the
+    # outcome so the Agent can relay it.
+    return _typed_failure(
+        "⏳ 需要用户飞书授权才能执行此操作。请引导用户点击以下链接完成授权后重试：\n"
+        f"{oauth_url}",
+        "feishu_authorization_required",
+    )
+
+
+async def _feishu_scoped_outcome(
+    tool_name: str,
+    agent_id: uuid.UUID,
+    arguments: dict,
+) -> ToolExecutionOutcome:
+    """Dispatch one scope-guarded Feishu tool under the current identity.
+
+    Called once with the app identity and, when a scope is missing, replayed with
+    the user identity, so it must stay free of side effects of its own.
+    """
+    if tool_name == "feishu_wiki_list":
+        return await _feishu_wiki_list_outcome(agent_id, arguments)
+    if tool_name == "feishu_doc_search":
+        return await _feishu_doc_search_outcome(agent_id, arguments)
+    if tool_name == "feishu_doc_read":
+        return await _feishu_doc_read_outcome(agent_id, arguments)
+    if tool_name == "feishu_doc_create":
+        return await _feishu_doc_create_outcome(agent_id, arguments)
+    if tool_name == "feishu_doc_append":
+        return await _feishu_doc_append_outcome(agent_id, arguments)
+    if tool_name == "feishu_drive_share":
+        return await _feishu_drive_share_outcome(agent_id, arguments)
+    if tool_name == "feishu_drive_delete":
+        return await _feishu_drive_delete_outcome(agent_id, arguments)
+    if tool_name == "feishu_approval_query":
+        return await _feishu_approval_query_outcome(agent_id, arguments)
+    if tool_name == "feishu_approval_get":
+        return await _feishu_approval_get_outcome(agent_id, arguments)
+    if tool_name in {
+        "bitable_list_tables",
+        "bitable_list_fields",
+        "bitable_query_records",
+    }:
+        return await _bitable_read_outcome(tool_name, agent_id, arguments)
+    if tool_name in {
+        "bitable_create_app",
+        "bitable_create_record",
+        "bitable_update_record",
+        "bitable_delete_record",
+    }:
+        return await _bitable_write_outcome(tool_name, agent_id, arguments)
+    return _typed_failure(
+        f"{tool_name} has no scope-guarded Feishu handler.",
+        "unknown_tool",
+    )
+
+
+async def _feishu_outcome_with_user_fallback(
+    tool_name: str,
+    agent_id: uuid.UUID,
+    user_id: uuid.UUID,
+    session_id: str,
+    run,
+) -> ToolExecutionOutcome:
+    """Run a typed Feishu tool as the app, then recover from a missing scope.
+
+    The Durable Runtime executes Feishu tools with the app identity, so a scope
+    the app was never granted used to dead-end at ``feishu_<op>_rejected``.  This
+    restores the pre-Runtime recovery: retry under the end user's Feishu identity
+    when their credential is already stored, otherwise deliver an OAuth link to
+    that user and tell the model to wait instead of reporting a bare rejection.
+    """
+    denied_token = feishu_permission_denied.set(False)
+    succeeded_token = feishu_calls_succeeded.set(0)
+    try:
+        outcome = await run()
+        if (
+            not isinstance(outcome, ToolExecutionOutcome)
+            or outcome.status == "succeeded"
+            or not feishu_permission_denied.get()
+        ):
+            return outcome
+        # A partially applied operation keeps its own receipts: replaying the
+        # whole handler under a second identity could duplicate the calls that
+        # already took effect.
+        if feishu_calls_succeeded.get() > 0:
+            logger.info(
+                f"[FeishuUserFallback] {tool_name} was denied after "
+                f"{feishu_calls_succeeded.get()} applied call(s); not replaying"
+            )
+            return outcome
+        return await _feishu_recover_denied_outcome(
+            tool_name,
+            agent_id,
+            user_id,
+            session_id,
+            run,
+            outcome,
+        )
+    finally:
+        feishu_permission_denied.reset(denied_token)
+        feishu_calls_succeeded.reset(succeeded_token)
+
+
+async def _feishu_recover_denied_outcome(
+    tool_name: str,
+    agent_id: uuid.UUID,
+    user_id: uuid.UUID,
+    session_id: str,
+    run,
+    denied_outcome: ToolExecutionOutcome,
+) -> ToolExecutionOutcome:
+    """Retry a scope-denied Feishu tool as the user, or ask them to authorize."""
+    tenant_id_str = await _get_agent_tenant_id(agent_id)
+    if not tenant_id_str:
+        return denied_outcome
+
+    scopes = _FEISHU_USER_FALLBACK_SCOPES.get(tool_name, [])
+    credential = await _resolve_feishu_user_credential(
+        user_id,
+        uuid.UUID(tenant_id_str),
+        f"feishu:{agent_id}",
+    )
+    access_token = getattr(credential, "access_token", None) if credential else None
+
+    if not access_token:
+        logger.info(
+            f"[FeishuUserFallback] {tool_name} needs user authorization for "
+            f"scopes={scopes}"
+        )
+        return await _deliver_feishu_oauth_link(
+            agent_id,
+            user_id,
+            session_id,
+            scopes,
+        ) or denied_outcome
+
+    logger.info(f"[FeishuUserFallback] Retrying {tool_name} with the user identity")
+    override_token = feishu_user_token_override.set(access_token)
+    retry_denied_token = feishu_permission_denied.set(False)
+    try:
+        retry_outcome = await run()
+        retry_denied = feishu_permission_denied.get()
+    except Exception as exc:
+        # A blown-up retry must not mask the provider's own rejection.
+        logger.warning(
+            f"[FeishuUserFallback] {tool_name} user-identity retry failed: {exc}"
+        )
+        return denied_outcome
+    finally:
+        feishu_user_token_override.reset(override_token)
+        feishu_permission_denied.reset(retry_denied_token)
+
+    if not isinstance(retry_outcome, ToolExecutionOutcome):
+        return denied_outcome
+    if retry_outcome.status == "succeeded" or not retry_denied:
+        return retry_outcome
+
+    # The user's own identity is also refused, so this is a resource grant
+    # problem rather than a missing app scope.
+    return _typed_failure(
+        "❌ 您的飞书账号也没有该资源的访问权限。请联系资源所有者授予您访问权限后重试。",
+        "feishu_user_permission_denied",
     )
 
 
@@ -12875,18 +13102,16 @@ async def _resolve_bitable_app_token(agent_id: uuid.UUID, parsed_url: dict) -> s
                 return node_info["obj_token"]
     return None
 
-# Feishu permission error codes — shared between _check_feishu_err and _feishu_with_user_fallback
-_FEISHU_PERM_CODES = {99991663, 10006, 99991661, 99991668, 91403, 1063001, 1063004, 230002}
-_FEISHU_PERM_KEYWORDS = ("permission", "forbidden", "no access", "access denied", "403")
+# Feishu permission error codes live in feishu_service so the service layer can
+# flag a denial at the point it parses the provider response.  These aliases keep
+# the historical names used by _check_feishu_err and _feishu_with_user_fallback.
+_FEISHU_PERM_CODES = FEISHU_PERMISSION_CODES
+_FEISHU_PERM_KEYWORDS = FEISHU_PERMISSION_KEYWORDS
 
 
 def _is_feishu_permission_error(resp: dict) -> bool:
     """Check if a Feishu API response indicates a permission error."""
-    code = resp.get("code")
-    if code is None or code == 0:
-        return False
-    msg_lower = str(resp.get("msg", "")).lower()
-    return code in _FEISHU_PERM_CODES or any(kw in msg_lower for kw in _FEISHU_PERM_KEYWORDS)
+    return feishu_denies_permission(resp.get("code"), resp.get("msg", ""))
 
 
 def _check_feishu_err(resp: dict) -> str | None:
@@ -13021,6 +13246,7 @@ def _bitable_read_data(
             retryable=True,
         )
     if response.get("code") != 0:
+        _note_feishu_permission_response(response)
         return None, _typed_failure(
             f"Feishu rejected {operation}.",
             f"feishu_{operation}_rejected",
@@ -13049,6 +13275,7 @@ def _bitable_write_data(
             result_ref=result_ref,
         )
     if response.get("code") != 0:
+        _note_feishu_permission_response(response)
         return None, _typed_failure(
             f"Feishu rejected {operation}.",
             f"feishu_{operation}_rejected",
@@ -13931,6 +14158,27 @@ def _feishu_error_is_known_rejection(exc: Exception) -> bool:
     )
 
 
+def _feishu_exception_denies_permission(exc: Exception) -> bool:
+    """Return whether Feishu refused a call because the identity lacks access."""
+    if not isinstance(exc, FeishuAPIError):
+        return False
+    if exc.http_status == 403:
+        return True
+    return feishu_denies_permission(exc.code, exc.msg)
+
+
+def _note_feishu_permission_denial(exc: Exception) -> None:
+    """Record a scope denial so a user-identity retry can be considered."""
+    if _feishu_exception_denies_permission(exc):
+        feishu_permission_denied.set(True)
+
+
+def _note_feishu_permission_response(response: Mapping) -> None:
+    """Record a scope denial carried by a non-raising provider envelope."""
+    if feishu_denies_permission(response.get("code"), response.get("msg", "")):
+        feishu_permission_denied.set(True)
+
+
 def _feishu_read_exception_outcome(
     operation: str,
     exc: Exception,
@@ -13939,6 +14187,7 @@ def _feishu_read_exception_outcome(
     import httpx
     from app.services.feishu_service import FeishuAPIError
 
+    _note_feishu_permission_denial(exc)
     if _feishu_error_is_known_rejection(exc):
         return _typed_failure(
             f"Feishu rejected {operation}.",
@@ -13964,6 +14213,7 @@ def _feishu_write_exception_outcome(
     metadata: dict | None = None,
 ) -> ToolExecutionOutcome:
     """Classify a Feishu write after its business request was dispatched."""
+    _note_feishu_permission_denial(exc)
     if _feishu_error_is_known_rejection(exc):
         return _typed_failure(
             f"Feishu rejected {operation}.",
@@ -14198,6 +14448,7 @@ def _feishu_doc_read_data(
             retryable=True,
         )
     if response.get("code") != 0:
+        _note_feishu_permission_response(response)
         return None, _typed_failure(
             f"Feishu rejected {operation}.",
             f"feishu_{operation}_rejected",
@@ -14226,6 +14477,7 @@ def _feishu_doc_write_data(
             result_ref=result_ref,
         )
     if response.get("code") != 0:
+        _note_feishu_permission_response(response)
         return None, _typed_failure(
             f"Feishu rejected {operation}.",
             f"feishu_{operation}_rejected",
