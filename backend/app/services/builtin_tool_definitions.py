@@ -4134,6 +4134,16 @@ GROUP_BUILTIN_TOOL_DEFINITIONS = tuple(
 BUILTIN_TOOL_NAMES = frozenset(
     definition["name"] for definition in BUILTIN_TOOL_DEFINITIONS
 )
+# The OKR Agent owns every okr-category tool: the shared read/self-report ones
+# plus the scheduler and management tools other agents must not receive. Derived
+# from the catalog so a newly added okr tool cannot be forgotten by a seeder.
+OKR_AGENT_TOOL_NAMES = tuple(
+    sorted(
+        str(definition["name"])
+        for definition in BUILTIN_TOOL_DEFINITIONS
+        if definition["category"] == "okr"
+    )
+)
 _BUILTIN_TOOL_BY_NAME = {
     definition["name"]: definition for definition in BUILTIN_TOOL_DEFINITIONS
 }
@@ -4304,6 +4314,7 @@ __all__ = [
     "BUILTIN_TOOL_SEEDS",
     "GROUP_BUILTIN_TOOL_DEFINITIONS",
     "GROUP_RUNTIME_TOOL_DEFINITIONS",
+    "OKR_AGENT_TOOL_NAMES",
     "builtin_model_definition",
     "builtin_model_definitions",
     "builtin_cross_space_action",
