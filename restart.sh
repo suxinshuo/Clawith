@@ -67,6 +67,25 @@ load_env() {
         EXTERNAL_DB=true
     fi
     export EXTERNAL_DB
+
+    : "${REDIS_URL:=redis://localhost:6379/0}"
+    export REDIS_URL
+
+    # Parse host and port from REDIS_URL, tolerating an optional credential part
+    # Format: redis://[[user]:[pass]@]host:port/db
+    _redis_hostpart=$(echo "$REDIS_URL" | sed 's|^[a-z][a-z+]*://||' | sed 's|.*@||' | sed 's|/.*||' | sed 's|?.*||')
+    REDIS_HOST="${_redis_hostpart%%:*}"
+    REDIS_PORT="${_redis_hostpart##*:}"
+    [ "$REDIS_PORT" = "$REDIS_HOST" ] && REDIS_PORT="6379"
+    REDIS_PORT=${REDIS_PORT:-6379}
+    export REDIS_HOST REDIS_PORT
+
+    # Detect external (non-localhost) Redis
+    EXTERNAL_REDIS=false
+    if [ "$REDIS_HOST" != "localhost" ] && [ "$REDIS_HOST" != "127.0.0.1" ]; then
+        EXTERNAL_REDIS=true
+    fi
+    export EXTERNAL_REDIS
 }
 
 # ═══════════════════════════════════════════════════════
@@ -266,6 +285,89 @@ start_postgres() {
 }
 
 # ═══════════════════════════════════════════════════════
+# 添加 Redis 到 PATH
+# ═══════════════════════════════════════════════════════
+add_redis_path() {
+    for dir in /opt/homebrew/opt/redis/bin /opt/homebrew/bin \
+               /usr/local/opt/redis/bin /usr/local/bin; do
+        if [ -x "$dir/redis-cli" ] && ! command -v redis-cli &>/dev/null; then
+            export PATH="$dir:$PATH"
+        fi
+    done
+}
+
+# PONG means Redis is serving; without redis-cli fall back to a plain TCP probe.
+redis_ping() {
+    if command -v redis-cli &>/dev/null; then
+        if [ "$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" ping 2>/dev/null)" = "PONG" ]; then
+            return 0
+        fi
+        return 1
+    fi
+    if (echo >/dev/tcp/"$REDIS_HOST"/"$REDIS_PORT") 2>/dev/null; then
+        return 0
+    fi
+    if command -v nc &>/dev/null && nc -z "$REDIS_HOST" "$REDIS_PORT" 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+# ═══════════════════════════════════════════════════════
+# 启动 Redis
+# ═══════════════════════════════════════════════════════
+# Web chat needs Redis: the WebSocket presence registry lives there, so a
+# missing Redis leaves sessions stuck at "connecting" instead of failing loudly.
+start_redis() {
+    # Skip local Redis management when using an external instance
+    if [ "$EXTERNAL_REDIS" = true ]; then
+        echo -e "${GREEN}🧠 Using external Redis at ${REDIS_HOST}:${REDIS_PORT} — skipping local Redis startup${NC}"
+        return 0
+    fi
+
+    add_redis_path
+
+    if redis_ping; then
+        echo -e "${GREEN}🧠 Redis already running (port $REDIS_PORT)${NC}"
+        return 0
+    fi
+
+    echo -e "${YELLOW}🧠 Starting Redis (port $REDIS_PORT)...${NC}"
+
+    STARTED=false
+
+    if command -v brew &>/dev/null; then
+        brew services start redis 2>/dev/null || true
+        STARTED=true
+    fi
+
+    if [ "$STARTED" = false ] && command -v systemctl &>/dev/null; then
+        sudo systemctl start redis 2>/dev/null || sudo systemctl start redis-server 2>/dev/null || true
+        STARTED=true
+    fi
+
+    # 无服务管理器时直接起一个后台 redis-server
+    if [ "$STARTED" = false ] && command -v redis-server &>/dev/null; then
+        redis-server --port "$REDIS_PORT" --daemonize yes \
+            --logfile "$LOG_DIR/redis.log" >/dev/null 2>&1 || true
+        STARTED=true
+    fi
+
+    for i in $(seq 1 10); do
+        if redis_ping; then
+            echo -e "  ${GREEN}✅ Redis ready (${i}s)${NC}"
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo -e "  ${RED}❌ Redis failed to start on port $REDIS_PORT${NC}"
+    echo -e "  ${RED}   Web chat will hang at \"connecting\" without it.${NC}"
+    echo -e "  ${RED}   Install it first — macOS: brew install redis · Debian/Ubuntu: apt install redis-server${NC}"
+    exit 1
+}
+
+# ═══════════════════════════════════════════════════════
 # 启动后端
 # ═══════════════════════════════════════════════════════
 start_backend() {
@@ -287,6 +389,7 @@ start_backend() {
             AGENT_RUNTIME_V2_SOURCE_TYPES= \
             PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}" \
             DATABASE_URL="$DATABASE_URL" \
+            REDIS_URL="$REDIS_URL" \
             .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port $BACKEND_PORT
     wait_for_port $BACKEND_PORT "Backend" 10
 }
@@ -397,6 +500,7 @@ main() {
     # 启动本地模式，如果docker 不存在
     cleanup
     start_postgres
+    start_redis
     start_backend
     start_frontend
     verify_proxy
