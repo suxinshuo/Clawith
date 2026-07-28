@@ -47,11 +47,21 @@ class TestAgentToolsScopeParser:
 # ── _build_credential_guidance ──
 
 class DummyResult:
-    def __init__(self, value=None):
+    """Stub for both result shapes _build_credential_guidance consumes.
+
+    The chat-session lookup selects three columns and calls one_or_none(); the
+    OAuth-config lookup selects an entity and calls scalar_one_or_none().
+    """
+
+    def __init__(self, value=None, row=None):
         self._value = value
+        self._row = row
 
     def scalar_one_or_none(self):
         return self._value
+
+    def one_or_none(self):
+        return self._row
 
 
 class FakeDB:
@@ -93,7 +103,9 @@ async def test_guidance_channel_user_gets_link():
     """Channel users (feishu) get a one-time token link."""
     from app.services.agent_tools import _build_credential_guidance
 
-    db = FakeDB(responses=[DummyResult("feishu"), DummyResult(None)])
+    # (source_channel, agent_id, external_conv_id) — no agent/conversation, so
+    # the direct Feishu card send is skipped and the link comes back as tool text.
+    db = FakeDB(responses=[DummyResult(row=("feishu", None, None)), DummyResult(None)])
     user_id = uuid.uuid4()
     tenant_id = uuid.uuid4()
 
@@ -107,10 +119,12 @@ async def test_guidance_channel_user_gets_link():
                 provider="erp",
                 user_id=user_id,
                 tenant_id=tenant_id,
-                session_id="feishu_session_456",
+                # ChatSession.id is a UUID column, so the lookup only reaches the
+                # database when the session id actually parses as one.
+                session_id=str(uuid.uuid4()),
             )
 
-    assert "credentials/connect?token=" in msg
+    assert "https://clawith.example.com/credentials/connect?token=" in msg
     assert "10 分钟" in msg
 
 

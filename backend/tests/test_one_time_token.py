@@ -69,15 +69,18 @@ async def test_oauth_mode_token():
 @pytest.mark.asyncio
 async def test_consume_jti_first_returns_true():
     """_consume_jti returns True on first consumption."""
-    result = await _consume_jti("test-jti-1")
+    # A fresh jti per run: _consume_jti prefers Redis, where a fixed id would
+    # survive for its 660s TTL and make the second run of this test fail.
+    result = await _consume_jti(f"test-jti-{uuid.uuid4()}")
     assert result is True
 
 
 @pytest.mark.asyncio
 async def test_consume_jti_replay_returns_false():
     """_consume_jti returns False on replay."""
-    await _consume_jti("test-jti-2")
-    result = await _consume_jti("test-jti-2")
+    jti = f"test-jti-{uuid.uuid4()}"
+    await _consume_jti(jti)
+    result = await _consume_jti(jti)
     assert result is False
 
 
