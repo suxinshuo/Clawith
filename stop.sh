@@ -32,6 +32,15 @@ load_env() {
     PG_PORT="${_db_hostpart##*:}"
     [ "$PG_PORT" = "$PG_HOST" ] && PG_PORT="5432"
     PG_PORT=${PG_PORT:-5432}
+
+    : "${REDIS_URL:=redis://localhost:6379/0}"
+
+    # Tolerate an optional credential part: redis://[[user]:[pass]@]host:port/db
+    _redis_hostpart=$(echo "$REDIS_URL" | sed 's|^[a-z][a-z+]*://||' | sed 's|.*@||' | sed 's|/.*||' | sed 's|?.*||')
+    REDIS_HOST="${_redis_hostpart%%:*}"
+    REDIS_PORT="${_redis_hostpart##*:}"
+    [ "$REDIS_PORT" = "$REDIS_HOST" ] && REDIS_PORT="6379"
+    REDIS_PORT=${REDIS_PORT:-6379}
 }
 
 # ═══════════════════════════════════════════════════════
@@ -43,6 +52,18 @@ add_pg_path() {
     fi
     for dir in /www/server/pgsql/bin /usr/local/pgsql/bin; do
         if [ -x "$dir/pg_isready" ] && ! command -v pg_isready &>/dev/null; then
+            export PATH="$dir:$PATH"
+        fi
+    done
+}
+
+# ═══════════════════════════════════════════════════════
+# 添加 Redis 到 PATH
+# ═══════════════════════════════════════════════════════
+add_redis_path() {
+    for dir in /opt/homebrew/opt/redis/bin /opt/homebrew/bin \
+               /usr/local/opt/redis/bin /usr/local/bin; do
+        if [ -x "$dir/redis-cli" ] && ! command -v redis-cli &>/dev/null; then
             export PATH="$dir:$PATH"
         fi
     done
@@ -110,12 +131,48 @@ stop_postgres() {
 }
 
 # ═══════════════════════════════════════════════════════
+# 停止 Redis
+# ═══════════════════════════════════════════════════════
+stop_redis() {
+    if [ "$REDIS_HOST" != "localhost" ] && [ "$REDIS_HOST" != "127.0.0.1" ]; then
+        echo -e "${YELLOW}Using external Redis (${REDIS_HOST}) — skipping Redis stop.${NC}"
+        return 0
+    fi
+
+    add_redis_path
+
+    echo -e "${YELLOW}Stopping Redis (port $REDIS_PORT)...${NC}"
+
+    # macOS brew — only when the service is actually managed by brew, otherwise
+    # fall through to the shutdown path used for a standalone redis-server.
+    if command -v brew &>/dev/null && brew services list 2>/dev/null | grep -qE '^redis[[:space:]]+started'; then
+        brew services stop redis 2>/dev/null || true
+        echo -e "${GREEN}Redis stopped (brew).${NC}" && return 0
+    fi
+
+    # Linux systemd
+    if command -v systemctl &>/dev/null; then
+        sudo systemctl stop redis 2>/dev/null || sudo systemctl stop redis-server 2>/dev/null || true
+        echo -e "${GREEN}Redis stopped (systemctl).${NC}" && return 0
+    fi
+
+    # 由 restart.sh 直接拉起的后台 redis-server
+    if command -v redis-cli &>/dev/null; then
+        redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" shutdown nosave 2>/dev/null || true
+        echo -e "${GREEN}Redis stopped (redis-cli shutdown).${NC}" && return 0
+    fi
+
+    echo -e "${RED}Could not determine how to stop Redis — please stop it manually.${NC}"
+}
+
+# ═══════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════
 main() {
     load_env
     stop_services
     stop_postgres
+    stop_redis
     echo ""
     echo -e "${GREEN}All Clawith services stopped.${NC}"
 }
