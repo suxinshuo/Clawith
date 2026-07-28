@@ -415,7 +415,7 @@ export default function Login() {
                                 ? '欢迎，创始人。'
                                 : `${t('login.hero.welcome')} ${t('login.hero.founder')}.`}
                         </h1>
-                        <p className="atlas-body atlas-body--muted">{t('login.hero.description')}</p>
+                        <p className="atlas-body atlas-body--muted atlas-body--multiline">{t('login.hero.description')}</p>
                     </div>
                 </div>
 

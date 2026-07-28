@@ -83,9 +83,28 @@
 }
 
 .atlas-brand-wordmark {
-  display: block;
   color: var(--ink);
   flex: none;
+}
+
+/* DataAgent wordmark — robot mark + name. `gap` and the name's `font-size`
+   are set inline so the whole lockup scales with the `height` prop. */
+.atlas-wordmark {
+  display: inline-flex;
+  align-items: center;
+}
+
+.atlas-wordmark-mark {
+  display: block;
+  flex: none;
+}
+
+.atlas-wordmark-name {
+  font-family: var(--font-serif);
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
 }
 
 .atlas-step {
@@ -249,6 +268,8 @@
   margin: 0;
 }
 .atlas-body--muted { color: var(--muted); }
+/* Honours the newlines authored in translation strings */
+.atlas-body--multiline { white-space: pre-line; }
 
 .atlas-mono {
   font-family: var(--font-mono);

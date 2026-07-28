@@ -3,7 +3,7 @@ export { default as HairlineInput } from './HairlineInput';
 export { default as MonoLabel } from './MonoLabel';
 export { default as Plate } from './Plate';
 export { default as AtlasFrame } from './AtlasFrame';
-export { default as ClawithWordmark } from './ClawithWordmark';
+export { default as DataAgentWordmark } from './DataAgentWordmark';
 export { default as StarField } from './StarField';
 export { default as CompassPlate } from './CompassPlate';
 export { default as CosmographyPlate } from './CosmographyPlate';

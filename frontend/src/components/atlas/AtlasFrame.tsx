@@ -1,9 +1,9 @@
 import type { ReactNode } from 'react';
 import { IconWorld } from '@tabler/icons-react';
-import ClawithWordmark from './ClawithWordmark';
+import DataAgentWordmark from './DataAgentWordmark';
 
 interface Props {
-    /** When provided, replaces the Clawith brand with a "← BACK" pill button */
+    /** When provided, replaces the DataAgent brand with a "← BACK" pill button */
     onBack?: () => void;
     /** When provided, renders the language toggle in the top-right corner */
     onToggleLang?: () => void;
@@ -23,7 +23,7 @@ export default function AtlasFrame({ onBack, onToggleLang, className, children }
                             <span aria-hidden="true">←</span> Back
                         </button>
                     ) : (
-                        <ClawithWordmark height={28} className="atlas-brand-wordmark" />
+                        <DataAgentWordmark height={28} className="atlas-brand-wordmark" />
                     )}
                 </div>
                 {onToggleLang && (
