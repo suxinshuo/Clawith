@@ -5763,7 +5763,6 @@ async def _build_credential_guidance(provider: str, user_id, tenant_id, session_
     if source_channel in ("feishu", "dingtalk", "wecom"):
         try:
             from app.services.one_time_token import generate_one_time_token
-            from app.config import get_settings
             settings = get_settings()
 
             token = generate_one_time_token(

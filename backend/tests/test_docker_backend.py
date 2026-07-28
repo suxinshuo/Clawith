@@ -15,11 +15,17 @@ def backend():
 
 
 class TestResolveHostPath:
-    """Tests for _resolve_host_path translation logic."""
+    """Tests for _resolve_host_path translation logic.
+
+    get_settings is patched on app.config rather than on docker_backend:
+    _resolve_host_path imports it inside the function body because a
+    module-level import would close the app.config -> sandbox.config ->
+    sandbox.registry -> local.docker_backend cycle.
+    """
 
     def test_no_host_dir_returns_work_dir_unchanged(self, backend):
         """When AGENT_DATA_HOST_DIR is empty, return work_dir as-is."""
-        with patch("app.services.sandbox.local.docker_backend.get_settings") as mock:
+        with patch("app.config.get_settings") as mock:
             settings = MagicMock()
             settings.AGENT_DATA_HOST_DIR = ""
             settings.AGENT_DATA_DIR = "/data/agents"
@@ -30,7 +36,7 @@ class TestResolveHostPath:
 
     def test_host_dir_replaces_prefix(self, backend):
         """When AGENT_DATA_HOST_DIR is set, replace the AGENT_DATA_DIR prefix."""
-        with patch("app.services.sandbox.local.docker_backend.get_settings") as mock:
+        with patch("app.config.get_settings") as mock:
             settings = MagicMock()
             settings.AGENT_DATA_HOST_DIR = "/home/user/Clawith/backend/agent_data"
             settings.AGENT_DATA_DIR = "/data/agents"
@@ -41,7 +47,7 @@ class TestResolveHostPath:
 
     def test_non_matching_prefix_returns_unchanged(self, backend):
         """When work_dir doesn't start with AGENT_DATA_DIR, return as-is."""
-        with patch("app.services.sandbox.local.docker_backend.get_settings") as mock:
+        with patch("app.config.get_settings") as mock:
             settings = MagicMock()
             settings.AGENT_DATA_HOST_DIR = "/home/user/agent_data"
             settings.AGENT_DATA_DIR = "/data/agents"
@@ -52,7 +58,7 @@ class TestResolveHostPath:
 
     def test_similar_prefix_not_falsely_matched(self, backend):
         """Paths like /data/agents_backup should NOT be matched."""
-        with patch("app.services.sandbox.local.docker_backend.get_settings") as mock:
+        with patch("app.config.get_settings") as mock:
             settings = MagicMock()
             settings.AGENT_DATA_HOST_DIR = "/host/agents"
             settings.AGENT_DATA_DIR = "/data/agents"

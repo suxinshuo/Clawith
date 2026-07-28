@@ -179,9 +179,15 @@ class ChannelUserService:
             channel_type, external_user_id, extra_info
         )
 
+        # An open_id is per-application, so it cannot identify the person across
+        # apps: registering from it would mint a second User for someone who
+        # already exists. Both Feishu intake paths catch this and reply with
+        # _USER_RESOLUTION_ERROR_TIP instead of attributing the message wrongly.
         if channel_type == "feishu" and not org_member and not (unionid or external_id):
-            logger.warning("Feishu sender could not be resolved to a stable user_id/union_id; "
-                           "refusing to lazily create a duplicate user from open_id only.")
+            raise ChannelUserResolutionError(
+                "Feishu sender could not be resolved to a stable user_id/union_id; "
+                "refusing to lazily create a duplicate user from open_id only."
+            )
 
         # Step 5: Create new User (lazy registration)
         user = await self._create_channel_user(

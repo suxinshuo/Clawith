@@ -157,7 +157,6 @@ def test_format_no_window_header_and_truncation():
 
 @pytest.mark.asyncio
 async def test_execute_tool_get_activity_log_wires_query_and_format():
-    from pathlib import Path
     from unittest.mock import AsyncMock
     from app.services import agent_tools
 
@@ -168,8 +167,13 @@ async def test_execute_tool_get_activity_log_wires_query_and_format():
                         created_at=datetime(2026, 6, 3, 9, 14, tzinfo=timezone.utc)),
     ]
 
-    with patch.object(agent_tools, "ensure_workspace", AsyncMock(return_value=Path("/tmp/ws"))), \
-         patch.object(agent_tools, "_get_agent_tenant_id", AsyncMock(return_value=None)), \
+    # No workspace patch: execute_tool resolves the per-agent path with
+    # _agent_workspace_root, which only joins strings and never touches disk.
+    # get_agent_timezone must be stubbed too — it opens a real session, and the
+    # shared engine outlives the per-test event loop, so a live call here fails
+    # with "attached to a different loop" once an earlier test has used it.
+    with patch.object(agent_tools, "_get_agent_tenant_id", AsyncMock(return_value=None)), \
+         patch("app.services.timezone_utils.get_agent_timezone", AsyncMock(return_value="UTC")), \
          patch("app.services.activity_logger.query_activities", AsyncMock(return_value=rows)) as q:
         result = await agent_tools.execute_tool(
             "get_activity_log",
@@ -190,12 +194,11 @@ async def test_execute_tool_get_activity_log_wires_query_and_format():
 
 @pytest.mark.asyncio
 async def test_execute_tool_get_activity_log_empty():
-    from pathlib import Path
     from unittest.mock import AsyncMock
     from app.services import agent_tools
 
-    with patch.object(agent_tools, "ensure_workspace", AsyncMock(return_value=Path("/tmp/ws"))), \
-         patch.object(agent_tools, "_get_agent_tenant_id", AsyncMock(return_value=None)), \
+    with patch.object(agent_tools, "_get_agent_tenant_id", AsyncMock(return_value=None)), \
+         patch("app.services.timezone_utils.get_agent_timezone", AsyncMock(return_value="UTC")), \
          patch("app.services.activity_logger.query_activities", AsyncMock(return_value=[])):
         result = await agent_tools.execute_tool(
             "get_activity_log", {}, uuid.uuid4(), uuid.uuid4()

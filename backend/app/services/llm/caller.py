@@ -34,7 +34,7 @@ from app.services.llm.model_resolution import active_agent_model_candidates
 
 from .client import LLMError
 from .failover import classify_error, FailoverErrorType
-from .finish import FINISH_TOOL_DEFINITION, find_finish_call
+from .finish import FINISH_PROTOCOL_REMINDER, FINISH_TOOL_DEFINITION, find_finish_call
 from .utils import LLMMessage, create_llm_client, get_max_tokens, get_model_api_key
 
 if TYPE_CHECKING:
@@ -594,13 +594,6 @@ async def call_llm(
             "Native tool calling is not working for this request."
         )
 
-    # Cross-round buffer of assistant text emitted alongside tool_calls. Used as
-    # a fallback return value when the final (no-tool_calls) round comes back
-    # with empty content — common with Anthropic end_turn after tool use on
-    # long histories, where the prefatory text in the prior round is the only
-    # thing the user actually saw via streaming.
-    _assistant_text_parts: list[str] = []
-
     # Tool-calling loop
     for round_i in range(_max_tool_rounds):
         # Dynamic tool-call limit warning
@@ -675,39 +668,16 @@ async def call_llm(
         _accumulated_usage.add(_usage_this_round)
         _unsaved_usage.add(_usage_this_round)
 
-        # A round with no tool calls is treated as the final answer — the model
-        # either signalled completion via finish() in an earlier round, or
-        # returned plain assistant text that we accept as the reply (fork
-        # tolerance) instead of forcing an explicit finish() protocol loop.
+        # Plain assistant text is not a stop condition. The model must finish
+        # explicitly via finish(content=...).
         if not response.tool_calls:
-            final_text = response.content or ""
-            if not final_text and _assistant_text_parts:
-                # Recover prefatory text the user saw via streaming in earlier
-                # rounds, instead of returning a "[LLM returned empty content]"
-                # sentinel that downstream renderers will use to overwrite the
-                # already-visible content.
-                final_text = "".join(_assistant_text_parts)
-            if not response.content:
-                logger.warning(
-                    "[LLM] empty final content "
-                    "agent_id={} provider={} model={} round={} finish_reason={} "
-                    "content_is_none={} reasoning_chars={} history_msgs={} "
-                    "prior_assistant_chars={} usage={}",
-                    agent_id,
-                    getattr(model, "provider", "?"),
-                    getattr(model, "model", "?"),
-                    round_i,
-                    getattr(response, "finish_reason", None),
-                    response.content is None,
-                    len(getattr(response, "reasoning_content", "") or ""),
-                    len(api_messages),
-                    len(final_text),
-                    getattr(response, "usage", None),
-                )
-            if agent_id and _unsaved_usage.total_tokens > 0:
-                await record_token_usage(agent_id, _unsaved_usage)
-            await client.close()
-            return final_text
+            if response.content:
+                api_messages.append(LLMMessage(role="assistant", content=response.content))
+            if _protocol_repairs.get("missing_finish", 0) >= 1:
+                return await _protocol_violation("missing_finish")
+            api_messages.append(LLMMessage(role="user", content=FINISH_PROTOCOL_REMINDER))
+            _protocol_repairs["missing_finish"] = 1
+            continue
 
         # Execute tool calls
         logger.info(f"[LLM] Round {round_i+1}: {len(response.tool_calls)} tool call(s)")
@@ -735,11 +705,6 @@ async def call_llm(
             _protocol_repairs[repair_counter_key] = repair_count + 1
             api_messages.append(LLMMessage(role="user", content=retry_instruction))
             continue
-
-        # Buffer prefatory text so we can fall back to it if a later round
-        # ends with empty content (Anthropic end_turn after tool use).
-        if response.content:
-            _assistant_text_parts.append(response.content)
 
         finish_call = find_finish_call(sanitized_tool_calls)
         if finish_call:
