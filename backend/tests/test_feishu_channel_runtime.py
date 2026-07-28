@@ -193,6 +193,94 @@ async def test_feishu_event_commits_runtime_before_provider_ack(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_feishu_event_normalizes_null_sender_user_id(monkeypatch) -> None:
+    """Feishu sends sender_id.user_id as null when the app lacks that field permission."""
+    agent_id = uuid.uuid4()
+    event_id = f"feishu-event-{uuid.uuid4()}"
+    config = SimpleNamespace(app_id="app-1", app_secret="secret-1")
+    intake = _runtime(uuid.uuid4())
+    config_db = _Session(config)
+    calls: dict[str, object] = {}
+
+    async def accept(**kwargs):
+        calls["accept"] = kwargs
+        return intake
+
+    feishu._processed_events.discard(event_id)
+    monkeypatch.setattr(feishu, "_async_session", _SessionFactory(config_db))
+    monkeypatch.setattr(feishu, "_accept_feishu_runtime_message", accept)
+
+    result = await feishu.process_feishu_event(
+        agent_id,
+        {
+            "header": {
+                "event_id": event_id,
+                "event_type": "im.message.receive_v1",
+            },
+            "event": {
+                "sender": {
+                    "sender_id": {
+                        "open_id": "ou_74c3b8759a2c38e13fc661390279585f",
+                        "user_id": None,
+                    }
+                },
+                "message": {
+                    "message_id": "om_message_1",
+                    "message_type": "text",
+                    "chat_type": "p2p",
+                    "chat_id": "oc_chat_1",
+                    "content": '{"text":"Hello Feishu"}',
+                },
+            },
+        },
+    )
+
+    assert result == {"code": 0, "msg": "ok"}
+    accepted = calls["accept"]
+    assert isinstance(accepted, dict)
+    assert accepted["sender_user_id"] == ""
+    assert accepted["sender_open_id"] == "ou_74c3b8759a2c38e13fc661390279585f"
+
+
+@pytest.mark.asyncio
+async def test_resolve_feishu_sender_tolerates_missing_user_id(monkeypatch) -> None:
+    """A null user_id must fall back to open_id instead of raising AttributeError."""
+    import httpx
+
+    from app.services.channel_user_service import channel_user_service
+
+    agent = SimpleNamespace(id=uuid.uuid4(), tenant_id=uuid.uuid4())
+    user = SimpleNamespace(id=uuid.uuid4(), display_name="Alice")
+    captured: dict[str, object] = {}
+
+    class _OfflineClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise RuntimeError("contact API unreachable")
+
+    async def resolve(**kwargs):
+        captured.update(kwargs)
+        return user
+
+    monkeypatch.setattr(httpx, "AsyncClient", _OfflineClient)
+    monkeypatch.setattr(channel_user_service, "resolve_channel_user", resolve)
+
+    resolved = await feishu._resolve_feishu_sender(
+        None,  # type: ignore[arg-type]
+        agent=agent,
+        config=SimpleNamespace(app_id="app-1", app_secret="secret-1"),  # type: ignore[arg-type]
+        sender_open_id="ou_74c3b8759a2c38e13fc661390279585f",
+        sender_user_id=None,
+    )
+
+    assert resolved is user
+    assert captured["external_user_id"] is None
+    extra_info = captured["extra_info"]
+    assert isinstance(extra_info, dict)
+    assert extra_info["open_id"] == "ou_74c3b8759a2c38e13fc661390279585f"
+    assert extra_info["external_id"] is None
+
+
+@pytest.mark.asyncio
 async def test_feishu_image_keeps_base64_out_of_display_content(monkeypatch) -> None:
     agent_id = uuid.uuid4()
     config = SimpleNamespace(app_id="app-1", app_secret="secret-1")
