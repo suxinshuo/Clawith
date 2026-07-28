@@ -435,14 +435,16 @@ async def _resolve_feishu_sender(
     agent,
     config: ChannelConfig,
     sender_open_id: str,
-    sender_user_id: str,
+    sender_user_id: str | None,
 ):
     """Resolve the stable tenant user while preserving Feishu identifiers."""
     import httpx
 
     from app.services.channel_user_service import channel_user_service
 
-    resolved_user_id = sender_user_id.strip()
+    # user_id is absent whenever the app lacks that field permission; open_id alone
+    # is enough for channel_user_service to resolve or lazily create the member.
+    resolved_user_id = (sender_user_id or "").strip()
     extra_info: dict = {
         "open_id": sender_open_id,
         "external_id": resolved_user_id or None,
@@ -500,7 +502,7 @@ async def _accept_feishu_runtime_message(
     agent_id: uuid.UUID,
     config: ChannelConfig,
     sender_open_id: str,
-    sender_user_id: str,
+    sender_user_id: str | None,
     chat_type: str,
     chat_id: str,
     content: str,
@@ -624,8 +626,10 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict):
     if event_type == "im.message.receive_v1":
         message = event.get("message", {})
         sender = event.get("sender", {}).get("sender_id", {})
-        sender_open_id = sender.get("open_id", "")
-        sender_user_id_from_event = sender.get("user_id", "")  # tenant-stable ID, available directly in event body
+        # Feishu sends these keys as JSON null when the app lacks the matching field
+        # permission, so `.get(key, "")` still yields None. Normalize before use.
+        sender_open_id = str(sender.get("open_id") or "")
+        sender_user_id_from_event = str(sender.get("user_id") or "")  # tenant-stable ID, absent without permission
         msg_type = message.get("message_type", "text")
         chat_type = message.get("chat_type", "p2p")  # p2p or group
         chat_id = message.get("chat_id", "")
@@ -778,7 +782,7 @@ async def _accept_feishu_file_runtime(
     config: ChannelConfig,
     message: dict,
     sender_open_id: str,
-    sender_user_id: str,
+    sender_user_id: str | None,
     chat_type: str,
     chat_id: str,
     external_event_id: str | None,
