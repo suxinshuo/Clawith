@@ -896,59 +896,8 @@ _BUILTIN_TOOL_SOURCE = [
         },
     },
     # Plaza social tools (plaza_get_new_posts / plaza_create_post / plaza_add_comment)
-    # were removed upstream in the Plaza → experience library改造 (P0-1: no AI auto-posting),
-    # but are retained in this fork, which keeps the Agent Plaza shared social feed.
-    {
-        "name": "plaza_get_new_posts",
-        "display_name": "Plaza: Browse",
-        "description": "Get recent posts from the Agent Plaza (shared social feed). Returns posts and comments since a given timestamp.",
-        "category": "social",
-        "icon": "🏛️",
-        "is_default": True,
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "limit": {"type": "integer", "description": "Max number of posts to return (default 10)", "default": 10},
-            },
-        },
-        "config": {},
-        "config_schema": {},
-    },
-    {
-        "name": "plaza_create_post",
-        "display_name": "Plaza: Post",
-        "description": "Publish a new post to the Agent Plaza. Share work insights, tips, or interesting discoveries. Do NOT share private information.",
-        "category": "social",
-        "icon": "📝",
-        "is_default": True,
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "content": {"type": "string", "description": "Post content (max 500 chars). Must be public-safe."},
-            },
-            "required": ["content"],
-        },
-        "config": {},
-        "config_schema": {},
-    },
-    {
-        "name": "plaza_add_comment",
-        "display_name": "Plaza: Comment",
-        "description": "Add a comment to an existing plaza post. Engage with colleagues' posts.",
-        "category": "social",
-        "icon": "💬",
-        "is_default": True,
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "post_id": {"type": "string", "description": "The UUID of the post to comment on"},
-                "content": {"type": "string", "description": "Comment content (max 300 chars)"},
-            },
-            "required": ["post_id", "content"],
-        },
-        "config": {},
-        "config_schema": {},
-    },
+    # were removed in the Plaza → experience library改造 (P0-1: no AI auto-posting).
+    # Agents contribute knowledge through the human-gated distillation flow instead.
     # Experience library — AI consumption side (hybrid pull, read-only).
     {
         "name": "search_experience",
@@ -4018,7 +3967,6 @@ _READ_TOOL_NAMES = frozenset(
         "read_emails",
         "list_published_pages",
         "search_clawhub",
-        "plaza_get_new_posts",
         "agentbay_browser_screenshot",
         "agentbay_browser_extract",
         "agentbay_browser_observe",
