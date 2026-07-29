@@ -699,7 +699,7 @@ _BUILTIN_TOOL_SOURCE = [
     {
         "name": "read_webpage",
         "display_name": "Read Webpage",
-        "description": "Fetch a public HTTP/HTTPS URL directly and extract readable webpage text. Use this when you already have a specific link and need its page content without relying on an external reader service.",
+        "description": "Fetch a public HTTP/HTTPS URL directly and extract readable webpage text. Use this when you already have a specific link and need its page content without relying on an external reader service. Only works for pages readable without signing in: for a Feishu/Lark link (*.feishu.cn, *.larksuite.com) use the typed Feishu tools instead — feishu_doc_read for a /docx/ or /wiki/ link, bitable_list_tables and bitable_query_records for a /base/ link.",
         "category": "search",
         "icon": "🌐",
         "is_default": True,

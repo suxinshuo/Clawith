@@ -29,6 +29,7 @@ from contextvars import ContextVar
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Any, cast
+from urllib.parse import urlparse
 import re
 
 from loguru import logger
@@ -3940,6 +3941,64 @@ def _extract_page_links(html: str, base_url: str, limit: int = 30) -> list[str]:
     return links
 
 
+_FEISHU_WEB_HOST_SUFFIXES = (".feishu.cn", ".feishu.net", ".larksuite.com", ".larkoffice.com")
+
+# Hosts Feishu redirects an unauthenticated document request to.  Reaching one
+# means we were handed a login page, never the document.
+_FEISHU_AUTH_WALL_HOSTS = frozenset(
+    {
+        "accounts.feishu.cn",
+        "login.feishu.cn",
+        "passport.feishu.cn",
+        "accounts.larksuite.com",
+        "login.larksuite.com",
+        "passport.larksuite.com",
+    }
+)
+
+
+def _is_feishu_web_host(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return any(host.endswith(suffix) for suffix in _FEISHU_WEB_HOST_SUFFIXES)
+
+
+def _feishu_doc_url_guidance(url: str) -> str | None:
+    """Return Agent-facing guidance when `url` is a Feishu document link.
+
+    `read_webpage` has no Feishu identity, so fetching such a link only ever
+    yields the account login page.  Worse, that page answers HTTP 200 and the
+    visible-text fallback salvages enough of it to look like a successful read.
+    Handing the Agent the token plus the typed tool keeps the request on the
+    Feishu OpenAPI, which is the only path that can surface a scope error and
+    trigger the per-user OAuth recovery.
+    """
+    if not _is_feishu_web_host(url):
+        return None
+
+    parsed = _parse_feishu_url(url)
+
+    if app_token := parsed.get("app_token"):
+        table_hint = (
+            f', table_id="{parsed["table_id"]}"' if parsed.get("table_id") else ""
+        )
+        return (
+            "This is a Feishu Bitable link, which read_webpage cannot open — it is "
+            "behind Feishu authentication.\n"
+            f'Use `bitable_list_tables(app_token="{app_token}")` to inspect it, then '
+            f'`bitable_query_records(app_token="{app_token}"{table_hint})` to read rows.'
+        )
+
+    doc_token = parsed.get("document_token") or parsed.get("wiki_token")
+    if doc_token:
+        return (
+            "This is a Feishu document link, which read_webpage cannot open — it is "
+            "behind Feishu authentication.\n"
+            f'Use `feishu_doc_read(document_token="{doc_token}")` instead.'
+        )
+
+    return None
+
+
 async def _read_webpage_outcome(arguments: dict) -> ToolExecutionOutcome:
     """Fetch and extract readable content from a public webpage without a third-party reader API."""
     import httpx
@@ -3949,6 +4008,12 @@ async def _read_webpage_outcome(arguments: dict) -> ToolExecutionOutcome:
     url, validation_error = await _validate_public_http_url(arguments.get("url", ""))
     if validation_error:
         return _typed_failure(validation_error, "webpage_url_invalid")
+
+    if feishu_guidance := _feishu_doc_url_guidance(url or ""):
+        return _typed_failure(
+            feishu_guidance,
+            "feishu_doc_url_requires_typed_tool",
+        )
 
     try:
         max_chars = min(max(int(arguments.get("max_chars", 12000)), 500), 50000)
@@ -4007,6 +4072,19 @@ async def _read_webpage_outcome(arguments: dict) -> ToolExecutionOutcome:
                 "webpage_redirect_target_invalid",
             )
         final_url = validated_final_url
+
+        # A redirect onto the account wall means the body is a login form, not
+        # the requested page.  It answers HTTP 200 and carries enough visible
+        # text to survive extraction, so it has to be rejected explicitly or it
+        # is reported as a successful read of the wrong document.
+        if (urlparse(final_url).hostname or "").lower() in _FEISHU_AUTH_WALL_HOSTS:
+            return _typed_failure(
+                f"{url} redirected to the Feishu sign-in page ({final_url}), so no "
+                "content was returned. read_webpage cannot authenticate against "
+                "Feishu — use the typed Feishu tools (e.g. feishu_doc_read) so the "
+                "request runs under an authorized Feishu identity.",
+                "webpage_authentication_required",
+            )
 
         raw = b"".join(chunks)
         text = raw.decode(encoding, errors="replace").strip()
