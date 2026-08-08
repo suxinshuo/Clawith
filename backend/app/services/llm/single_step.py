@@ -6,15 +6,20 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 import uuid
 
-from app.services.token_tracker import TokenUsage, record_token_usage
+from app.services.token_accounting.ledger import record as record_token_usage_ledger
+from app.services.token_accounting.normalize import (
+    PROTOCOL_OPENAI_COMPATIBLE,
+    TokenUsage,
+    usage_from_response_or_estimate,
+)
+from app.services.token_tracker import record_token_usage
 
 from .caller import (
     _convert_messages_for_vision,
     _get_model_timeout,
     _sanitize_tool_calls_for_context,
-    _usage_from_response_or_estimate,
 )
-from .client import LLMMessage
+from .client import LLMMessage, get_provider_spec
 from .utils import create_llm_client, get_max_tokens, get_model_api_key
 
 if TYPE_CHECKING:
@@ -39,13 +44,27 @@ async def complete_llm_once(
     *,
     tools: list[dict] | None = None,
     agent_id: uuid.UUID | None = None,
+    tenant_id: uuid.UUID | None = None,
+    system_scope: str | None = None,
     supports_vision: bool = False,
 ) -> LLMCompletionStep:
     """Call one pinned model exactly once and normalize its tool proposals.
 
     This function never executes tools, retries, appends repair prompts, or
     advances a lifecycle. Those decisions belong to the durable Graph.
+
+    Usage attribution: pass ``agent_id`` alone for the per-agent chat path,
+    which resolves its own tenant. Callers with no owning Agent (group
+    compaction, planning, connectivity probes) must pass ``tenant_id`` and
+    ``system_scope`` instead, or their usage is dropped rather than recorded.
     """
+    if system_scope is not None and tenant_id is None:
+        # system_scope only makes sense against the ledger's tenant-level
+        # scope, and the legacy branch below has no tenant to check it
+        # against — it would record against agent_id (if any) and silently
+        # discard system_scope. Fail loudly instead, mirroring
+        # ledger.record's own exactly-one-of guard.
+        raise ValueError("complete_llm_once requires tenant_id when system_scope is given")
     api_messages = _convert_messages_for_vision(messages, supports_vision)
     client = create_llm_client(
         provider=model.provider,
@@ -68,9 +87,36 @@ async def complete_llm_once(
     finally:
         await client.close()
 
-    usage = _usage_from_response_or_estimate(response, api_messages)
-    if agent_id is not None and usage.total_tokens > 0:
-        await record_token_usage(agent_id, usage)
+    spec = get_provider_spec(model.provider)
+    # model.provider 不在 registry 里时，create_llm_client 仍会退到
+    # OpenAICompatibleClient（见 app/services/llm/client.py 里 "Default to
+    # OpenAI-compatible for unknown providers" 分支），记账必须假定同一种协议
+    # 形状，否则 usage_from_response_or_estimate 会因未知协议拿不到归一化结果
+    # 而退回字符估算，悄悄丢失 provider 权威的计数。
+    protocol = spec.protocol if spec is not None else PROTOCOL_OPENAI_COMPATIBLE
+    usage = usage_from_response_or_estimate(
+        protocol,
+        response.usage,
+        [{"role": message.role, "content": message.content} for message in api_messages],
+        response.content,
+    )
+    if usage.total_tokens > 0:
+        if tenant_id is not None:
+            # A caller supplied a tenant explicitly (with agent_id and/or
+            # system_scope for attribution) — record straight through the
+            # ledger; it enforces exactly-one-of agent_id/system_scope.
+            await record_token_usage_ledger(
+                usage,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                system_scope=system_scope,
+            )
+        elif agent_id is not None:
+            # Legacy per-agent path: no tenant given, resolve it from the
+            # Agent. Only the direct per-agent chat path still takes this
+            # branch — group compaction, planning, and connectivity probes
+            # now pass tenant_id and land in the branch above instead.
+            await record_token_usage(agent_id, usage)
 
     sanitized_tool_calls: list[dict] | None = []
     retry_instruction = None

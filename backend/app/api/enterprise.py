@@ -31,9 +31,15 @@ from app.schemas.schemas import (
 from app.services.autonomy_service import autonomy_service
 from app.services.enterprise_sync import enterprise_sync_service
 from app.services.llm import get_provider_manifest, get_model_api_key, create_llm_client, LLMMessage
+from app.services.llm.client import get_provider_spec
 from app.services.llm.finish import FINISH_TOOL_DEFINITION, find_finish_call
 from app.services.platform_service import platform_service
 from app.services.sso_service import sso_service
+from app.services.token_accounting.ledger import SYSTEM_SCOPE_MODEL_PROBE, record as record_token_usage_ledger
+from app.services.token_accounting.normalize import (
+    PROTOCOL_OPENAI_COMPATIBLE,
+    usage_from_response_or_estimate,
+)
 from app.services.agent_runtime.runtime_model_settings import (
     resolve_runtime_model_settings,
     runtime_model_setting_key,
@@ -252,34 +258,87 @@ async def test_llm_model(
             api_key=target.api_key,
             base_url=target.base_url,
         )
+        spec = get_provider_spec(target.provider)
+        # provider 不在 registry 里时，create_llm_client 仍会退到
+        # OpenAICompatibleClient（见 app/services/llm/client.py 里
+        # "Default to OpenAI-compatible for unknown providers" 分支），记账
+        # 必须假定同一种协议形状，否则 usage_from_response_or_estimate 内部的
+        # normalize() 对未知协议直接返回 None，退回字符估算而不是 provider
+        # 权威的计数，精度变差。
+        protocol = spec.protocol if spec is not None else PROTOCOL_OPENAI_COMPATIBLE
         connection_start = time.time()
+        connection_messages = [LLMMessage(role="user", content="Say 'ok' and nothing else.")]
         response = await client.complete(
-            messages=[LLMMessage(role="user", content="Say 'ok' and nothing else.")],
+            messages=connection_messages,
             tools=None,
             max_tokens=16,
         )
         connection_latency_ms = int((time.time() - connection_start) * 1000)
+        # 有些 provider/网关不返回 usage 字段本身（不是"零消耗"，是没上报）；
+        # 用 usage_from_response_or_estimate 退回按字符估算，而不是 normalize()
+        # 直接返回 None 把这次探测的消耗悄悄丢掉。
+        connection_usage = usage_from_response_or_estimate(
+            protocol,
+            response.usage,
+            [{"role": m.role, "content": m.content} for m in connection_messages],
+            response.content,
+        )
+        if connection_usage.total_tokens > 0:
+            if current_user.tenant_id is not None:
+                await record_token_usage_ledger(
+                    connection_usage,
+                    tenant_id=current_user.tenant_id,
+                    system_scope=SYSTEM_SCOPE_MODEL_PROBE,
+                )
+            else:
+                # platform_admin 没有 tenant_id，无法归属；跳过落库，但把消耗记
+                # 下来，否则这笔 token 消耗又变得不可见。
+                logger.info(
+                    f"[LLM Probe] Unattributed usage (no tenant): user_id={current_user.id} "
+                    f"total_tokens={connection_usage.total_tokens}"
+                )
         reply = (response.content or "")[:100] if response else ""
         tool_start = time.time()
         tool_error: str | None = None
         try:
+            tool_messages = [
+                LLMMessage(
+                    role="system",
+                    content=(
+                        "This is a native tool-calling protocol test. Call the "
+                        "provided finish tool exactly once and do not answer in text."
+                    ),
+                ),
+                LLMMessage(
+                    role="user",
+                    content="Call finish now with content set to ok.",
+                ),
+            ]
             tool_response = await client.complete(
-                messages=[
-                    LLMMessage(
-                        role="system",
-                        content=(
-                            "This is a native tool-calling protocol test. Call the "
-                            "provided finish tool exactly once and do not answer in text."
-                        ),
-                    ),
-                    LLMMessage(
-                        role="user",
-                        content="Call finish now with content set to ok.",
-                    ),
-                ],
+                messages=tool_messages,
                 tools=[FINISH_TOOL_DEFINITION],
                 max_tokens=128,
             )
+            # 同上：没有 usage 字段不是零消耗，退回字符估算而不是丢弃。
+            tool_usage = usage_from_response_or_estimate(
+                protocol,
+                tool_response.usage,
+                [{"role": m.role, "content": m.content} for m in tool_messages],
+                tool_response.content,
+            )
+            if tool_usage.total_tokens > 0:
+                if current_user.tenant_id is not None:
+                    await record_token_usage_ledger(
+                        tool_usage,
+                        tenant_id=current_user.tenant_id,
+                        system_scope=SYSTEM_SCOPE_MODEL_PROBE,
+                    )
+                else:
+                    # 同上：platform_admin 没有 tenant_id，跳过落库但记日志留痕。
+                    logger.info(
+                        f"[LLM Probe] Unattributed usage (no tenant): user_id={current_user.id} "
+                        f"total_tokens={tool_usage.total_tokens}"
+                    )
             tool_calls = list(tool_response.tool_calls or [])
             finish_call = find_finish_call(tool_calls)
             tool_supported = bool(

@@ -34,6 +34,12 @@ class Tenant(Base):
     default_agent_ttl_hours: Mapped[int] = mapped_column(Integer, default=0)
     default_max_llm_calls_per_day: Mapped[int] = mapped_column(Integer, default=1000)
 
+    # 租户日 token 天花板。NULL = 无限。含系统开销（群聊压缩 / 规划 / 连通性测试）。
+    max_tokens_per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 新建 Agent 时带入的默认 token 限额
+    default_agent_max_tokens_per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    default_agent_max_tokens_per_month: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     # Heartbeat frequency floor (minutes) — agents cannot heartbeat faster than this
     min_heartbeat_interval_minutes: Mapped[int] = mapped_column(Integer, default=240)
 

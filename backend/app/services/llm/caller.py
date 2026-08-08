@@ -23,13 +23,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.database import async_session
 
-from app.services.token_tracker import (
+from app.services.token_accounting.normalize import (
+    PROTOCOL_OPENAI_COMPATIBLE,
     TokenUsage,
-    record_token_usage,
-    extract_token_usage,
-    estimate_token_usage_from_chars,
+    usage_from_response_or_estimate,
 )
-from app.services.llm.multimodal_content import estimate_multimodal_tokens
+from app.services.token_tracker import record_token_usage
 from app.services.llm.model_resolution import active_agent_model_candidates
 
 from .client import LLMError
@@ -191,26 +190,12 @@ def _get_model_timeout(model: "LLMModel") -> float:
 
 
 def _usage_from_response_or_estimate(response, api_messages: list[LLMMessage]) -> TokenUsage:
-    usage = extract_token_usage(response.usage)
-    if usage:
-        return usage
-    input_tokens = estimate_multimodal_tokens(
-        [
-            {
-                "role": message.role,
-                "content": message.content,
-            }
-            for message in api_messages
-        ],
-        chars_per_token=3,
-    )
-    output_usage = estimate_token_usage_from_chars(len(response.content or ""))
-    total_tokens = input_tokens + output_usage.total_tokens
-    return TokenUsage(
-        total_tokens=total_tokens,
-        input_tokens=input_tokens,
-        output_tokens=output_usage.total_tokens,
-        estimated_tokens=total_tokens,
+    """已废弃路径的兼容实现；活路径见 single_step.complete_llm_once。"""
+    return usage_from_response_or_estimate(
+        PROTOCOL_OPENAI_COMPATIBLE,
+        response.usage,
+        [{"role": message.role, "content": message.content} for message in api_messages],
+        response.content,
     )
 
 

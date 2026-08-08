@@ -187,12 +187,12 @@ export default function SettingsTab(props: Props) {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                     <div>
                         <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>{t('agent.settings.dailyLimit')}</label>
-                        <input className="input" type="number" value={settingsForm.max_tokens_per_day} onChange={(e) => setSettingsForm((form) => ({ ...form, max_tokens_per_day: e.target.value }))} placeholder={t('agent.settings.noLimit')} />
+                        <input className="input" type="number" min={1} value={settingsForm.max_tokens_per_day} onChange={(e) => setSettingsForm((form) => ({ ...form, max_tokens_per_day: e.target.value }))} placeholder={t('agent.settings.noLimit')} />
                         <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('agent.settings.today')}: {formatTokens(agent?.tokens_used_today || 0)}</div>
                     </div>
                     <div>
                         <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>{t('agent.settings.monthlyLimit')}</label>
-                        <input className="input" type="number" value={settingsForm.max_tokens_per_month} onChange={(e) => setSettingsForm((form) => ({ ...form, max_tokens_per_month: e.target.value }))} placeholder={t('agent.settings.noLimit')} />
+                        <input className="input" type="number" min={1} value={settingsForm.max_tokens_per_month} onChange={(e) => setSettingsForm((form) => ({ ...form, max_tokens_per_month: e.target.value }))} placeholder={t('agent.settings.noLimit')} />
                         <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('agent.settings.month')}: {formatTokens(agent?.tokens_used_month || 0)}</div>
                     </div>
                 </div>

@@ -33,6 +33,7 @@ from app.services.llm.client import LLMMessage
 from app.services.llm.single_step import LLMCompletionStep, complete_llm_once
 from app.services.llm.model_resolution import load_active_model
 from app.services.llm.utils import get_max_tokens
+from app.services.token_accounting.ledger import SYSTEM_SCOPE_PLANNING
 
 
 _PLANNING_ROLE = "group_planning"
@@ -123,6 +124,8 @@ class PlanningCompletionPort(Protocol):
         *,
         tools: list[dict] | None = None,
         agent_id: uuid.UUID | None = None,
+        tenant_id: uuid.UUID | None = None,
+        system_scope: str | None = None,
         supports_vision: bool = False,
     ) -> LLMCompletionStep: ...
 
@@ -383,7 +386,7 @@ class PlanningModelService:
         self._session_factory = session_factory
         self._completion = completion
 
-    async def _load_model(self, context: RuntimeContext) -> LLMModel:
+    async def _load_model(self, context: RuntimeContext) -> tuple[LLMModel, uuid.UUID]:
         try:
             model_id = uuid.UUID(context.model_id)
             tenant_id = uuid.UUID(context.tenant_id)
@@ -417,7 +420,10 @@ class PlanningModelService:
                 "planning_model_capability_invalid",
                 "Pinned Planning model has no safe input budget",
             ) from exc
-        return model
+        # Return the already-validated tenant_id so callers don't re-parse
+        # context.tenant_id inside a try/except that would otherwise
+        # misclassify a future parse failure as a retryable LLM call failure.
+        return model, tenant_id
 
     async def complete_once(
         self,
@@ -440,7 +446,7 @@ class PlanningModelService:
         if simple_plan is not None:
             return PlanningModelResult(plan=simple_plan)
         try:
-            model = await self._load_model(context)
+            model, tenant_id = await self._load_model(context)
         except PlanningContractError as exc:
             return PlanningModelResult(
                 error_code=exc.code,
@@ -477,6 +483,8 @@ class PlanningModelService:
                 messages,
                 tools=None,
                 agent_id=None,
+                tenant_id=tenant_id,
+                system_scope=SYSTEM_SCOPE_PLANNING,
                 supports_vision=False,
             )
         except Exception:

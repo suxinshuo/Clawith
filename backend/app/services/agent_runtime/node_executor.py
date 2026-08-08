@@ -765,11 +765,14 @@ class DeterministicRuntimeNodeExecutor:
                 _schedule_compact(lifecycle)
         elif result.intent == "error":
             error = result.error or _error("model_call_failed", "The model call failed.")
+            # reason 必须跟随 error code：超限的 run 若被记成 model_call_failed，
+            # 会把排查的人带向错误方向。
+            reason = str(error.get("code") or "model_call_failed")
             lifecycle.update(
                 {
                     "status": "failed",
                     "next_route": "terminal",
-                    "reason": "model_call_failed",
+                    "reason": reason,
                     "error": dict(error),
                 }
             )

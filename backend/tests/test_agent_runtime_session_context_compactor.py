@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import uuid
 from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import replace
-import json
-import uuid
 
 import pytest
 
@@ -26,6 +26,7 @@ from app.services.agent_runtime.session_context_service import (
     SessionContextSnapshot,
 )
 from app.services.llm.single_step import LLMCompletionStep
+from app.services.token_accounting.ledger import SYSTEM_SCOPE_GROUP_COMPACT
 from app.services.token_tracker import TokenUsage
 
 
@@ -186,6 +187,10 @@ async def test_compact_accepts_only_the_commit_tool_and_sets_code_owned_watermar
     assert len(calls) == 1
     assert calls[0][2]["agent_id"] == request.source_agent_id
     assert calls[0][2]["tools"][0]["function"]["name"] == "commit_session_context"
+    # Direct (per-agent) Session Compact must still attribute to the Agent,
+    # not to the tenant-level system-overhead scope.
+    assert calls[0][2]["tenant_id"] == request.tenant_id
+    assert calls[0][2]["system_scope"] is None
 
 
 @pytest.mark.asyncio
@@ -225,6 +230,7 @@ async def test_group_compact_resolves_the_tenant_scoped_context_model(monkeypatc
 
     assert selection.primary is platform_model
     assert selection.usage_agent_id is None
+    assert selection.system_scope == SYSTEM_SCOPE_GROUP_COMPACT
     assert resolver_calls == [(db, settings, request.tenant_id)]
     assert db.calls == 1
 
@@ -264,8 +270,43 @@ async def test_direct_compact_resolves_active_model_candidates() -> None:
 
     assert selection.primary is primary
     assert selection.usage_agent_id == agent.id
+    assert selection.system_scope is None
     assert db.calls == 4
     assert not db.results
+
+
+@pytest.mark.asyncio
+async def test_group_compact_attributes_usage_to_the_tenant_scope_not_an_agent() -> None:
+    """群聊压缩此前把 usage_agent_id=None 直接传给 complete_llm_once,零记录.
+
+    现在必须带上 tenant_id 与 system_scope=group_compact,且绝不能带 agent_id.
+    """
+    request = _request()
+    model = _model(request.tenant_id, name="group-compact")
+    calls = []
+
+    async def complete(model_arg, messages, **kwargs):
+        calls.append((model_arg, messages, kwargs))
+        return _step()
+
+    compactor = LLMSessionContextCompactor(
+        session_factory=_UnusedSessionFactory(),  # type: ignore[arg-type]
+        model_resolver=_resolver(
+            CompactModelSelection(
+                primary=model,
+                usage_agent_id=None,
+                system_scope=SYSTEM_SCOPE_GROUP_COMPACT,
+            )
+        ),
+        completion=complete,
+    )
+
+    await compactor.compact(request)
+
+    assert len(calls) == 1
+    assert calls[0][2]["agent_id"] is None
+    assert calls[0][2]["tenant_id"] == request.tenant_id
+    assert calls[0][2]["system_scope"] == SYSTEM_SCOPE_GROUP_COMPACT
 
 
 @pytest.mark.asyncio
@@ -290,9 +331,7 @@ async def test_oversized_session_is_compacted_in_complete_message_batches() -> N
 
     compactor = LLMSessionContextCompactor(
         session_factory=_UnusedSessionFactory(),  # type: ignore[arg-type]
-        model_resolver=_resolver(
-            CompactModelSelection(primary=model, usage_agent_id=None)
-        ),
+        model_resolver=_resolver(CompactModelSelection(primary=model, usage_agent_id=request.source_agent_id)),
         completion=complete,
     )
 
@@ -346,9 +385,7 @@ async def test_non_retryable_compact_failure_keeps_the_previous_context() -> Non
 
     compactor = LLMSessionContextCompactor(
         session_factory=_UnusedSessionFactory(),  # type: ignore[arg-type]
-        model_resolver=_resolver(
-            CompactModelSelection(primary=primary, usage_agent_id=None)
-        ),
+        model_resolver=_resolver(CompactModelSelection(primary=primary, usage_agent_id=request.source_agent_id)),
         completion=complete,
     )
 
@@ -375,9 +412,7 @@ async def test_free_text_compact_output_is_rejected_without_repair_loop() -> Non
 
     compactor = LLMSessionContextCompactor(
         session_factory=_UnusedSessionFactory(),  # type: ignore[arg-type]
-        model_resolver=_resolver(
-            CompactModelSelection(primary=model, usage_agent_id=None)
-        ),
+        model_resolver=_resolver(CompactModelSelection(primary=model, usage_agent_id=request.source_agent_id)),
         completion=complete,
     )
 

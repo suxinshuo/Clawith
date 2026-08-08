@@ -36,6 +36,10 @@ export interface Agent {
     cache_creation_tokens_today?: number;
     cache_creation_tokens_month?: number;
     cache_creation_tokens_total?: number;
+    // 缓存命中率的分母是输入总量（含缓存），不是 tokens_used_*（那含 output）
+    input_tokens_today?: number;
+    input_tokens_month?: number;
+    input_tokens_total?: number;
     max_tokens_per_day?: number;
     max_tokens_per_month?: number;
     heartbeat_enabled: boolean;

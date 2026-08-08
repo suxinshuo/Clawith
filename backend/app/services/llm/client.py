@@ -16,6 +16,7 @@ from typing import Any, Callable, Coroutine, Literal
 import httpx
 from loguru import logger
 
+from app.services.token_accounting.normalize import merge_streaming_usage
 
 # ============================================================================
 # Errors and request-shape normalization
@@ -1920,7 +1921,7 @@ class AnthropicClient(LLMClient):
                         if msg.get("model"):
                             final_model = msg["model"]
                         if msg.get("usage"):
-                            final_usage = msg["usage"]
+                            final_usage = merge_streaming_usage(final_usage, msg["usage"])
 
                     elif current_event == "content_block_start":
                         block = data.get("content_block", {})
@@ -1981,8 +1982,10 @@ class AnthropicClient(LLMClient):
                         if delta.get("stop_reason"):
                             last_finish_reason = delta["stop_reason"]
                         if data.get("usage"):
-                            # message_delta usage is cumulative
-                            final_usage = data["usage"]
+                            # message_delta 的 usage 按文档是累计值，但部分网关只
+                            # 回 output_tokens。逐字段取 max 才不会丢掉
+                            # message_start 携带的 input 与两个缓存计数。
+                            final_usage = merge_streaming_usage(final_usage, data["usage"])
 
                     elif current_event == "error":
                         error_info = data.get("error", {})

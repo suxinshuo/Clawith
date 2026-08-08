@@ -305,6 +305,17 @@ const formatTokensParts = (n: number): { value: string; unit: string } => {
     return { value: String(n), unit: '' };
 };
 
+/**
+ * Token 限额输入框存的是原始字符串（''、'0'、空白、非数字都可能出现）。0 或更小
+ * 在后端语义里等于"禁止一切"，和"未设上限"（null）完全不同，绝不能把 0 当限额提交，
+ * 所以这里把空字符串、'0'、纯空白、非数字、以及 <= 0 的数值统一收敛成 null，只有
+ * 严格的正整数才会被当作真实限额提交。
+ */
+const toPositiveIntOrNull = (value: string | number): number | null => {
+    const n = Number(String(value).trim());
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+};
+
 /** Convert rich schedule JSON to cron expression */
 function schedToCron(sched: { freq: string; interval: number; time: string; weekdays?: number[] }): string {
     const [h, m] = (sched.time || '09:00').split(':').map(Number);
@@ -3107,8 +3118,8 @@ export default function AgentDetailPage() {
                 fallback_model_id: settingsForm.fallback_model_id || null,
                 context_window_size: settingsForm.context_window_size,
                 max_tool_rounds: settingsForm.max_tool_rounds,
-                max_tokens_per_day: settingsForm.max_tokens_per_day ? Number(settingsForm.max_tokens_per_day) : null,
-                max_tokens_per_month: settingsForm.max_tokens_per_month ? Number(settingsForm.max_tokens_per_month) : null,
+                max_tokens_per_day: toPositiveIntOrNull(settingsForm.max_tokens_per_day),
+                max_tokens_per_month: toPositiveIntOrNull(settingsForm.max_tokens_per_month),
                 max_triggers: settingsForm.max_triggers,
                 min_poll_interval_min: settingsForm.min_poll_interval_min,
                 webhook_rate_limit: settingsForm.webhook_rate_limit,
@@ -4832,12 +4843,23 @@ export default function AgentDetailPage() {
     const todayParts = formatTokensParts(agent.tokens_used_today || 0);
     const monthParts = formatTokensParts(agent.tokens_used_month || 0);
     const totalParts = formatTokensParts((agent as any).tokens_used_total || 0);
-    const cacheReadToday = (agent as any).cache_read_tokens_today || metrics?.tokens?.cache_read_today || 0;
-    const cacheReadMonth = (agent as any).cache_read_tokens_month || metrics?.tokens?.cache_read_month || 0;
-    const cacheReadTotal = (agent as any).cache_read_tokens_total || metrics?.tokens?.cache_read_total || 0;
-    const cacheHitRateToday = (agent.tokens_used_today || 0) > 0 ? Math.round((cacheReadToday / (agent.tokens_used_today || 1)) * 100) : 0;
-    const cacheHitRateMonth = (agent.tokens_used_month || 0) > 0 ? Math.round((cacheReadMonth / (agent.tokens_used_month || 1)) * 100) : 0;
-    const cacheHitRateTotal = ((agent as any).tokens_used_total || 0) > 0 ? Math.round((cacheReadTotal / ((agent as any).tokens_used_total || 1)) * 100) : 0;
+    const cacheReadToday = (agent as any).cache_read_tokens_today ?? metrics?.tokens?.cache_read_today ?? 0;
+    const cacheReadMonth = (agent as any).cache_read_tokens_month ?? metrics?.tokens?.cache_read_month ?? 0;
+    const cacheReadTotal = (agent as any).cache_read_tokens_total ?? metrics?.tokens?.cache_read_total ?? 0;
+    // 缓存命中率的分母必须是输入总量（含缓存读取），不是 tokens_used_*（那含 output，
+    // output 按定义不可能被缓存读取，混进分母会让命中率系统性偏低）。
+    const inputToday = (agent as any).input_tokens_today ?? metrics?.tokens?.input_today ?? 0;
+    const inputMonth = (agent as any).input_tokens_month ?? metrics?.tokens?.input_month ?? 0;
+    const inputTotal = (agent as any).input_tokens_total ?? metrics?.tokens?.input_total ?? 0;
+    // input=0 时命中率算不出来（不是 0%）：迁移不回填历史，未校准的存量 Agent 会有
+    // input_tokens_total=0 却有真实的历史 cache_read_tokens_total，把它显示成 0% 是
+    // 一个自信的假数字。这里比后端 cache_hit_rate 更保守：input=0 一律 null，不区分
+    // "从未有过任何用量"（后端在 cache_read 也是 0 时会诚实地给 0%）——全新 Agent 在
+    // 第一次调用之前会显示"—"而不是 0%，这是可接受的展示取舍，不是逐位对齐后端语义。
+    const cacheHitRate = (read: number, input: number): number | null => (input > 0 ? Math.round((read / input) * 100) : null);
+    const cacheHitRateToday = cacheHitRate(cacheReadToday, inputToday);
+    const cacheHitRateMonth = cacheHitRate(cacheReadMonth, inputMonth);
+    const cacheHitRateTotal = cacheHitRate(cacheReadTotal, inputTotal);
     const expiryLabel = (agent as any).is_expired
         ? t('agent.settings.expiry.expired')
         : (agent as any).expires_at
@@ -4945,9 +4967,9 @@ export default function AgentDetailPage() {
                                         </div>
                                         <div className="agent-info-stat-item">
                                             <span className="agent-info-stat-label">Cache</span>
-                                            <span className="agent-info-stat-value" title={`Today cache hit: ${formatTokens(cacheReadToday)} · ${cacheHitRateToday}%`}>
+                                            <span className="agent-info-stat-value" title={`Today cache hit: ${formatTokens(cacheReadToday)} · ${cacheHitRateToday == null ? '—' : `${cacheHitRateToday}%`}`}>
                                                 {formatTokens(cacheReadToday)}
-                                                <span className="agent-info-stat-unit">{cacheHitRateToday}%</span>
+                                                <span className="agent-info-stat-unit">{cacheHitRateToday == null ? '—' : `${cacheHitRateToday}%`}</span>
                                             </span>
                                         </div>
                                         <div className="agent-info-stat-item">
@@ -5578,7 +5600,7 @@ export default function AgentDetailPage() {
                                     <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '6px' }}>Cache Hit</div>
                                     <div style={{ fontSize: '22px', fontWeight: 600 }}>{formatTokens(cacheReadToday)}</div>
                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
-                                        Today {cacheHitRateToday}% · Month {formatTokens(cacheReadMonth)} ({cacheHitRateMonth}%)
+                                        Today {cacheHitRateToday == null ? '—' : `${cacheHitRateToday}%`} · Month {formatTokens(cacheReadMonth)} ({cacheHitRateMonth == null ? '—' : `${cacheHitRateMonth}%`})
                                     </div>
                                 </div>
                                 {/* Native agent metrics */}

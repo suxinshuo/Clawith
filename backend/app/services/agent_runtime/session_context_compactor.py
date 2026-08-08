@@ -34,6 +34,7 @@ from app.services.llm.client import LLMMessage
 from app.services.llm.model_resolution import resolve_active_agent_model
 from app.services.llm.single_step import LLMCompletionStep, complete_llm_once
 from app.services.llm.utils import get_max_tokens
+from app.services.token_accounting.ledger import SYSTEM_SCOPE_GROUP_COMPACT
 
 
 _COMPACT_TOOL_NAME = "commit_session_context"
@@ -95,6 +96,23 @@ class CompactModelSelection:
 
     primary: LLMModel
     usage_agent_id: uuid.UUID | None
+    system_scope: str | None = None
+
+    def __post_init__(self) -> None:
+        # complete_llm_once（经由账本）要求 usage_agent_id/system_scope 恰好
+        # 二选一。这里在构造期校验，让错误组合在产生的源头就能被诊断出来、
+        # 并留在 traceback 里；但生产环境唯一的构造点是 compact() 的
+        # try 块里调用的 _resolve_models，那个 ValueError 仍会被 compact()
+        # 末尾的 except Exception 捕获，重新包装成通用的
+        # SessionContextCompactorError("session_compact_model_failed", ...)
+        # 抛给调用方——调用方拿到的还是这条通用错误，只是能顺着 `from exc`
+        # 追溯到这里。
+        if (self.usage_agent_id is None) == (self.system_scope is None):
+            raise ValueError(
+                "CompactModelSelection requires exactly one of usage_agent_id "
+                f"or system_scope, got usage_agent_id={self.usage_agent_id!r} "
+                f"system_scope={self.system_scope!r}"
+            )
 
 
 class CompactCompletionPort(Protocol):
@@ -105,6 +123,8 @@ class CompactCompletionPort(Protocol):
         *,
         tools: list[dict] | None = None,
         agent_id: uuid.UUID | None = None,
+        tenant_id: uuid.UUID | None = None,
+        system_scope: str | None = None,
         supports_vision: bool = False,
     ) -> LLMCompletionStep: ...
 
@@ -306,6 +326,7 @@ class LLMSessionContextCompactor:
                 return CompactModelSelection(
                     primary=model,
                     usage_agent_id=None,
+                    system_scope=SYSTEM_SCOPE_GROUP_COMPACT,
                 )
 
             if session.agent_id is None or session.agent_id != request.source_agent_id:
@@ -335,6 +356,7 @@ class LLMSessionContextCompactor:
             return CompactModelSelection(
                 primary=primary,
                 usage_agent_id=agent.id,
+                system_scope=None,
             )
 
     def _budget(self, model: LLMModel):
@@ -358,6 +380,8 @@ class LLMSessionContextCompactor:
         *,
         model: LLMModel,
         usage_agent_id: uuid.UUID | None,
+        tenant_id: uuid.UUID,
+        system_scope: str | None,
         payload: JsonObject,
         watermark: uuid.UUID | None,
     ) -> SessionContextCandidate:
@@ -366,6 +390,8 @@ class LLMSessionContextCompactor:
             _messages(payload),
             tools=[_COMPACT_TOOL],
             agent_id=usage_agent_id,
+            tenant_id=tenant_id,
+            system_scope=system_scope,
             supports_vision=False,
         )
         return _candidate_from_step(step, watermark=watermark)
@@ -376,6 +402,7 @@ class LLMSessionContextCompactor:
         *,
         model: LLMModel,
         usage_agent_id: uuid.UUID | None,
+        system_scope: str | None,
     ) -> SessionContextCandidate:
         budget = self._budget(model)
         current = request.snapshot
@@ -424,6 +451,8 @@ class LLMSessionContextCompactor:
             candidate = await self._complete_batch(
                 model=model,
                 usage_agent_id=usage_agent_id,
+                tenant_id=request.tenant_id,
+                system_scope=system_scope,
                 payload=payload,
                 watermark=watermark,
             )
@@ -441,6 +470,7 @@ class LLMSessionContextCompactor:
                 request,
                 model=selection.primary,
                 usage_agent_id=selection.usage_agent_id,
+                system_scope=selection.system_scope,
             )
         except (SessionContextCompactorError, ModelCapabilityError):
             raise

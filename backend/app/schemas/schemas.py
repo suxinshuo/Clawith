@@ -258,6 +258,11 @@ class AgentOut(BaseModel):
     tokens_used_today: int
     tokens_used_month: int
     tokens_used_total: int = 0
+    # 前端从 agent 对象算缓存命中率，分母必须是"输入总量"（含缓存）而不是
+    # tokens_used_*，所以这三个计数器必须暴露出去。
+    input_tokens_today: int = 0
+    input_tokens_month: int = 0
+    input_tokens_total: int = 0
     cache_read_tokens_today: int = 0
     cache_read_tokens_month: int = 0
     cache_read_tokens_total: int = 0

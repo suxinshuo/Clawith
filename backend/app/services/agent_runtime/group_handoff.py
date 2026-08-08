@@ -43,6 +43,11 @@ from app.services.group_message_service import (
     _required_content,
     _resolve_mentions,
 )
+from app.services.token_accounting.periods import (
+    effective_timezone,
+    is_new_local_day,
+    is_new_local_month,
+)
 
 
 _INTENT_VERSION = 1
@@ -418,25 +423,23 @@ def _source_run_matches(
         )
 
 
-def _target_budget_available(agent: Agent, *, now: datetime) -> bool:
+def _target_budget_available(agent: Agent, *, now: datetime, tenant=None) -> bool:
     if (
         isinstance(agent.max_tool_rounds, bool)
         or not isinstance(agent.max_tool_rounds, int)
         or agent.max_tool_rounds <= 0
     ):
         return False
+
+    tz_name = effective_timezone(agent, tenant)
     if agent.max_tokens_per_day and (agent.tokens_used_today or 0) >= agent.max_tokens_per_day:
-        if agent.last_daily_reset is None or agent.last_daily_reset.date() == now.date():
+        # A stale counter from a prior tenant-local day doesn't count against the limit —
+        # the accounting path will zero it on the next call. Judge rollover with the same
+        # periods helpers the accounting path uses, not a hand-rolled UTC comparison.
+        if not is_new_local_day(agent.last_daily_reset, tz_name, now=now):
             return False
     if agent.max_tokens_per_month and (agent.tokens_used_month or 0) >= agent.max_tokens_per_month:
-        if (
-            agent.last_monthly_reset is None
-            or (
-                agent.last_monthly_reset.year,
-                agent.last_monthly_reset.month,
-            )
-            == (now.year, now.month)
-        ):
+        if not is_new_local_month(agent.last_monthly_reset, tz_name, now=now):
             return False
     if (
         agent.max_llm_calls_per_day

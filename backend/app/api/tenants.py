@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from PIL import Image
 from pydantic import BaseModel, Field
-from sqlalchemy import func as sqla_func, select
+from sqlalchemy import and_, case, func as sqla_func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -24,6 +24,7 @@ from app.models.agent import Agent
 from app.models.tenant import Tenant
 from app.models.user import User
 from app.services.storage import ensure_local_path, get_storage_backend, normalize_storage_key
+from app.services.token_accounting import cache_hit_rate
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
 
@@ -485,6 +486,15 @@ async def get_my_tenant(
     return TenantOut.model_validate(tenant)
 
 
+def _uncalibrated(input_column, cache_read_column):
+    """统计组内"命中率算不出来"的 Agent 个数：input=0 而 cache_read>0。
+
+    这形状只可能来自口径校准之前的存量数据（Task 4 的迁移给 input_tokens_* 建列时
+    DEFAULT 0 且不回填），逐行会被 cache_hit_rate 判成 None，聚合时必须显式排除。
+    """
+    return sqla_func.sum(case((and_(input_column == 0, cache_read_column > 0), 1), else_=0))
+
+
 @router.get("/me/token-usage")
 async def get_my_tenant_token_usage(
     current_user: User = Depends(get_current_user),
@@ -499,29 +509,52 @@ async def get_my_tenant_token_usage(
             sqla_func.coalesce(sqla_func.sum(Agent.tokens_used_today), 0).label("tokens_today"),
             sqla_func.coalesce(sqla_func.sum(Agent.tokens_used_month), 0).label("tokens_month"),
             sqla_func.coalesce(sqla_func.sum(Agent.tokens_used_total), 0).label("tokens_total"),
+            # 命中率分母是"输入总量"（含缓存），不是 total —— output 按定义不可能被
+            # 缓存读取，把它算进分母会让命中率系统性偏低。
+            sqla_func.coalesce(sqla_func.sum(Agent.input_tokens_today), 0).label("input_today"),
+            sqla_func.coalesce(sqla_func.sum(Agent.input_tokens_month), 0).label("input_month"),
+            sqla_func.coalesce(sqla_func.sum(Agent.input_tokens_total), 0).label("input_total"),
             sqla_func.coalesce(sqla_func.sum(Agent.cache_read_tokens_today), 0).label("cache_today"),
             sqla_func.coalesce(sqla_func.sum(Agent.cache_read_tokens_month), 0).label("cache_month"),
             sqla_func.coalesce(sqla_func.sum(Agent.cache_read_tokens_total), 0).label("cache_total"),
             sqla_func.coalesce(sqla_func.sum(Agent.cache_creation_tokens_today), 0).label("cache_creation_today"),
             sqla_func.coalesce(sqla_func.sum(Agent.cache_creation_tokens_month), 0).label("cache_creation_month"),
             sqla_func.coalesce(sqla_func.sum(Agent.cache_creation_tokens_total), 0).label("cache_creation_total"),
+            # 这三个计数不是展示值，是"这个 SUM 干净不干净"的判据：租户里有多少个 Agent
+            # 在该窗口上是 input=0 而 cache_read>0 的存量形态。cache_hit_rate 逐行诚实，
+            # 但 SUM 会把"算不出来"洗成一个像样的数字 —— 未校准 Agent 只贡献分子，已校
+            # 准而从不用 prompt caching 的 Agent 只贡献分母，加起来落在可信区间里，而组
+            # 内没有任何一个 Agent 有确定的命中率。每个窗口用它自己的列判断，不能拿
+            # _total 代替 _today/_month。
+            _uncalibrated(Agent.input_tokens_today, Agent.cache_read_tokens_today).label("uncal_today"),
+            _uncalibrated(Agent.input_tokens_month, Agent.cache_read_tokens_month).label("uncal_month"),
+            _uncalibrated(Agent.input_tokens_total, Agent.cache_read_tokens_total).label("uncal_total"),
         ).where(Agent.tenant_id == current_user.tenant_id)
     )).one()
 
-    def bucket(total: int, cache_read: int, cache_creation: int) -> dict:
-        total = int(total or 0)
-        cache_read = int(cache_read or 0)
+    def bucket(total: int, input_tokens: int, cache_read: int, cache_creation: int, uncalibrated: int) -> dict:
+        # cache_hit_rate 可能返回 None（"算不出来"，见 token_accounting.rates）；这里
+        # 不能用 `or 0` 抹平成 0，那会把跨口径的历史数据显示成自信的"0% 命中"。
         return {
-            "total_tokens": total,
-            "cache_read_tokens": cache_read,
+            "total_tokens": int(total or 0),
+            "input_tokens": int(input_tokens or 0),
+            "cache_read_tokens": int(cache_read or 0),
             "cache_creation_tokens": int(cache_creation or 0),
-            "cache_hit_rate": round(cache_read / total, 4) if total > 0 else 0,
+            "cache_hit_rate": (
+                None if int(uncalibrated or 0) > 0 else cache_hit_rate(cache_read, input_tokens)
+            ),
         }
 
     return {
-        "today": bucket(row.tokens_today, row.cache_today, row.cache_creation_today),
-        "month": bucket(row.tokens_month, row.cache_month, row.cache_creation_month),
-        "total": bucket(row.tokens_total, row.cache_total, row.cache_creation_total),
+        "today": bucket(
+            row.tokens_today, row.input_today, row.cache_today, row.cache_creation_today, row.uncal_today
+        ),
+        "month": bucket(
+            row.tokens_month, row.input_month, row.cache_month, row.cache_creation_month, row.uncal_month
+        ),
+        "total": bucket(
+            row.tokens_total, row.input_total, row.cache_total, row.cache_creation_total, row.uncal_total
+        ),
     }
 
 

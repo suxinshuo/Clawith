@@ -6,22 +6,45 @@ and control platform-level settings.
 
 import secrets
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import func as sqla_func, select
+from sqlalchemy import and_, case, func as sqla_func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import require_role
+from app.dao.system_setting_dao import system_setting_dao
 from app.database import get_db
 from app.models.agent import Agent
 from app.models.invitation_code import InvitationCode
 from app.models.system_settings import SystemSetting
 from app.models.tenant import Tenant
 from app.models.user import User, Identity
+from app.services.token_accounting import SETTING_CALIBRATION_SWITCHED_AT, cache_hit_rate
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+def _calibration_switch_day(raw_value) -> date | None:
+    """把 token_accounting_calibration_switched_at 解析成一个 date。
+
+    迁移写入的形状是 ``{"at": now()::text}``（例如
+    ``2026-08-06 12:34:56.789+00``），fromisoformat 能直接吃。
+
+    **解析不出来时返回 None，语义是"整段历史都当作未校准"**（调用方据此把命中率显示
+    成"算不出来"）。这是刻意选的失败方向：设置行缺失或被人手改坏时，宁可什么都不显
+    示，也不能默认信任那些跨口径的旧数据、把一个偏高的命中率当真话报出去。
+    """
+    if not isinstance(raw_value, dict):
+        return None
+    at = raw_value.get("at")
+    if not isinstance(at, str):
+        return None
+    try:
+        return datetime.fromisoformat(at).date()
+    except ValueError:
+        return None
 
 
 # ─── Schemas ────────────────────────────────────────────
@@ -261,12 +284,19 @@ async def get_platform_timeseries(
             cast(DailyTokenUsage.date, Date).label('d'),
             sqla_func.sum(DailyTokenUsage.tokens_used).label('c'),
             sqla_func.sum(DailyTokenUsage.cache_read_tokens).label('cache_read'),
+            # 命中率分母是"输入总量"（含缓存），不是 tokens_used —— output 按定义不
+            # 可能被缓存读取。
+            sqla_func.sum(DailyTokenUsage.input_tokens).label('input_tokens'),
         ).where(
             DailyTokenUsage.date >= start_date,
             DailyTokenUsage.date <= end_date
         ).group_by('d')
     )
-    tokens_by_day = {row.d: row.c for row in tokens_q.all()}
+    tokens_by_day = {}
+    input_by_day = {}
+    for row in tokens_q.all():
+        tokens_by_day[row.d] = row.c
+        input_by_day[row.d] = row.input_tokens
     tokens_q = await db.execute(
         select(
             cast(DailyTokenUsage.date, Date).label('d'),
@@ -333,6 +363,17 @@ async def get_platform_timeseries(
         wau_by_day[row[0]] = row[1]
         mau_by_day[row[0]] = row[2]
 
+    # 口径校准的切换日。与 agents.input_tokens_* 不同，daily_token_usage.input_tokens
+    # **不是**新列：050 迁移就把它建成 NOT NULL DEFAULT 0 且不回填，而当时的写入路径按
+    # 协议写入不同语义（Anthropic 分支写的 usage["input_tokens"] 不含任何缓存计数）。
+    # 于是校准之前的行分母偏小、但仍大到让 cache_read <= input 成立 —— cache_hit_rate
+    # 的 None 兜底不会触发，只会报出一个偏高的命中率。所以这些天必须在这里显式压成
+    # None。（050 之前的行两列都是 0，本来就只能得到 0.0；被同一个闸门压成 None 也是对
+    # 的，那些天确实没有可读的输入计数。）
+    calibration_day = _calibration_switch_day(
+        await system_setting_dao.get_value(SETTING_CALIBRATION_SWITCHED_AT, {})
+    )
+
     # Generate date range list with cumulative totals
     result = []
     current_d = start_date.date()
@@ -349,6 +390,7 @@ async def get_platform_timeseries(
         nc = companies_by_day.get(current_d, 0)
         nu = users_by_day.get(current_d, 0)
         nt = tokens_by_day.get(current_d, 0)
+        ninput = input_by_day.get(current_d, 0)
         ncache = cache_by_day.get(current_d, 0)
         ns = sessions_by_day.get(current_d, 0)
 
@@ -357,6 +399,14 @@ async def get_platform_timeseries(
         total_tokens += nt
         total_cache_read += ncache
         total_sessions += ns
+
+        # 切换日本身也压成 None：那一行日汇总里既有切换前的旧语义写入、也有切换后的新
+        # 语义写入，混在同一个 input_tokens 列里，比值同样不可信。所以判据是 <=（"这天
+        # 完全在切换之后"才给数字），而不是严格早于切换时刻。
+        if calibration_day is None or current_d <= calibration_day:
+            day_cache_hit_rate = None
+        else:
+            day_cache_hit_rate = cache_hit_rate(ncache, ninput)
 
         result.append({
             "date": current_d.isoformat(),
@@ -368,7 +418,7 @@ async def get_platform_timeseries(
             "total_tokens": total_tokens,
             "new_cache_read_tokens": ncache,
             "total_cache_read_tokens": total_cache_read,
-            "cache_hit_rate": round((ncache or 0) / max(nt or 0, 1), 4),
+            "cache_hit_rate": day_cache_hit_rate,
             # New metrics
             "new_sessions": ns,
             "total_sessions": total_sessions,
@@ -393,6 +443,16 @@ async def get_platform_leaderboards(
             Tenant.name,
             sqla_func.coalesce(sqla_func.sum(Agent.tokens_used_total), 0).label('total'),
             sqla_func.coalesce(sqla_func.sum(Agent.cache_read_tokens_total), 0).label('cache_read'),
+            sqla_func.coalesce(sqla_func.sum(Agent.input_tokens_total), 0).label('input_tokens'),
+            # 这一行数不是展示用的，是"这个 SUM 干净不干净"的判据：统计组内有多少个
+            # Agent 是 input_tokens_total=0 而 cache_read_tokens_total>0 的存量行。
+            # cache_hit_rate 逐行是诚实的，但 SUM 会把"算不出来"洗成一个像样的数字：
+            # 未校准 Agent 只贡献分子，已校准而从不用 prompt caching 的 Agent 只贡献分
+            # 母，加起来落在一个可信区间里，而组内其实没有任何一个 Agent 有确定的命中
+            # 率。所以这个计数非 0 就整格返回 None。
+            sqla_func.sum(
+                case((and_(Agent.input_tokens_total == 0, Agent.cache_read_tokens_total > 0), 1), else_=0)
+            ).label('uncalibrated_agents'),
         )
         .join(Agent, Agent.tenant_id == Tenant.id)
         .group_by(Tenant.id)
@@ -404,14 +464,25 @@ async def get_platform_leaderboards(
             "name": row.name,
             "tokens": row.total,
             "cache_read_tokens": row.cache_read,
-            "cache_hit_rate": round((row.cache_read or 0) / max(row.total or 0, 1), 4),
+            "cache_hit_rate": (
+                None if (row.uncalibrated_agents or 0) > 0
+                else cache_hit_rate(row.cache_read, row.input_tokens)
+            ),
         }
         for row in top_companies_q.all()
     ]
 
     # Top 20 Agents by total tokens
+    # 这里每行就是一个 Agent、没有 SUM，所以不需要上面那个 uncalibrated 计数器：
+    # cache_hit_rate 自己就会在 input_tokens_total=0 而 cache_read>0 时返回 None。
     top_agents_q = await db.execute(
-        select(Agent.name, Tenant.name.label('tenant_name'), Agent.tokens_used_total, Agent.cache_read_tokens_total)
+        select(
+            Agent.name,
+            Tenant.name.label('tenant_name'),
+            Agent.tokens_used_total,
+            Agent.cache_read_tokens_total,
+            Agent.input_tokens_total,
+        )
         .join(Tenant, Tenant.id == Agent.tenant_id)
         .order_by(Agent.tokens_used_total.desc())
         .limit(20)
@@ -422,7 +493,7 @@ async def get_platform_leaderboards(
             "company": row.tenant_name,
             "tokens": row.tokens_used_total,
             "cache_read_tokens": row.cache_read_tokens_total,
-            "cache_hit_rate": round((row.cache_read_tokens_total or 0) / max(row.tokens_used_total or 0, 1), 4),
+            "cache_hit_rate": cache_hit_rate(row.cache_read_tokens_total, row.input_tokens_total),
         }
         for row in top_agents_q.all()
     ]

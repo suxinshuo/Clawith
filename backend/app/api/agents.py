@@ -35,6 +35,11 @@ from app.models.skill import Skill
 from app.services.resource_discovery import import_mcp_from_smithery
 from app.services.agent_runtime.persistence import enqueue_cancel
 from app.services.llm.model_resolution import load_active_model
+from app.services.token_accounting.periods import (
+    effective_timezone,
+    is_new_local_day,
+    is_new_local_month,
+)
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 settings = get_settings()
@@ -69,27 +74,41 @@ async def _validate_active_agent_model(
         )
 
 
-async def _lazy_reset_token_counters(agent: Agent, db: AsyncSession) -> bool:
-    """Reset daily/monthly token counters if the day or month has changed.
+async def _lazy_reset_token_counters(
+    agent: Agent, db: AsyncSession, *, tenant: Tenant | None = None
+) -> bool:
+    """Reset daily/monthly token counters if the tenant-local day or month has changed.
+
+    The accounting path (token_accounting.ledger) already resets these counters on every
+    LLM call, but this lazy reset covers the read path: if there has been no LLM call since
+    local midnight, a plain GET would otherwise still show the previous period's stale totals.
+    The rollover check must reuse the same periods helpers as the accounting path — two
+    hand-written definitions of "is this a new period" inevitably drift.
+
+    `tenant` may be pre-loaded by the caller (e.g. `list_agents`, where every returned
+    agent shares the same tenant) to avoid re-querying `Tenant` once per agent. When
+    omitted and `agent.tenant_id` is set, it is looked up here.
 
     Returns True if any counter was reset (caller should commit/flush).
     """
-    from datetime import datetime, timezone as tz
-
-    now = datetime.now(tz.utc)
+    now = datetime.now(timezone.utc)
+    if tenant is None and agent.tenant_id:
+        tenant_result = await db.execute(select(Tenant).where(Tenant.id == agent.tenant_id))
+        tenant = tenant_result.scalar_one_or_none()
+    tz_name = effective_timezone(agent, tenant)
     changed = False
 
-    last_daily = agent.last_daily_reset
-    if last_daily is None or last_daily.date() < now.date():
+    if is_new_local_day(agent.last_daily_reset, tz_name, now=now):
         agent.tokens_used_today = 0
+        agent.input_tokens_today = 0
         agent.cache_read_tokens_today = 0
         agent.cache_creation_tokens_today = 0
         agent.last_daily_reset = now
         changed = True
 
-    last_monthly = agent.last_monthly_reset
-    if last_monthly is None or (last_monthly.year, last_monthly.month) < (now.year, now.month):
+    if is_new_local_month(agent.last_monthly_reset, tz_name, now=now):
         agent.tokens_used_month = 0
+        agent.input_tokens_month = 0
         agent.cache_read_tokens_month = 0
         agent.cache_creation_tokens_month = 0
         agent.last_monthly_reset = now
@@ -220,10 +239,16 @@ async def list_agents(
 
     result = await db.execute(stmt)
     agents = result.scalars().all()
-    # Lazy reset token counters
+    # Lazy reset token counters. build_visible_agents_query filters every branch on
+    # Agent.tenant_id == target_tenant_id, so every agent here shares one tenant —
+    # load it once instead of once per agent (N+1 on tenants with many agents).
+    list_tenant = None
+    if requested_tenant_id and agents:
+        list_tenant_result = await db.execute(select(Tenant).where(Tenant.id == requested_tenant_id))
+        list_tenant = list_tenant_result.scalar_one_or_none()
     needs_flush = False
     for a in agents:
-        if await _lazy_reset_token_counters(a, db):
+        if await _lazy_reset_token_counters(a, db, tenant=list_tenant):
             needs_flush = True
     if needs_flush:
         await db.commit()
@@ -435,6 +460,8 @@ async def create_agent(
     default_webhook_rate = 5
     default_heartbeat_interval = 240  # model default
     tenant_default_model_id = None
+    tenant_default_max_tokens_day = None
+    tenant_default_max_tokens_month = None
     if target_tenant_id:
         tenant_result = await db.execute(select(Tenant).where(Tenant.id == target_tenant_id))
         tenant = tenant_result.scalar_one_or_none()
@@ -445,6 +472,8 @@ async def create_agent(
             default_min_poll = tenant.min_poll_interval_floor or 5
             default_webhook_rate = tenant.max_webhook_rate_ceiling or 5
             tenant_default_model_id = tenant.default_model_id
+            tenant_default_max_tokens_day = tenant.default_agent_max_tokens_per_day
+            tenant_default_max_tokens_month = tenant.default_agent_max_tokens_per_month
             # Enforce heartbeat floor: new agents must respect company minimum
             if (
                 tenant.min_heartbeat_interval_minutes
@@ -487,8 +516,12 @@ async def create_agent(
         agent_type=data.agent_type or "native",
         primary_model_id=effective_primary_model_id,
         fallback_model_id=data.fallback_model_id,
-        max_tokens_per_day=data.max_tokens_per_day,
-        max_tokens_per_month=data.max_tokens_per_month,
+        max_tokens_per_day=(
+            data.max_tokens_per_day if data.max_tokens_per_day is not None else tenant_default_max_tokens_day
+        ),
+        max_tokens_per_month=(
+            data.max_tokens_per_month if data.max_tokens_per_month is not None else tenant_default_max_tokens_month
+        ),
         template_id=data.template_id,
         status="creating" if data.agent_type != "openclaw" else "idle",
         expires_at=expires_at,

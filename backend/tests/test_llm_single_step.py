@@ -1,10 +1,11 @@
 """One-call LLM provider boundary tests for the durable Runtime."""
 
-from types import SimpleNamespace
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
+from app.services.llm import single_step
 from app.services.llm.client import (
     AnthropicClient,
     GeminiClient,
@@ -13,13 +14,9 @@ from app.services.llm.client import (
     OpenAICompatibleClient,
     OpenAIResponsesClient,
 )
-from app.services.llm import single_step
-
 
 _TINY_PNG_DATA_URL = (
-    "data:image/png;base64,"
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/"
-    "x8AAusB9Wl2ZQAAAABJRU5ErkJggg=="
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2ZQAAAABJRU5ErkJggg=="
 )
 
 
@@ -76,9 +73,7 @@ def test_native_gemini_preserves_dynamic_system_context_once() -> None:
     system_text = payload["systemInstruction"]["parts"][0]["text"]
     assert system_text.count("Static Base Prompt") == 1
     assert system_text.count("Dynamic Runtime Context") == 1
-    assert payload["contents"] == [
-        {"role": "user", "parts": [{"text": "Do the task"}]}
-    ]
+    assert payload["contents"] == [{"role": "user", "parts": [{"text": "Do the task"}]}]
 
 
 def test_provider_payloads_preserve_static_and_dynamic_system_context_once() -> None:
@@ -181,6 +176,194 @@ async def test_complete_once_normalizes_tools_and_records_usage_without_executin
     assert client.closed is True
     assert recorded[0][0] == agent_id
     assert recorded[0][1].total_tokens == 25
+
+
+@pytest.mark.asyncio
+async def test_complete_once_with_tenant_and_system_scope_records_to_the_ledger_not_the_agent(
+    monkeypatch,
+) -> None:
+    """群聊压缩/规划/连通性测试都只传 tenant_id+system_scope，不传 agent_id.
+
+    这条路径此前完全不记账；现在必须走 ledger.record，而不是走
+    legacy 的按 agent 解析租户的 record_token_usage。
+    """
+    client = _Client(
+        LLMResponse(
+            content="done",
+            usage={
+                "prompt_tokens": 11,
+                "completion_tokens": 4,
+                "total_tokens": 15,
+            },
+        )
+    )
+    _patch_client(monkeypatch, client)
+    ledger_calls = []
+    legacy_calls = []
+
+    async def record_ledger(usage, *, tenant_id, agent_id=None, system_scope=None):
+        ledger_calls.append((usage, tenant_id, agent_id, system_scope))
+        return True
+
+    async def record_legacy(agent_id, usage):
+        legacy_calls.append((agent_id, usage))
+
+    monkeypatch.setattr(single_step, "record_token_usage_ledger", record_ledger)
+    monkeypatch.setattr(single_step, "record_token_usage", record_legacy)
+    tenant_id = uuid.uuid4()
+
+    result = await single_step.complete_llm_once(
+        _model(),
+        [LLMMessage(role="user", content="Compact this")],
+        tenant_id=tenant_id,
+        system_scope="group_compact",
+    )
+
+    assert result.usage.total_tokens == 15
+    assert len(ledger_calls) == 1
+    recorded_usage, recorded_tenant, recorded_agent, recorded_scope = ledger_calls[0]
+    assert recorded_usage.total_tokens == 15
+    assert recorded_tenant == tenant_id
+    assert recorded_agent is None
+    assert recorded_scope == "group_compact"
+    assert legacy_calls == []
+
+
+@pytest.mark.asyncio
+async def test_complete_once_still_records_the_direct_agent_path_when_no_tenant_is_given(
+    monkeypatch,
+) -> None:
+    """确认新增的 tenant_id/system_scope 参数没有把按 Agent 记账的直聊路径静默改道。"""
+    client = _Client(
+        LLMResponse(
+            content="done",
+            usage={
+                "prompt_tokens": 8,
+                "completion_tokens": 2,
+                "total_tokens": 10,
+            },
+        )
+    )
+    _patch_client(monkeypatch, client)
+    ledger_calls = []
+    legacy_calls = []
+
+    async def record_ledger(usage, *, tenant_id, agent_id=None, system_scope=None):
+        ledger_calls.append((usage, tenant_id, agent_id, system_scope))
+        return True
+
+    async def record_legacy(agent_id, usage):
+        legacy_calls.append((agent_id, usage))
+
+    monkeypatch.setattr(single_step, "record_token_usage_ledger", record_ledger)
+    monkeypatch.setattr(single_step, "record_token_usage", record_legacy)
+    agent_id = uuid.uuid4()
+
+    await single_step.complete_llm_once(
+        _model(),
+        [LLMMessage(role="user", content="Chat")],
+        agent_id=agent_id,
+    )
+
+    assert legacy_calls == [(agent_id, legacy_calls[0][1])]
+    assert legacy_calls[0][1].total_tokens == 10
+    assert ledger_calls == []
+
+
+@pytest.mark.asyncio
+async def test_complete_once_records_provider_authoritative_usage_for_an_unregistered_provider(
+    monkeypatch,
+) -> None:
+    """model.provider 不在 PROVIDER_REGISTRY 里时，create_llm_client 仍会退到 OpenAICompatibleClient。
+
+    见 app/services/llm/client.py 的 "Default to OpenAI-compatible for
+    unknown providers" 分支：它返回真实 usage。记账必须假定同一种协议形状；
+    用空协议 `""` 兜底会让 normalize() 对未知协议返回 None，
+    usage_from_response_or_estimate 转而退回字符估算——total_tokens 不再等于
+    provider 权威的计数，estimated_tokens 也不再是 0。
+    """
+    client = _Client(
+        LLMResponse(
+            content="done",
+            usage={
+                "prompt_tokens": 11,
+                "completion_tokens": 4,
+                "total_tokens": 15,
+            },
+        )
+    )
+    _patch_client(monkeypatch, client)
+    model = SimpleNamespace(
+        provider="my-unregistered-gateway",
+        model="runtime-model",
+        base_url="https://example.invalid",
+        request_timeout=17,
+        temperature=0.2,
+        max_output_tokens=1024,
+    )
+
+    result = await single_step.complete_llm_once(
+        model,
+        [LLMMessage(role="user", content="Compact this")],
+    )
+
+    assert result.usage.total_tokens == 15
+    assert result.usage.estimated_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_complete_once_resolves_anthropic_usage_by_protocol_not_by_key_sniffing(
+    monkeypatch,
+) -> None:
+    """Anthropic 的 `input_tokens` 排除两个缓存计数器，与 OpenAI 语义不同。
+
+    按协议归一化才能算出正确的 input_tokens = input_tokens + 两个缓存计数
+    器之和；如果按字段名"碰运气"识别协议，Anthropic 的 usage 会被当成
+    OpenAI 语义误读。
+    """
+    client = _Client(
+        LLMResponse(
+            content="done",
+            usage={
+                "input_tokens": 10,
+                "cache_read_input_tokens": 90,
+                "output_tokens": 5,
+            },
+        )
+    )
+    _patch_client(monkeypatch, client)
+    model = SimpleNamespace(
+        provider="anthropic",
+        model="claude-test",
+        base_url="https://api.anthropic.com",
+        request_timeout=17,
+        temperature=0.2,
+        max_output_tokens=1024,
+    )
+
+    result = await single_step.complete_llm_once(
+        model,
+        [LLMMessage(role="user", content="Hello")],
+    )
+
+    assert result.usage.input_tokens == 100
+    assert result.usage.output_tokens == 5
+    assert result.usage.estimated_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_complete_once_rejects_system_scope_without_a_tenant() -> None:
+    """无 tenant_id 时走 legacy 分支，会按 agent 记账并静默丢弃 system_scope。
+
+    必须在这个组合出现时就报错，而不是让调用方以为 system_scope 生效了。
+    """
+    with pytest.raises(ValueError, match="tenant_id"):
+        await single_step.complete_llm_once(
+            _model(),
+            [LLMMessage(role="user", content="Chat")],
+            agent_id=uuid.uuid4(),
+            system_scope="group_compact",
+        )
 
 
 @pytest.mark.asyncio

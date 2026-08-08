@@ -22,6 +22,8 @@ from app.models.agent_tool_execution import AgentToolExecution
 from app.models.llm import LLMModel
 from app.models.group import GroupMember
 from app.models.participant import Participant
+from app.models.tenant import Tenant
+from app.models.tenant_token_counter import TenantTokenCounter
 from app.services.agent_context import build_agent_context
 from app.services.agent_runtime.command_worker import RuntimeSessionFactory
 from app.services.agent_runtime.context_builder import (
@@ -74,6 +76,12 @@ from app.services.llm.multimodal_content import (
 from app.services.llm.single_step import LLMCompletionStep, complete_llm_once
 from app.services.llm.model_resolution import active_agent_model_candidates
 from app.services.llm.utils import get_max_tokens
+from app.services.token_accounting.budget import (
+    PROGRAMMING_ERROR_TYPES,
+    budget_exceeded_message,
+    evaluate as evaluate_budget,
+    should_emit_soft_warning,
+)
 
 
 _ACTIVE_AGENT_STATUSES = frozenset({"creating", "running", "idle"})
@@ -1120,6 +1128,132 @@ class RuntimeModelStepService:
             candidates = await active_agent_model_candidates(db, agent)
         return next((model for model in candidates if model.id != primary_model.id), None)
 
+    async def _load_budget_subjects(
+        self,
+        tenant_id: uuid.UUID,
+    ) -> tuple[Tenant | None, TenantTokenCounter | None]:
+        """一次会话内取齐限额判定需要的租户与租户计数器。"""
+        async with self._session_factory() as db:
+            tenant_result = await db.execute(select(Tenant).where(Tenant.id == tenant_id))
+            counter_result = await db.execute(
+                select(TenantTokenCounter).where(TenantTokenCounter.tenant_id == tenant_id)
+            )
+            return (
+                tenant_result.scalar_one_or_none(),
+                counter_result.scalar_one_or_none(),
+            )
+
+    async def _resolve_budget_subjects(
+        self,
+        context: RuntimeContext,
+    ) -> tuple[Tenant | None, TenantTokenCounter | None] | None:
+        """一次性取好限额判定要用的租户与租户计数器，供本轮两次判定复用。
+
+        返回 None 表示租户 ID 无效，或加载本身失败——按异常类型分类记日志（见
+        `PROGRAMMING_ERROR_TYPES`）后直接放行，两次判定都不再尝试。
+        """
+        try:
+            tenant_id = uuid.UUID(context.tenant_id)
+        except (TypeError, ValueError):
+            return None
+
+        try:
+            return await self._load_budget_subjects(tenant_id)
+        except PROGRAMMING_ERROR_TYPES as exc:
+            logger.opt(exception=True).error(
+                "[TokenBudget] token_budget_enforcement_disabled_bug run_id={} error={!r}",
+                context.run_id,
+                exc,
+            )
+            return None
+        except Exception as exc:  # noqa: BLE001 - 加载失败不能拖垮模型调用（基础设施/瞬时故障）
+            logger.warning(
+                "[TokenBudget] token_budget_enforcement_disabled_transient run_id={} error={!r}",
+                context.run_id,
+                exc,
+            )
+            return None
+
+    async def _budget_gate(
+        self,
+        context: RuntimeContext,
+        agent: Agent,
+        budget_subjects: tuple[Tenant | None, TenantTokenCounter | None] | None,
+        *,
+        estimated_next_round_tokens: int,
+    ) -> ModelStepResult | None:
+        """超限则返回一个 error step 短路本轮；否则返回 None。
+
+        能力边界：预检基于估算，且真实用量要等响应返回才知道，所以目标是超限幅度
+        有界（不超过一轮消耗），不是绝不超限。
+
+        `budget_subjects` 由 `complete_once` 一次性取好、两阶段共用；为 None 表示
+        租户 ID 无效或加载已经失败，此处直接放行，不再尝试判定。判定本身抛异常时
+        按异常类型分类记日志（编程错误 error 级、基础设施/瞬时故障 warning 级），
+        两条路径都仍放行——拦不住比拦错代价小。
+        """
+        if budget_subjects is None:
+            return None
+        tenant, counter = budget_subjects
+
+        try:
+            verdict = await evaluate_budget(
+                agent=agent,
+                tenant=tenant,
+                tenant_counter=counter,
+                estimated_next_round_tokens=estimated_next_round_tokens,
+            )
+        except PROGRAMMING_ERROR_TYPES as exc:
+            logger.opt(exception=True).error(
+                "[TokenBudget] token_budget_enforcement_disabled_bug run_id={} agent_id={} error={!r}",
+                context.run_id,
+                agent.id,
+                exc,
+            )
+            return None
+        except Exception as exc:  # noqa: BLE001 - 判定失败不能拖垮模型调用（基础设施/瞬时故障）
+            logger.warning(
+                "[TokenBudget] token_budget_enforcement_disabled_transient run_id={} agent_id={} error={!r}",
+                context.run_id,
+                agent.id,
+                exc,
+            )
+            return None
+
+        if verdict.blocked_scope is not None:
+            logger.warning(
+                "[TokenBudget] run_id={} agent_id={} scope={} used={} limit={} mode={} blocked={}",
+                context.run_id,
+                agent.id,
+                verdict.blocked_scope,
+                verdict.used,
+                verdict.limit,
+                verdict.mode,
+                not verdict.allowed,
+            )
+
+        if (
+            verdict.soft_warning
+            and verdict.reset_at is not None
+            and verdict.soft_warning_scope is not None
+            and verdict.soft_warning_subject_id is not None
+            and await should_emit_soft_warning(
+                verdict.soft_warning_scope,
+                verdict.soft_warning_subject_id,
+                verdict.reset_at,
+            )
+        ):
+            logger.warning(
+                "[TokenBudget] soft warning run_id={} scope={} subject_id={}",
+                context.run_id,
+                verdict.soft_warning_scope,
+                verdict.soft_warning_subject_id,
+            )
+
+        if verdict.allowed:
+            return None
+        return _error("token_budget_exceeded", budget_exceeded_message(verdict))
+
     async def compact_inputs(
         self,
         state: RuntimeGraphState,
@@ -1484,6 +1618,24 @@ class RuntimeModelStepService:
     ) -> ModelStepResult:
         try:
             model, agent, ledger = await self._load(context, state)
+
+            # tenant / tenant_counter 只取一次，两阶段判定共用，避免同一轮内重复
+            # 发出同样的两条 SELECT。
+            budget_subjects = await self._resolve_budget_subjects(context)
+
+            # 阶段一：先用估算量 0 粗判一次。tenant/tenant_counter 已经复用，这一
+            # 步真正省下的只是"估算 prepared 消息的 token 数"这项 CPU 开销；执行
+            # 模式的读取（current_enforcement_mode）目前仍各自发生一次，不在本次
+            # 复用范围内。
+            budget_block = await self._budget_gate(
+                context,
+                agent,
+                budget_subjects,
+                estimated_next_round_tokens=0,
+            )
+            if budget_block is not None:
+                return budget_block
+
             allow_user_wait = not _is_group_agent_run(state)
             application_tools = (
                 with_group_runtime_tools(
@@ -1529,6 +1681,24 @@ class RuntimeModelStepService:
             )
             if isinstance(prepared, ModelStepResult):
                 return prepared
+
+            # 阶段二：用准备好的消息 + tool schema 算本轮成本下限，不发一个必然
+            # 超支的请求。这是对 prepared/tools 的一次独立估算，不是复用
+            # `_prepare_messages` 里为上下文窗口算过的量——那边估算的是
+            # {static, dynamic, runtime, recent_session} 和 tools 分开的量，
+            # 这里要的是即将真正发出去的完整 prompt 的下限，输入形状不同，
+            # 说"零额外成本"不准确。
+            estimated_round_tokens = _estimate_tokens(
+                [{"role": message.role, "content": message.content} for message in prepared]
+            ) + _estimate_tokens(tools)
+            budget_block = await self._budget_gate(
+                context,
+                agent,
+                budget_subjects,
+                estimated_next_round_tokens=estimated_round_tokens,
+            )
+            if budget_block is not None:
+                return budget_block
 
             actual_model = model
             failed_over_from: LLMModel | None = None

@@ -27,6 +27,7 @@ from app.services.agent_runtime.state import (
     RuntimeNodeExecutor,
 )
 from app.services.llm.single_step import LLMCompletionStep
+from app.services.token_accounting.ledger import SYSTEM_SCOPE_PLANNING
 from app.services.token_tracker import TokenUsage
 
 
@@ -250,16 +251,19 @@ async def test_planning_model_uses_the_pinned_platform_model_without_tools() -> 
             usage=TokenUsage(),
         )
 
+    context = _context(model_id=model.id)
     result = await PlanningModelService(
         session_factory=_session_factory(model),  # type: ignore[arg-type]
         completion=complete,
-    ).complete_once(state, _context(model_id=model.id))
+    ).complete_once(state, context)
 
     assert result.plan == _plan(first)
     assert calls[0][0] is model
     assert calls[0][2] == {
         "tools": None,
         "agent_id": None,
+        "tenant_id": uuid.UUID(context.tenant_id),
+        "system_scope": SYSTEM_SCOPE_PLANNING,
         "supports_vision": False,
     }
     planning_prompt = str(calls[0][1][0].content)

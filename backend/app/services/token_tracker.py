@@ -1,160 +1,51 @@
-"""Reusable token usage tracking for all LLM call paths.
+"""兼容转发层 —— 真实实现在 app.services.token_accounting。
 
-Provides a single function to record token consumption against an Agent,
-used by web chat, heartbeat, triggers, and A2A communication.
+保留这一层的理由有两个：让 caller.py 与 single_step.py 的既有 import 零改动继续可用
+（caller.py 本身是死代码，但仍有一批测试在跑它），以及保证平台上只有一套记账实现 ——
+TokenUsage 在此只做再导出，绝不重新定义。新代码请直接用 token_accounting。
+
+注意：node_executor.py 与本模块无关，它一个符号都不从这里导入。它导入的
+WRITE_FILE_PROTOCOL_* 常量来自 app.services.llm.caller（见 node_executor.py:24-26），
+那是不能删 caller.py 的原因，不是不能删本模块的原因。
 """
 
+from __future__ import annotations
+
 import uuid
-from dataclasses import dataclass
 
 from loguru import logger
+from sqlalchemy import select
 
-
-@dataclass
-class TokenUsage:
-    """Normalized token accounting returned by model providers."""
-
-    total_tokens: int = 0
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_creation_tokens: int = 0
-    estimated_tokens: int = 0
-
-    def add(self, other: "TokenUsage") -> None:
-        self.total_tokens += other.total_tokens
-        self.input_tokens += other.input_tokens
-        self.output_tokens += other.output_tokens
-        self.cache_read_tokens += other.cache_read_tokens
-        self.cache_creation_tokens += other.cache_creation_tokens
-        self.estimated_tokens += other.estimated_tokens
-
-
-def estimate_tokens_from_chars(total_chars: int) -> int:
-    """Rough token estimate when real usage is unavailable. ~3 chars per token."""
-    return max(total_chars // 3, 1)
-
-
-def estimate_token_usage_from_chars(total_chars: int) -> TokenUsage:
-    tokens = estimate_tokens_from_chars(total_chars)
-    return TokenUsage(total_tokens=tokens, estimated_tokens=tokens)
-
-
-def _int_token(value) -> int:
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _token_counter(source: dict, *keys: str) -> int:
-    return sum(_int_token(source.get(key)) for key in keys)
+from app.database import async_session
+from app.models.agent import Agent
+from app.services.token_accounting.ledger import record as ledger_record
+from app.services.token_accounting.normalize import (
+    PROTOCOL_OPENAI_COMPATIBLE,
+    TokenUsage,
+    estimate_token_usage_from_chars,
+    estimate_tokens_from_chars,
+    normalize,
+)
 
 
 def extract_token_usage(usage: dict | None) -> TokenUsage | None:
-    """Extract normalized token usage, including prompt-cache counters when available."""
-    if not usage:
-        return None
+    """已废弃：按 openai_compatible 协议解释 usage。
 
-    # OpenAI compatible:
-    # {"prompt_tokens": N, "completion_tokens": N, "total_tokens": N,
-    #  "prompt_tokens_details": {"cached_tokens": N}}
-    if "total_tokens" in usage:
-        detail_sources = [
-            details
-            for details in (
-                usage.get("prompt_tokens_details"),
-                usage.get("input_tokens_details"),
-            )
-            if isinstance(details, dict)
-        ]
-        cached = _token_counter(
-            usage,
-            "cached_tokens",
-            "cache_read_tokens",
-            "cache_read_input_tokens",
-        )
-        cache_creation = _token_counter(
-            usage,
-            "cache_creation_tokens",
-            "cache_creation_input_tokens",
-        )
-        for details in detail_sources:
-            cached += _token_counter(
-                details,
-                "cached_tokens",
-                "cache_read_tokens",
-                "cache_read_input_tokens",
-            )
-            cache_creation += _token_counter(
-                details,
-                "cache_creation_tokens",
-                "cache_creation_input_tokens",
-            )
-        if cached or cache_creation:
-            logger.info(
-                f"[Token Cache] API Provider -> Created: {cache_creation} tokens, "
-                f"Read: {cached} tokens"
-            )
-        input_tokens = _int_token(usage.get("prompt_tokens", usage.get("input_tokens", 0)))
-        output_tokens = _int_token(usage.get("completion_tokens", usage.get("output_tokens", 0)))
-        total_tokens = _int_token(usage.get("total_tokens", input_tokens + output_tokens))
-        return TokenUsage(
-            total_tokens=total_tokens,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_read_tokens=cached,
-            cache_creation_tokens=cache_creation,
-        )
-
-    # Anthropic:
-    # {"input_tokens": N, "output_tokens": N,
-    #  "cache_creation_input_tokens": N, "cache_read_input_tokens": N}
-    if "input_tokens" in usage or "output_tokens" in usage:
-        cache_creation = _token_counter(usage, "cache_creation_input_tokens", "cache_creation_tokens")
-        cache_read = _token_counter(usage, "cache_read_input_tokens", "cache_read_tokens", "cached_tokens")
-        details = usage.get("prompt_tokens_details")
-        if isinstance(details, dict):
-            cache_creation += _token_counter(details, "cache_creation_input_tokens", "cache_creation_tokens")
-            cache_read += _token_counter(details, "cached_tokens", "cache_read_input_tokens", "cache_read_tokens")
-        if cache_creation or cache_read:
-            logger.info(f"[Token Cache] Anthropic Native Hit -> Created: {cache_creation}, Read: {cache_read} tokens")
-        input_tokens = _int_token(usage.get("input_tokens", 0))
-        output_tokens = _int_token(usage.get("output_tokens", 0))
-        return TokenUsage(
-            total_tokens=input_tokens + output_tokens,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_read_tokens=cache_read,
-            cache_creation_tokens=cache_creation,
-        )
-
-    # Gemini usage metadata can be normalized by the client, but keep a direct
-    # fallback for providers that pass it through.
-    if "promptTokenCount" in usage or "candidatesTokenCount" in usage:
-        input_tokens = _int_token(usage.get("promptTokenCount", 0))
-        output_tokens = _int_token(usage.get("candidatesTokenCount", 0))
-        total_tokens = _int_token(usage.get("totalTokenCount", input_tokens + output_tokens))
-        cached = _int_token(usage.get("cachedContentTokenCount", 0))
-        return TokenUsage(
-            total_tokens=total_tokens,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_read_tokens=cached,
-        )
-
-    return None
+    新代码请用 normalize(protocol, usage) 并显式传入协议 —— 键嗅探会把 Anthropic
+    的 usage 误判成 OpenAI 语义，那正是要修的 bug。
+    """
+    return normalize(PROTOCOL_OPENAI_COMPATIBLE, usage)
 
 
 def extract_usage_tokens(usage: dict | None) -> int | None:
-    """Extract total token count from an LLM response usage dict.
-
-    Supports both OpenAI format (prompt_tokens + completion_tokens)
-    and Anthropic format (input_tokens + output_tokens).
-    Returns None if usage data is not available.
-    """
     parsed = extract_token_usage(usage)
     return parsed.total_tokens if parsed else None
+
+
+async def _resolve_tenant_id(agent_id: uuid.UUID) -> uuid.UUID | None:
+    async with async_session() as db:
+        result = await db.execute(select(Agent.tenant_id).where(Agent.id == agent_id))
+        return result.scalar_one_or_none()
 
 
 async def record_token_usage(
@@ -167,79 +58,47 @@ async def record_token_usage(
     cache_creation_tokens: int = 0,
     estimated_tokens: int = 0,
 ) -> None:
-    """Record token consumption for an agent.
+    """记一次 Agent 的 token 消耗（兼容签名）。
 
-    Safely updates tokens_used_today, tokens_used_month, and tokens_used_total.
-    Uses an independent DB session to avoid interfering with the caller's transaction.
+    `tokens` 传裸 int 的那条分支不校验统一口径不变式
+    （total_tokens == input_tokens + output_tokens）：只给总量、不给细分时会写入
+    total=N, input=0, output=0。它纯粹为兼容旧签名而存在，现有调用方（caller.py 六处、
+    single_step.py 一处）全部传 TokenUsage 实例，无人走裸 int。新代码不要用这条分支。
     """
-    usage = tokens if isinstance(tokens, TokenUsage) else TokenUsage(
-        total_tokens=tokens,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cache_read_tokens=cache_read_tokens,
-        cache_creation_tokens=cache_creation_tokens,
-        estimated_tokens=estimated_tokens,
-    )
+    if isinstance(tokens, TokenUsage):
+        usage = tokens
+    else:
+        # 只给了总量、没有细分：按全部估算处理，避免伪装成 provider 权威数据。
+        usage = TokenUsage(
+            total_tokens=tokens,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+            estimated_tokens=estimated_tokens or tokens,
+        )
     if usage.total_tokens <= 0:
         return
 
-    try:
-        from app.database import async_session
-        from app.models.agent import Agent
-        from sqlalchemy import select
+    tenant_id = await _resolve_tenant_id(agent_id)
+    if tenant_id is None:
+        logger.warning(
+            "token_usage_dropped_unknown_tenant agent_id={} total={}",
+            agent_id,
+            usage.total_tokens,
+        )
+        return
 
-        async with async_session() as db:
-            result = await db.execute(select(Agent).where(Agent.id == agent_id))
-            agent = result.scalar_one_or_none()
-            if agent:
-                agent.tokens_used_today = (agent.tokens_used_today or 0) + usage.total_tokens
-                agent.tokens_used_month = (agent.tokens_used_month or 0) + usage.total_tokens
-                agent.tokens_used_total = (agent.tokens_used_total or 0) + usage.total_tokens
-                agent.cache_read_tokens_today = (agent.cache_read_tokens_today or 0) + usage.cache_read_tokens
-                agent.cache_read_tokens_month = (agent.cache_read_tokens_month or 0) + usage.cache_read_tokens
-                agent.cache_read_tokens_total = (agent.cache_read_tokens_total or 0) + usage.cache_read_tokens
-                agent.cache_creation_tokens_today = (
-                    agent.cache_creation_tokens_today or 0
-                ) + usage.cache_creation_tokens
-                agent.cache_creation_tokens_month = (
-                    agent.cache_creation_tokens_month or 0
-                ) + usage.cache_creation_tokens
-                agent.cache_creation_tokens_total = (
-                    agent.cache_creation_tokens_total or 0
-                ) + usage.cache_creation_tokens
+    # 刻意丢弃 ledger_record 的 bool 返回值：兼容签名是 -> None，无法向上传递成败。
+    # 这不会让失败变得不可见 —— record() 内部在最终失败时已按 ERROR 记下完整 payload。
+    await ledger_record(usage, tenant_id=tenant_id, agent_id=agent_id)
 
-                from datetime import datetime, timezone
-                from sqlalchemy.dialects.postgresql import insert
-                from app.models.activity_log import DailyTokenUsage
 
-                today_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-                stmt = insert(DailyTokenUsage).values(
-                    tenant_id=agent.tenant_id,
-                    agent_id=agent.id,
-                    date=today_date,
-                    tokens_used=usage.total_tokens,
-                    input_tokens=usage.input_tokens,
-                    output_tokens=usage.output_tokens,
-                    cache_read_tokens=usage.cache_read_tokens,
-                    cache_creation_tokens=usage.cache_creation_tokens,
-                    estimated_tokens=usage.estimated_tokens,
-                ).on_conflict_do_update(
-                    index_elements=["agent_id", "date"],
-                    set_=dict(
-                        tokens_used=DailyTokenUsage.tokens_used + usage.total_tokens,
-                        input_tokens=DailyTokenUsage.input_tokens + usage.input_tokens,
-                        output_tokens=DailyTokenUsage.output_tokens + usage.output_tokens,
-                        cache_read_tokens=DailyTokenUsage.cache_read_tokens + usage.cache_read_tokens,
-                        cache_creation_tokens=DailyTokenUsage.cache_creation_tokens + usage.cache_creation_tokens,
-                        estimated_tokens=DailyTokenUsage.estimated_tokens + usage.estimated_tokens,
-                    )
-                )
-                await db.execute(stmt)
-
-                await db.commit()
-                logger.debug(
-                    f"Recorded {usage.total_tokens:,} tokens for agent {agent.name} "
-                    f"(cache_read={usage.cache_read_tokens:,})"
-                )
-    except Exception as e:
-        logger.warning(f"Failed to record token usage for agent {agent_id}: {e}")
+__all__ = [
+    "TokenUsage",
+    "estimate_token_usage_from_chars",
+    "estimate_tokens_from_chars",
+    "extract_token_usage",
+    "extract_usage_tokens",
+    "record_token_usage",
+]

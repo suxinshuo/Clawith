@@ -258,7 +258,13 @@ function StatsBar({ agents, allTasks, tokenUsage }: { agents: Agent[]; allTasks:
     }).length;
     const totalTokensToday = tokenUsage?.today?.total_tokens ?? agents.reduce((sum, a) => sum + (a.tokens_used_today || 0), 0);
     const cacheReadToday = tokenUsage?.today?.cache_read_tokens ?? agents.reduce((sum, a) => sum + (a.cache_read_tokens_today || 0), 0);
-    const cacheHitRate = totalTokensToday > 0 ? Math.round((cacheReadToday / totalTokensToday) * 100) : 0;
+    // 命中率优先用后端算好的 cache_hit_rate（分母是 input_tokens，且对算不出来的情况
+    // 诚实返回 null）；只有 tokenUsage 整体缺失时才退回本地估算，此时分母也用
+    // input_tokens_today 而不是 total_tokens（那含 output，会系统性偏低）。
+    const inputTokensToday = agents.reduce((sum, a) => sum + (a.input_tokens_today || 0), 0);
+    const cacheHitRateFraction = tokenUsage?.today
+        ? (tokenUsage.today.cache_hit_rate ?? null)
+        : (inputTokensToday > 0 ? cacheReadToday / inputTokensToday : null);
     const recentlyActive = agents.filter(a => {
         if (!a.last_active_at) return false;
         return Date.now() - new Date(a.last_active_at).getTime() < 3600000;
@@ -271,7 +277,7 @@ function StatsBar({ agents, allTasks, tokenUsage }: { agents: Agent[]; allTasks:
             icon: Icons.zap,
             label: t('dashboard.stats.todayTokens'),
             value: formatTokens(totalTokensToday),
-            sub: `Cache ${formatTokens(cacheReadToday)} · ${cacheHitRate}%`,
+            sub: `Cache ${formatTokens(cacheReadToday)} · ${cacheHitRateFraction == null ? '—' : `${Math.round(cacheHitRateFraction * 100)}%`}`,
         },
         { icon: Icons.clock, label: t('dashboard.stats.recentlyActive'), value: recentlyActive, sub: t('dashboard.stats.lastHour') },
     ];
@@ -420,7 +426,9 @@ function AgentRow({ agent, tasks, recentActivity }: {
                 </div>
                 {!!agent.cache_read_tokens_today && (
                     <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginBottom: '3px' }}>
-                        Cache {formatTokens(agent.cache_read_tokens_today)} · {usedTokens > 0 ? Math.round((agent.cache_read_tokens_today / usedTokens) * 100) : 0}%
+                        {/* 命中率分母是输入总量（含缓存），不是 usedTokens（那含 output，
+                        output 不可能被缓存读取）。input=0 时算不出来，显示 — 而非假的 0%。 */}
+                        Cache {formatTokens(agent.cache_read_tokens_today)} · {(agent.input_tokens_today || 0) > 0 ? `${Math.round((agent.cache_read_tokens_today / (agent.input_tokens_today || 0)) * 100)}%` : '—'}
                     </div>
                 )}
                 {maxTokens > 0 ? (

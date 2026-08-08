@@ -29,6 +29,7 @@ import app.models.system_settings  # noqa: F401
 import app.models.task  # noqa: F401
 import app.models.tenant  # noqa: F401
 import app.models.tenant_setting  # noqa: F401
+import app.models.tenant_token_counter  # noqa: F401
 import app.models.tool  # noqa: F401
 import app.models.trigger  # noqa: F401
 import app.models.trigger_execution  # noqa: F401
