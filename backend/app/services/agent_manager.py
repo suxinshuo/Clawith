@@ -256,6 +256,13 @@ class AgentManager:
             logger.info("Agent {} is deleted; skipping container start", agent.id)
             return None
 
+        # Platform-managed (native) agents run in-process; they don't need a container.
+        if getattr(agent, "agent_type", None) == "native":
+            logger.info("Agent {} is native (platform-managed); skipping container start", agent.id)
+            agent.status = "idle"
+            agent.last_active_at = datetime.now(timezone.utc)
+            return None
+
         if not self.docker_client:
             logger.info("Docker not available, skipping container start")
             agent.status = "idle"

@@ -8,7 +8,7 @@ import hashlib
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import select, func, update, or_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,6 +35,23 @@ from app.services.llm.client import get_provider_spec
 from app.services.llm.finish import FINISH_TOOL_DEFINITION, find_finish_call
 from app.services.platform_service import platform_service
 from app.services.sso_service import sso_service
+from app.dao.system_setting_dao import system_setting_dao
+from app.services.token_accounting.budget import (
+    KNOWN_MODES,
+    PROGRAMMING_ERROR_TYPES,
+    SETTING_ENFORCEMENT_MODE,
+    EnforcementState,
+    budget_exceeded_message,
+    current_enforcement_state,
+    reset_enforcement_mode_cache,
+)
+from app.services.token_accounting.gate import (
+    LANE_MODEL_PROBE,
+    BudgetClearance,
+    check as gate_check,
+    clearance_from,
+    load_subjects,
+)
 from app.services.token_accounting.ledger import SYSTEM_SCOPE_MODEL_PROBE, record as record_token_usage_ledger
 from app.services.token_accounting.normalize import (
     PROTOCOL_OPENAI_COMPATIBLE,
@@ -216,6 +233,63 @@ async def _record_llm_tool_capability(
         return True
 
 
+async def _resolve_probe_budget_clearance(current_user: User) -> BudgetClearance:
+    """限额判定（任务 6.4）：model_probe 调用会按租户当日计数记账
+    （`system_scope=SYSTEM_SCOPE_MODEL_PROBE`），必须在真正发起 provider 请求
+    （`create_llm_client` 之后的 `client.complete`）之前完成一次「击穿判定」
+    （`estimated_next_round_tokens=0`，只做判定不做预算预扣）。
+
+    主体来源：`current_user.tenant_id`。
+    - `tenant_id is not None`（普通租户用户）：单独开一次会话取 tenant / tenant_counter
+      （`agent=None`——model_probe 是租户级判定，只判 tenant_day 一档，依赖任务 3.1），
+      再调 `gate.check(lane=LANE_MODEL_PROBE, ...)`。这条链路没有 run_id 概念，传 None。
+    - `tenant_id is None`（平台管理员，无法归属）：`BudgetClearance.not_applicable(...)`，
+      与本端点里已有的"platform_admin 无法归属，跳过落库但记日志"处理哲学一致——
+      不引入新的失败模式。
+
+    若开会话或加载本身失败（基础设施故障），按与
+    `model_step_service._resolve_budget_subjects` /
+    `PlanningModelService._resolve_budget_subjects` 完全一致的两级异常分类 fail-open
+    放行：`PROGRAMMING_ERROR_TYPES`（签名漂移等代码 bug）-> ERROR 日志 + `not_applicable`；
+    其余异常（基础设施/瞬时故障）-> WARNING 日志 + `not_applicable`。判定本身的故障不得
+    级联成 probe 端点的 500（3.6）。
+
+    返回的 `BudgetClearance.verdict` 为 None 时调用方视为放行；非 None 时调用方需要
+    检查 `verdict.allowed`。
+    """
+    if current_user.tenant_id is None:
+        return BudgetClearance.not_applicable(LANE_MODEL_PROBE, reason="platform_admin_no_tenant")
+
+    try:
+        async with async_session() as db:
+            subjects = await load_subjects(db, tenant_id=current_user.tenant_id, agent=None)
+    except PROGRAMMING_ERROR_TYPES as exc:
+        logger.error(
+            f"[TokenBudget] token_budget_enforcement_disabled_bug lane={LANE_MODEL_PROBE} error={exc!r}",
+            exc_info=True,
+        )
+        return BudgetClearance.not_applicable(
+            LANE_MODEL_PROBE,
+            reason="model_probe budget subjects unavailable (session or load failed)",
+        )
+    except Exception as exc:  # noqa: BLE001 - 加载失败不能拖垮 probe 端点（基础设施/瞬时故障）
+        logger.warning(
+            f"[TokenBudget] token_budget_enforcement_disabled_transient lane={LANE_MODEL_PROBE} error={exc!r}"
+        )
+        return BudgetClearance.not_applicable(
+            LANE_MODEL_PROBE,
+            reason="model_probe budget subjects unavailable (session or load failed)",
+        )
+
+    verdict = await gate_check(
+        lane=LANE_MODEL_PROBE,
+        subjects=subjects,
+        estimated_next_round_tokens=0,
+        run_id=None,
+    )
+    return clearance_from(LANE_MODEL_PROBE, verdict)
+
+
 @router.post("/llm-test")
 async def test_llm_model(
     data: LLMTestRequest,
@@ -248,6 +322,20 @@ async def test_llm_model(
             "tool_calling_latency_ms": 0,
             "capability_recorded": False,
             "error": "API Key is required",
+        }
+
+    clearance = await _resolve_probe_budget_clearance(current_user)
+    if clearance.verdict is not None and not clearance.verdict.allowed:
+        return {
+            "success": False,
+            "connection_success": False,
+            "latency_ms": 0,
+            "connection_latency_ms": 0,
+            "tool_calling_supported": None,
+            "tool_calling_latency_ms": 0,
+            "capability_recorded": False,
+            "error_code": "token_budget_exceeded",
+            "error": budget_exceeded_message(clearance.verdict),
         }
 
     client = None
@@ -438,7 +526,6 @@ async def add_llm_model(
         base_url=data.base_url,
         label=data.label,
         temperature=data.temperature,
-        max_tokens_per_day=data.max_tokens_per_day,
         enabled=data.enabled,
         supports_vision=data.supports_vision,
         max_output_tokens=data.max_output_tokens,
@@ -580,8 +667,6 @@ async def update_llm_model(
             model.api_key_encrypted = encrypt_data(data.api_key.strip(), settings.SECRET_KEY)
         if data.temperature is not None:
             model.temperature = data.temperature
-        if data.max_tokens_per_day is not None:
-            model.max_tokens_per_day = data.max_tokens_per_day
         if data.enabled is not None:
             model.enabled = data.enabled
         if hasattr(data, 'supports_vision') and data.supports_vision is not None:
@@ -780,6 +865,18 @@ class TenantQuotaUpdate(BaseModel):
     min_poll_interval_floor: int | None = None
     max_webhook_rate_ceiling: int | None = None
 
+    # Task 8.4 (design.md 变更 7): these three columns treat `None` as a
+    # *valid, explicit* value (unlimited), unlike the nine fields above where
+    # `None` means "not provided". So they cannot use the same
+    # `if data.x is not None` pattern -- that would make "key absent" and
+    # "key present with null" indistinguishable, even though they must mean
+    # different things ("leave unchanged" vs. "clear to unlimited"). See
+    # `update_tenant_quotas` below, which checks `model_fields_set` for these
+    # three fields specifically and leaves the nine fields above untouched.
+    max_tokens_per_day: int | None = None
+    default_agent_max_tokens_per_day: int | None = None
+    default_agent_max_tokens_per_month: int | None = None
+
 
 @router.get("/tenant-quotas")
 async def get_tenant_quotas(
@@ -803,6 +900,9 @@ async def get_tenant_quotas(
         "default_max_triggers": tenant.default_max_triggers,
         "min_poll_interval_floor": tenant.min_poll_interval_floor,
         "max_webhook_rate_ceiling": tenant.max_webhook_rate_ceiling,
+        "max_tokens_per_day": tenant.max_tokens_per_day,
+        "default_agent_max_tokens_per_day": tenant.default_agent_max_tokens_per_day,
+        "default_agent_max_tokens_per_month": tenant.default_agent_max_tokens_per_month,
     }
 
 
@@ -848,6 +948,23 @@ async def update_tenant_quotas(
         tenant.min_poll_interval_floor = data.min_poll_interval_floor
     if data.max_webhook_rate_ceiling is not None:
         tenant.max_webhook_rate_ceiling = data.max_webhook_rate_ceiling
+
+    # Task 8.4 (design.md 变更 7): these three columns treat `None` as a
+    # valid, explicit value ("unlimited"), so the `if data.x is not None`
+    # pattern used for every other field above cannot distinguish "key
+    # absent from the request body" (leave unchanged) from "key present with
+    # an explicit null" (clear to unlimited) -- both would look like
+    # `data.x is None`. `model_fields_set` disambiguates them: a field only
+    # appears there if the client actually supplied it in the request body,
+    # regardless of what value was supplied. This must not be applied to the
+    # nine fields above -- their existing "not provided == null" PATCH
+    # semantics are unaffected by this change (see class docstring above).
+    if "max_tokens_per_day" in data.model_fields_set:
+        tenant.max_tokens_per_day = data.max_tokens_per_day
+    if "default_agent_max_tokens_per_day" in data.model_fields_set:
+        tenant.default_agent_max_tokens_per_day = data.default_agent_max_tokens_per_day
+    if "default_agent_max_tokens_per_month" in data.model_fields_set:
+        tenant.default_agent_max_tokens_per_month = data.default_agent_max_tokens_per_month
 
     await db.commit()
     return {
@@ -1119,6 +1236,20 @@ async def update_system_setting(
     # Platform-level settings (e.g. PUBLIC_BASE_URL) require platform_admin
     if key == "platform" and not _is_platform_admin_user(current_user):
         raise HTTPException(status_code=403, detail="Only platform admin can modify platform settings")
+    # token_budget_enforcement_mode is a single, platform-wide switch (task 8.2 /
+    # design.md 变更 3): letting any org_admin flip it here would let one tenant's
+    # admin turn off enforcement for every tenant. This closes that pre-existing
+    # over-privilege gap; the dedicated endpoint below is where admins should go
+    # instead (it also invalidates the in-process mode cache on write, which this
+    # generic endpoint deliberately does not need to know about).
+    if key == SETTING_ENFORCEMENT_MODE and not _is_platform_admin_user(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Only platform admin can modify the token budget enforcement mode; "
+                "use PUT /enterprise/token-budget-enforcement instead"
+            ),
+        )
     result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
     setting = result.scalar_one_or_none()
     if setting:
@@ -1138,6 +1269,140 @@ async def update_system_setting(
         "value": setting.value,
         "updated_at": setting.updated_at.isoformat() if setting.updated_at else None,
     }
+
+
+# ─── Token Budget Enforcement Mode (task 8.2 / design.md 变更 3) ───────
+
+class TokenBudgetEnforcementUpdate(BaseModel):
+    """Request body for ``PUT /enterprise/token-budget-enforcement``.
+
+    ``clear_grace`` and ``grace_until`` are two mutually exclusive ways to
+    affect the grace window: ``clear_grace=True`` wins outright and drops the
+    ``grace_until`` key from the stored value entirely (grace fully cleared),
+    regardless of whether ``grace_until`` was also supplied in the same
+    request. When ``clear_grace`` is False, an explicit ``grace_until`` sets a
+    new grace deadline; omitting both leaves whatever grace window (if any)
+    was already stored untouched — a bare mode change must not silently wipe
+    an in-progress grace window.
+    """
+
+    mode: str
+    clear_grace: bool = False
+    grace_until: str | None = None
+
+    @field_validator("mode")
+    @classmethod
+    def _validate_mode(cls, value: str) -> str:
+        if value not in KNOWN_MODES:
+            raise ValueError(f"mode must be one of {sorted(KNOWN_MODES)}")
+        return value
+
+    @field_validator("grace_until")
+    @classmethod
+    def _validate_grace_until(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("grace_until must be an ISO 8601 datetime string") from exc
+        return value
+
+
+def _token_budget_enforcement_payload(state: EnforcementState, raw_value: object) -> dict:
+    """Shape shared by the GET and PUT responses below.
+
+    ``grace_active`` is recomputed here from ``grace_until`` + the current
+    wall-clock time (``grace_until is not None and now < grace_until``) rather
+    than inferred from ``effective_mode != configured_mode``. Both judgements
+    agree in every case that matters, but the direct recomputation is the one
+    that stays correct even in the (currently impossible, but not worth
+    depending on) case where ``configured_mode`` is already ``warn_only`` and
+    a grace window is technically still set — in that situation "effective
+    differs from configured" would report ``grace_active=False`` even though
+    the stored grace window hasn't actually expired, which is a more
+    surprising answer for an admin checking "is grace still on" than "yes, but
+    it doesn't currently change anything". Recomputing directly avoids that
+    ambiguity.
+
+    ``set_by`` is not one of ``EnforcementState``'s fields (that dataclass
+    only tracks configured/effective mode + grace + a diagnostic ``source``),
+    so it is read straight from the raw stored value here.
+    """
+    now = datetime.now(UTC)
+    grace_active = state.grace_until is not None and now < state.grace_until
+    return {
+        "configured_mode": state.configured_mode,
+        "effective_mode": state.effective_mode,
+        "grace_until": state.grace_until.isoformat() if state.grace_until is not None else None,
+        "grace_active": grace_active,
+        "set_by": raw_value.get("set_by") if isinstance(raw_value, dict) else None,
+        # `budget._MODE_TTL_SECONDS` (30.0) is not exported from that module
+        # (it's an internal cache-tuning constant), so this is hardcoded.
+        # Keep it in sync if that constant ever changes.
+        "propagation_seconds": 30,
+    }
+
+
+@router.get("/token-budget-enforcement")
+async def get_token_budget_enforcement(
+    current_user: User = Depends(get_current_admin),
+):
+    """Read the current token budget enforcement mode.
+
+    org_admin can read this (not just platform_admin) so a tenant admin can
+    self-diagnose why their agents are being blocked, even though only a
+    platform admin can change the value (see the PUT handler below).
+    """
+    state = await current_enforcement_state()
+    raw_value = await system_setting_dao.get_value(SETTING_ENFORCEMENT_MODE, {})
+    return _token_budget_enforcement_payload(state, raw_value)
+
+
+@router.put("/token-budget-enforcement")
+async def update_token_budget_enforcement(
+    data: TokenBudgetEnforcementUpdate,
+    current_user: User = Depends(get_current_admin),
+):
+    """Change the token budget enforcement mode.
+
+    This is a single platform-wide switch, not a per-tenant setting — an
+    org_admin for one tenant must not be able to turn off enforcement for
+    every other tenant. `get_current_admin` alone lets org_admin through, so
+    this additionally requires `_is_platform_admin_user`.
+    """
+    if not _is_platform_admin_user(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Only platform admin can change the token budget enforcement mode",
+        )
+
+    existing_value = await system_setting_dao.get_value(SETTING_ENFORCEMENT_MODE, {})
+    existing_grace_until = existing_value.get("grace_until") if isinstance(existing_value, dict) else None
+
+    new_value: dict = {
+        "mode": data.mode,
+        "set_by": getattr(current_user, "email", None) or str(current_user.id),
+    }
+    if data.clear_grace:
+        # clear_grace wins outright: omit the grace_until key entirely so the
+        # window is fully gone, not just set to some other value.
+        pass
+    elif data.grace_until is not None:
+        new_value["grace_until"] = data.grace_until
+    elif existing_grace_until is not None:
+        # Neither clear_grace nor a new grace_until was supplied: a bare mode
+        # change must not silently wipe an in-progress grace window.
+        new_value["grace_until"] = existing_grace_until
+
+    await system_setting_dao.set_value(SETTING_ENFORCEMENT_MODE, new_value)
+    # Invalidate the in-process cache so the very next call to
+    # current_enforcement_mode()/current_enforcement_state() in this process
+    # observes the new value immediately, instead of waiting out the TTL.
+    reset_enforcement_mode_cache()
+
+    state = await current_enforcement_state()
+    return _token_budget_enforcement_payload(state, new_value)
 
 
 # ─── SSO Derived State Helper ───────────────────────────

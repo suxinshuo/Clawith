@@ -10,6 +10,7 @@ import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import pytest
 from loguru import logger
 
 from app.services.token_accounting import budget
@@ -22,11 +23,24 @@ from app.services.token_accounting.budget import (
     BudgetVerdict,
     budget_exceeded_message,
     evaluate,
+    reset_enforcement_mode_cache,
 )
 
 NOW = datetime(2026, 8, 6, 16, 30, tzinfo=UTC)  # 北京 8/7 00:30
 TENANT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 AGENT_ID = uuid.UUID("22222222-2222-2222-2222-222222222222")
+
+
+@pytest.fixture(autouse=True)
+def _reset_enforcement_mode_cache_between_tests():
+    """避免用例间通过 30 秒 TTL 的进程内模式缓存互相污染（任务 3.3）。
+
+    这提前处理了任务 3.5 里提到的 autouse fixture 需求的一部分——本文件的这个
+    fixture 覆盖了任务 3.5 清单里本文件相关的用例，任务 3.5 不需要重复添加。
+    """
+    reset_enforcement_mode_cache()
+    yield
+    reset_enforcement_mode_cache()
 
 
 def _agent(**overrides):
@@ -193,15 +207,61 @@ async def test_reset_at_uses_the_agent_effective_timezone() -> None:
     assert verdict.reset_at == datetime(2026, 8, 7, 16, 0, tzinfo=UTC)
 
 
-async def test_enforcement_mode_defaults_to_warn_only_when_setting_absent(
+async def test_agent_none_only_checks_tenant_day_and_does_not_raise() -> None:
+    """system_scope 链路（group_compact / planning / model_probe）没有 agent 主体。
+
+    `agent=None` 时必须只判 tenant_day 一档，不能调 effective_timezone(None, tenant)
+    （会走到 get_agent_timezone_sync 访问 agent.timezone 而抛 AttributeError）。
+    `reset_at` 必须用租户时区计算，与 test_tenant_daily_limit_blocks_when_agent_is_fine
+    等既有测试里 tenant_day 档的计算方式一致。
+    """
+    verdict = await _evaluate(
+        agent=None,
+        tenant_counter=_counter(tokens_used_today=500_000),
+    )
+
+    assert verdict.allowed is False
+    assert verdict.blocked_scope == SCOPE_TENANT_DAY
+    assert verdict.used == 500_000
+    assert verdict.limit == 500_000
+    # 租户时区 Asia/Shanghai，北京 8/7 00:30 的下一个日边界是 8/7 16:00Z。
+    # `reset_at` 必须经 tenant_timezone() 算出（agent=None 时不能调 effective_timezone）。
+    assert verdict.reset_at == datetime(2026, 8, 7, 16, 0, tzinfo=UTC)
+
+
+async def test_agent_none_is_unaffected_by_agent_day_or_month_limits() -> None:
+    """agent=None 时即使传入的 tenant_counter 未击穿，也不会因为跳过了 agent 档而误判。
+
+    这里没有 agent 可供击穿 agent_day / agent_month，只验证 tenant_day 未击穿时
+    正常放行、且不抛异常。
+    """
+    verdict = await _evaluate(agent=None, tenant_counter=_counter(tokens_used_today=0))
+
+    assert verdict.allowed is True
+    assert verdict.blocked_scope is None
+
+
+async def test_enforcement_mode_defaults_to_enforce_when_setting_absent(
     monkeypatch,
 ) -> None:
+    """行缺失属于配置层缺省（读取动作成功，只是值不可用），安全默认值是 enforce。"""
+
     async def fake_get_value(key, default=None):
         return default
 
     monkeypatch.setattr(budget.system_setting_dao, "get_value", fake_get_value)
+    records, handler_id = _capture_logs()
 
-    assert await budget.current_enforcement_mode() == MODE_WARN_ONLY
+    try:
+        mode = await budget.current_enforcement_mode()
+    finally:
+        logger.remove(handler_id)
+
+    assert mode == MODE_ENFORCE
+    assert any(
+        level == "WARNING" and "token_budget_enforcement_mode_defaulted reason=row_absent" in text
+        for level, text in records
+    )
 
 
 async def test_enforcement_mode_reads_the_dict_shaped_setting(monkeypatch) -> None:
@@ -213,17 +273,34 @@ async def test_enforcement_mode_reads_the_dict_shaped_setting(monkeypatch) -> No
     monkeypatch.setattr(budget.system_setting_dao, "get_value", fake_get_value)
 
     assert await budget.current_enforcement_mode() == MODE_ENFORCE
+    # value 里没有 grace_until 时不进入 grace（任务 3.4）：effective_mode 直接
+    # 等于 configured_mode，不会被 grace 覆写成 warn_only。
+    reset_enforcement_mode_cache()
+    state = await budget.current_enforcement_state()
+    assert state.configured_mode == MODE_ENFORCE
+    assert state.grace_until is None
+    assert state.effective_mode == MODE_ENFORCE
 
 
-async def test_unknown_mode_value_falls_back_to_warn_only(monkeypatch) -> None:
-    """脏配置不该意外变成硬拦。"""
+async def test_unknown_mode_value_falls_back_to_enforce(monkeypatch) -> None:
+    """脏值也是"读到了值但值不可用"，属于配置层缺省，安全默认值是 enforce。"""
 
     async def fake_get_value(key, default=None):
         return {"mode": "whatever"}
 
     monkeypatch.setattr(budget.system_setting_dao, "get_value", fake_get_value)
+    records, handler_id = _capture_logs()
 
-    assert await budget.current_enforcement_mode() == MODE_WARN_ONLY
+    try:
+        mode = await budget.current_enforcement_mode()
+    finally:
+        logger.remove(handler_id)
+
+    assert mode == MODE_ENFORCE
+    assert any(
+        level == "WARNING" and "token_budget_enforcement_mode_defaulted reason=dirty_value" in text
+        for level, text in records
+    )
 
 
 async def test_enforcement_mode_falls_back_to_warn_only_when_lookup_raises(
@@ -237,6 +314,227 @@ async def test_enforcement_mode_falls_back_to_warn_only_when_lookup_raises(
 
     async def fake_get_value(key, default=None):
         raise OSError("connection refused")
+
+    monkeypatch.setattr(budget.system_setting_dao, "get_value", fake_get_value)
+
+    assert await budget.current_enforcement_mode() == MODE_WARN_ONLY
+
+
+async def test_cache_hit_within_ttl_does_not_re_query(monkeypatch) -> None:
+    """TTL 内连续两次调用，中间无时间流逝，DB 只查一次。"""
+    calls = 0
+
+    async def counting_get_value(key, default=None):
+        nonlocal calls
+        calls += 1
+        return {"mode": "enforce"}
+
+    monkeypatch.setattr(budget.system_setting_dao, "get_value", counting_get_value)
+
+    first = await budget.current_enforcement_mode()
+    second = await budget.current_enforcement_mode()
+
+    assert first == MODE_ENFORCE
+    assert second == MODE_ENFORCE
+    assert calls == 1, "缓存命中时不应重新查库"
+
+
+async def test_cache_expires_after_ttl_and_re_queries(monkeypatch) -> None:
+    """TTL 过期后重读：用 monkeypatch 操纵单调时钟，模拟时间流逝。"""
+    calls = 0
+
+    async def counting_get_value(key, default=None):
+        nonlocal calls
+        calls += 1
+        return {"mode": "enforce"}
+
+    monkeypatch.setattr(budget.system_setting_dao, "get_value", counting_get_value)
+
+    fake_now = [1_000.0]
+    monkeypatch.setattr(budget.time, "monotonic", lambda: fake_now[0])
+
+    first = await budget.current_enforcement_mode()
+    assert first == MODE_ENFORCE
+    assert calls == 1
+
+    # TTL 内，不应重读。
+    fake_now[0] += budget._MODE_TTL_SECONDS - 1
+    second = await budget.current_enforcement_mode()
+    assert second == MODE_ENFORCE
+    assert calls == 1
+
+    # 超过 TTL，应重读。
+    fake_now[0] += 2
+    third = await budget.current_enforcement_mode()
+    assert third == MODE_ENFORCE
+    assert calls == 2, "TTL 过期后必须重新查库"
+
+
+async def test_stale_cache_used_when_lookup_fails_within_tolerance(monkeypatch) -> None:
+    """读取失败时使用 stale 缓存（缓存年龄在 600 秒容忍期内）。"""
+    fake_now = [2_000.0]
+    monkeypatch.setattr(budget.time, "monotonic", lambda: fake_now[0])
+
+    async def succeeding_get_value(key, default=None):
+        return {"mode": "warn_only"}
+
+    monkeypatch.setattr(budget.system_setting_dao, "get_value", succeeding_get_value)
+
+    # 先成功写入缓存。
+    primed = await budget.current_enforcement_mode()
+    assert primed == MODE_WARN_ONLY
+
+    # 让 TTL 过期，但仍在 stale 容忍期内，读取失败。
+    fake_now[0] += budget._MODE_TTL_SECONDS + 1
+
+    async def failing_get_value(key, default=None):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(budget.system_setting_dao, "get_value", failing_get_value)
+
+    result = await budget.current_enforcement_mode()
+
+    assert result == MODE_WARN_ONLY, "读取失败但缓存仍在 stale 容忍期内，应沿用缓存值"
+
+
+async def test_fail_open_when_stale_tolerance_exceeded(monkeypatch) -> None:
+    """超出 stale 容忍期后仍然 fail-open 到 warn_only（不使用过旧的缓存值）。"""
+    fake_now = [3_000.0]
+    monkeypatch.setattr(budget.time, "monotonic", lambda: fake_now[0])
+
+    async def succeeding_get_value(key, default=None):
+        return {"mode": "enforce"}
+
+    monkeypatch.setattr(budget.system_setting_dao, "get_value", succeeding_get_value)
+
+    primed = await budget.current_enforcement_mode()
+    assert primed == MODE_ENFORCE
+
+    # 超出 stale 容忍期（TTL 之外再加 stale 容忍期，再加一点余量）。
+    fake_now[0] += budget._MODE_TTL_SECONDS + budget._MODE_STALE_TOLERANCE_SECONDS + 1
+
+    async def failing_get_value(key, default=None):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(budget.system_setting_dao, "get_value", failing_get_value)
+
+    result = await budget.current_enforcement_mode()
+
+    assert result == MODE_WARN_ONLY, "缓存已超出 stale 容忍期，不得再被信任，必须 fail-open"
+
+
+async def test_reset_enforcement_mode_cache_forces_immediate_re_read(monkeypatch) -> None:
+    """`reset_enforcement_mode_cache()` 后立即重读，不受 TTL 影响。"""
+    calls = 0
+
+    async def counting_get_value(key, default=None):
+        nonlocal calls
+        calls += 1
+        return {"mode": "enforce"}
+
+    monkeypatch.setattr(budget.system_setting_dao, "get_value", counting_get_value)
+
+    first = await budget.current_enforcement_mode()
+    assert first == MODE_ENFORCE
+    assert calls == 1
+
+    # 仍在 TTL 内，未重置时不应重读。
+    second = await budget.current_enforcement_mode()
+    assert calls == 1
+
+    reset_enforcement_mode_cache()
+
+    third = await budget.current_enforcement_mode()
+    assert third == MODE_ENFORCE
+    assert calls == 2, "reset_enforcement_mode_cache() 之后必须强制重新查库"
+
+
+async def test_grace_missing_does_not_activate_grace(monkeypatch) -> None:
+    """value 里没有 grace_until 键 -> 不进入 grace，effective_mode 等于 configured_mode。"""
+
+    async def fake_get_value(key, default=None):
+        return {"mode": "enforce"}
+
+    monkeypatch.setattr(budget.system_setting_dao, "get_value", fake_get_value)
+
+    state = await budget.current_enforcement_state(now=NOW)
+
+    assert state.configured_mode == MODE_ENFORCE
+    assert state.grace_until is None
+    assert state.effective_mode == MODE_ENFORCE
+    assert state.source == "row_present"
+
+
+async def test_grace_expired_does_not_activate_grace(monkeypatch) -> None:
+    """grace_until 已经过期（now >= grace_until）-> 不进入 grace。"""
+    past = "2026-08-01T00:00:00+00:00"  # 早于 NOW（2026-08-06）
+
+    async def fake_get_value(key, default=None):
+        return {"mode": "enforce", "grace_until": past}
+
+    monkeypatch.setattr(budget.system_setting_dao, "get_value", fake_get_value)
+
+    state = await budget.current_enforcement_state(now=NOW)
+
+    assert state.configured_mode == MODE_ENFORCE
+    assert state.grace_until == datetime.fromisoformat(past)
+    assert state.effective_mode == MODE_ENFORCE, "grace 已过期，effective_mode 应等于 configured_mode"
+
+
+async def test_grace_unparsable_does_not_activate_grace(monkeypatch) -> None:
+    """grace_until 格式错误（不可解析）-> 不进入 grace，不抛异常。"""
+
+    async def fake_get_value(key, default=None):
+        return {"mode": "enforce", "grace_until": "not-a-valid-timestamp"}
+
+    monkeypatch.setattr(budget.system_setting_dao, "get_value", fake_get_value)
+
+    state = await budget.current_enforcement_state(now=NOW)
+
+    assert state.configured_mode == MODE_ENFORCE
+    assert state.grace_until is None
+    assert state.effective_mode == MODE_ENFORCE
+
+
+async def test_grace_active_forces_warn_only_and_logs_once_per_ttl(monkeypatch) -> None:
+    """grace_until 在未来 -> grace 生效，effective_mode 恒为 warn_only（无论 configured_mode）。
+
+    同时验证节流：TTL 内命中缓存的后续调用不重复记 INFO 日志——这是"每进程每 TTL
+    一次，不逐调用刷屏"的实现手段（复用任务 3.3 的缓存写入时机作为节流依据）。
+    """
+    future = "2026-08-13T00:00:00+00:00"  # 晚于 NOW（2026-08-06）
+
+    async def fake_get_value(key, default=None):
+        return {"mode": "enforce", "grace_until": future}
+
+    monkeypatch.setattr(budget.system_setting_dao, "get_value", fake_get_value)
+    records, handler_id = _capture_logs()
+
+    try:
+        first = await budget.current_enforcement_state(now=NOW)
+        second = await budget.current_enforcement_state(now=NOW)  # 命中新鲜缓存
+    finally:
+        logger.remove(handler_id)
+
+    assert first.configured_mode == MODE_ENFORCE
+    assert first.grace_until == datetime.fromisoformat(future)
+    assert first.effective_mode == MODE_WARN_ONLY, "grace 生效时 effective_mode 恒为 warn_only"
+    assert first.source == "row_present"
+
+    assert second.effective_mode == MODE_WARN_ONLY
+    assert second.source == "cache", "第二次调用应命中缓存，不重新查库"
+
+    grace_logs = [text for level, text in records if level == "INFO" and "token_budget_enforcement_grace_active" in text]
+    assert len(grace_logs) == 1, "grace 生效日志每进程每 TTL 只记一次，不逐调用刷屏"
+    assert future in grace_logs[0]
+
+
+async def test_current_enforcement_mode_matches_effective_mode_during_grace(monkeypatch) -> None:
+    """`current_enforcement_mode()` 的薄封装行为：grace 生效时同样返回 warn_only。"""
+    future = "2026-08-13T00:00:00+00:00"
+
+    async def fake_get_value(key, default=None):
+        return {"mode": "enforce", "grace_until": future}
 
     monkeypatch.setattr(budget.system_setting_dao, "get_value", fake_get_value)
 

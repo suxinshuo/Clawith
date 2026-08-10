@@ -6,6 +6,7 @@ import UserManagement from './UserManagement';
 import InvitationCodes from './InvitationCodes';
 import { useDialog } from '../components/Dialog/DialogProvider';
 import { useToast } from '../components/Toast/ToastProvider';
+import { useAuthStore } from '../stores';
 import { buildCompanyRegions, type CompanyRegion } from '../utils/companyRegions';
 import OrgTab from './enterprise-settings/tabs/OrgTab';
 import SkillsTab from './enterprise-settings/tabs/SkillsTab';
@@ -98,11 +99,29 @@ function ThemeColorPicker() {
 
 
 
+/**
+ * Token 限额输入框存的是原始字符串/数字混合值（''、0、空白、非数字都可能出现）。0 或更小
+ * 在后端语义里等于「禁止一切」，和「未设上限」（null）完全不同，绝不能把 0 当限额提交，
+ * 所以这里把空字符串、'0'、纯空白、非数字、以及 <= 0 的数值统一收敛成 null，只有严格的
+ * 正整数才会被当作真实限额提交。逐字复制自 AgentDetailPage.tsx 的同名函数（未导出该文件
+ * 里的模块级函数，避免引入跨页面耦合——本次改动是纯 UI 层的独立卡片/字段新增，两个页面
+ * 各自维护一份同样简单的转换逻辑比引入一次跨页面 import 更合适）。
+ */
+const toPositiveIntOrNull = (value: string | number): number | null => {
+    const n = Number(String(value).trim());
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+};
+
 export default function EnterpriseSettings() {
     const { t } = useTranslation();
     const dialog = useDialog();
     const toast = useToast();
     const qc = useQueryClient();
+    const currentUser = useAuthStore((s) => s.user);
+    // Token budget enforcement is a single platform-wide switch (not per-tenant),
+    // so only platform_admin may write it — deliberately narrower than
+    // canManageRuntimeModels in LlmTab.tsx, which also allows org_admin.
+    const isPlatformAdmin = currentUser?.role === 'platform_admin' || !!(currentUser as any)?.is_platform_admin;
     type TabKey = 'llm' | 'org' | 'info' | 'approvals' | 'audit' | 'tools' | 'skills' | 'quotas' | 'users' | 'invites' | 'okr';
     const VALID_TABS: TabKey[] = ['info', 'llm', 'tools', 'skills', 'okr', 'invites', 'quotas', 'users', 'org', 'approvals', 'audit'];
     const getTabFromHash = (): TabKey => {
@@ -130,11 +149,32 @@ export default function EnterpriseSettings() {
     }, []);
 
     // Tenant quota defaults
-    const [quotaForm, setQuotaForm] = useState({
+    // max_tokens_per_day / default_agent_max_tokens_per_day / default_agent_max_tokens_per_month
+    // (bugfix token-usage-limit-not-enforced, task 9.2) default to null (no limit) — unlike the
+    // other fields here, null is a *valid value* for these three, not "not yet loaded". They need
+    // an explicit type annotation so TS doesn't infer a number-only type from the numeric literal
+    // siblings above, and so the `null` default is accepted without a cast at every call site.
+    const [quotaForm, setQuotaForm] = useState<{
+        default_message_limit: number;
+        default_message_period: string;
+        default_max_agents: number;
+        default_agent_ttl_hours: number;
+        default_max_llm_calls_per_day: number;
+        min_heartbeat_interval_minutes: number;
+        default_max_triggers: number;
+        min_poll_interval_floor: number;
+        max_webhook_rate_ceiling: number;
+        max_tokens_per_day: number | null;
+        default_agent_max_tokens_per_day: number | null;
+        default_agent_max_tokens_per_month: number | null;
+    }>({
         default_message_limit: 50, default_message_period: 'permanent',
         default_max_agents: 2, default_agent_ttl_hours: 0,
         default_max_llm_calls_per_day: 1000, min_heartbeat_interval_minutes: 120,
         default_max_triggers: 20, min_poll_interval_floor: 5, max_webhook_rate_ceiling: 5,
+        max_tokens_per_day: null,
+        default_agent_max_tokens_per_day: null,
+        default_agent_max_tokens_per_month: null,
     });
     const [quotaSaving, setQuotaSaving] = useState(false);
     const [quotaSaved, setQuotaSaved] = useState(false);
@@ -153,6 +193,63 @@ export default function EnterpriseSettings() {
         } catch (e: any) { toast.error(t('common.error.saveFailed', '保存失败'), { details: String(e?.message || e) }); }
         setQuotaSaving(false);
     };
+
+    // Token budget enforcement mode (bugfix token-usage-limit-not-enforced, task 9.1).
+    // Separate state from quotaForm on purpose — the response shape here
+    // (configured_mode/effective_mode/grace_*/propagation_seconds) is unrelated
+    // to the tenant-quota PATCH payload above.
+    type TokenBudgetEnforcementState = {
+        configured_mode: 'enforce' | 'warn_only';
+        effective_mode: 'enforce' | 'warn_only';
+        grace_until: string | null;
+        grace_active: boolean;
+        set_by: string | null;
+        propagation_seconds: number;
+    };
+    const [tokenBudgetEnforcement, setTokenBudgetEnforcement] = useState<TokenBudgetEnforcementState | null>(null);
+    const [pendingMode, setPendingMode] = useState<'enforce' | 'warn_only'>('enforce');
+    const [tokenBudgetSaving, setTokenBudgetSaving] = useState(false);
+    const [tokenBudgetSaved, setTokenBudgetSaved] = useState(false);
+    const loadTokenBudgetEnforcement = () => {
+        fetchJson<TokenBudgetEnforcementState>('/enterprise/token-budget-enforcement').then(d => {
+            setTokenBudgetEnforcement(d);
+            setPendingMode(d.effective_mode);
+        }).catch(() => { });
+    };
+    useEffect(() => {
+        if (activeTab === 'quotas') loadTokenBudgetEnforcement();
+    }, [activeTab]);
+    const saveTokenBudgetEnforcement = async (overrides: { mode: string; clear_grace?: boolean }) => {
+        setTokenBudgetSaving(true);
+        try {
+            const updated = await fetchJson<TokenBudgetEnforcementState>('/enterprise/token-budget-enforcement', {
+                method: 'PUT',
+                body: JSON.stringify(overrides),
+            });
+            setTokenBudgetEnforcement(updated);
+            setPendingMode(updated.effective_mode);
+            setTokenBudgetSaved(true); setTimeout(() => setTokenBudgetSaved(false), 2000);
+        } catch (e: any) {
+            toast.error(t('common.error.saveFailed', '保存失败'), { details: String(e?.message || e) });
+        }
+        setTokenBudgetSaving(false);
+    };
+    const formatGraceRemaining = (graceUntil: string | null): string | null => {
+        if (!graceUntil) return null;
+        const until = new Date(graceUntil).getTime();
+        if (Number.isNaN(until)) return null;
+        const diffMs = until - Date.now();
+        if (diffMs <= 0) return null;
+        const totalMinutes = Math.floor(diffMs / 60000);
+        const days = Math.floor(totalMinutes / (24 * 60));
+        const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+        if (days > 0) {
+            return t('enterprise.quotas.tokenBudgetEnforcement.graceRemainingDays', '剩余 {{days}} 天 {{hours}} 小时', { days, hours });
+        }
+        const minutes = totalMinutes % 60;
+        return t('enterprise.quotas.tokenBudgetEnforcement.graceRemainingHours', '剩余 {{hours}} 小时 {{minutes}} 分钟', { hours, minutes });
+    };
+
     const [companyIntro, setCompanyIntro] = useState('');
     const [companyIntroSaving, setCompanyIntroSaving] = useState(false);
     const [companyIntroSaved, setCompanyIntroSaved] = useState(false);
@@ -656,6 +753,96 @@ export default function EnterpriseSettings() {
                 {/* ── Quotas Tab ── */}
                 {activeTab === 'quotas' && (
                     <div>
+                        {/* ── Token Budget Enforcement (bugfix token-usage-limit-not-enforced, task 9.1) ──
+                            Deliberately its own card, not folded into the quotas card below: it reads/writes
+                            a different backend resource (/enterprise/token-budget-enforcement, a single
+                            platform-wide switch) than the tenant-quota PATCH form underneath it. Surfacing
+                            effective_mode here — on the same screen as the usage numbers further down this
+                            tab — is the 2.14 fix: "usage shown as over-limit" and "requests will actually be
+                            rejected" become mutually verifiable on one screen instead of contradicting each
+                            other. */}
+                        <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>
+                            <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '10px' }}>
+                                {t('enterprise.quotas.tokenBudgetEnforcement.title', 'Token 限额执行')}
+                            </div>
+                            {!tokenBudgetEnforcement ? (
+                                <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>{t('common.loading', '加载中...')}</div>
+                            ) : (
+                                <>
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '20px', marginBottom: isPlatformAdmin ? '16px' : '0' }}>
+                                        <div>
+                                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                                {t('enterprise.quotas.tokenBudgetEnforcement.effectiveMode', '当前生效模式')}
+                                            </div>
+                                            <div style={{ fontSize: '14px', fontWeight: 600 }}>
+                                                {tokenBudgetEnforcement.effective_mode === 'enforce'
+                                                    ? t('enterprise.quotas.tokenBudgetEnforcement.modeEnforce', '拦截')
+                                                    : t('enterprise.quotas.tokenBudgetEnforcement.modeWarnOnly', '仅告警')}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                                {t('enterprise.quotas.tokenBudgetEnforcement.graceWindow', 'Grace 窗口')}
+                                            </div>
+                                            <div style={{ fontSize: '14px', fontWeight: 600 }}>
+                                                {tokenBudgetEnforcement.grace_active
+                                                    ? formatGraceRemaining(tokenBudgetEnforcement.grace_until)
+                                                        ?? t('enterprise.quotas.tokenBudgetEnforcement.graceEndingSoon', '即将结束')
+                                                    : t('enterprise.quotas.tokenBudgetEnforcement.graceInactive', '无生效中的 grace 窗口')}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    {isPlatformAdmin ? (
+                                        <>
+                                            <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                                                <div className="form-group" style={{ margin: 0, minWidth: '160px' }}>
+                                                    <label className="form-label">{t('enterprise.quotas.tokenBudgetEnforcement.modeLabel', '执行模式')}</label>
+                                                    <select
+                                                        className="form-input"
+                                                        value={pendingMode}
+                                                        onChange={e => setPendingMode(e.target.value as 'enforce' | 'warn_only')}
+                                                    >
+                                                        <option value="enforce">{t('enterprise.quotas.tokenBudgetEnforcement.modeEnforce', '拦截')}</option>
+                                                        <option value="warn_only">{t('enterprise.quotas.tokenBudgetEnforcement.modeWarnOnly', '仅告警')}</option>
+                                                    </select>
+                                                </div>
+                                                <button
+                                                    className="btn btn-primary"
+                                                    disabled={tokenBudgetSaving}
+                                                    onClick={() => saveTokenBudgetEnforcement({ mode: pendingMode })}
+                                                >
+                                                    {tokenBudgetSaving ? t('common.saving', '保存中...') : t('common.save', '保存')}
+                                                </button>
+                                                <button
+                                                    className="btn btn-secondary"
+                                                    disabled={tokenBudgetSaving}
+                                                    onClick={() => saveTokenBudgetEnforcement({ mode: 'enforce', clear_grace: true })}
+                                                >
+                                                    {t('enterprise.quotas.tokenBudgetEnforcement.enforceNow', '立即启用拦截')}
+                                                </button>
+                                                {tokenBudgetSaved && (
+                                                    <span style={{ color: 'var(--success)', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                                        <IconCheck size={13} stroke={2} /> {t('common.saved', '已保存')}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '8px' }}>
+                                                {t(
+                                                    'enterprise.quotas.tokenBudgetEnforcement.propagationHint',
+                                                    '修改后最长 {{seconds}} 秒在全部 worker 生效。',
+                                                    { seconds: tokenBudgetEnforcement.propagation_seconds ?? 30 },
+                                                )}
+                                            </div>
+                                        </>
+                                    ) : (
+                                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                            {t('enterprise.quotas.tokenBudgetEnforcement.readOnlyHint', '仅平台管理员可修改此设置。')}
+                                        </div>
+                                    )}
+                                </>
+                            )}
+                        </div>
+
                         <h3 style={{ marginBottom: '4px' }}>{t('enterprise.quotas.defaultUserQuotas')}</h3>
                         <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '16px' }}>
                             {t('enterprise.quotas.defaultsApply')}
@@ -763,6 +950,59 @@ export default function EnterpriseSettings() {
                                     </div>
                                 </div>
                             </div>
+                            {/* ── Token Limits (bugfix token-usage-limit-not-enforced, task 9.2) ──
+                                Inside the existing quotas card (not the standalone "Token Budget
+                                Enforcement" card above, which manages the platform-wide mode switch).
+                                These three fields are tenant-level quota columns saved via the same
+                                saveQuotas()/PATCH below — null means "no limit"; 0 (deny everything,
+                                see bugfix.md 3.2) is intentionally not offered here, matching today's
+                                Agent-level limit UI, which offers the same reduced range and leaves
+                                0 as an API-only value. */}
+                            <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '10px' }}>
+                                {t('enterprise.quotas.tokenLimits', 'Token 限额')}
+                            </div>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '16px', marginBottom: '20px' }}>
+                                <div className="form-group">
+                                    <label className="form-label">{t('enterprise.quotas.tenantMaxTokensPerDay', '企业每日 Token 上限')}</label>
+                                    <input
+                                        className="form-input"
+                                        type="number"
+                                        min={1}
+                                        value={quotaForm.max_tokens_per_day ?? ''}
+                                        onChange={e => setQuotaForm({ ...quotaForm, max_tokens_per_day: toPositiveIntOrNull(e.target.value) })}
+                                    />
+                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
+                                        {t('enterprise.quotas.tenantMaxTokensPerDayDesc', '含系统开销（群聊压缩 / 规划 / 连通性测试）。留空表示无限制。')}
+                                    </div>
+                                </div>
+                                <div className="form-group">
+                                    <label className="form-label">{t('enterprise.quotas.defaultAgentMaxTokensPerDay', '数字员工默认每日 Token 上限')}</label>
+                                    <input
+                                        className="form-input"
+                                        type="number"
+                                        min={1}
+                                        value={quotaForm.default_agent_max_tokens_per_day ?? ''}
+                                        onChange={e => setQuotaForm({ ...quotaForm, default_agent_max_tokens_per_day: toPositiveIntOrNull(e.target.value) })}
+                                    />
+                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
+                                        {t('enterprise.quotas.defaultAgentMaxTokensPerDayDesc', '新建数字员工时带入的默认每日 Token 限额。留空表示无限制。')}
+                                    </div>
+                                </div>
+                                <div className="form-group">
+                                    <label className="form-label">{t('enterprise.quotas.defaultAgentMaxTokensPerMonth', '数字员工默认每月 Token 上限')}</label>
+                                    <input
+                                        className="form-input"
+                                        type="number"
+                                        min={1}
+                                        value={quotaForm.default_agent_max_tokens_per_month ?? ''}
+                                        onChange={e => setQuotaForm({ ...quotaForm, default_agent_max_tokens_per_month: toPositiveIntOrNull(e.target.value) })}
+                                    />
+                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
+                                        {t('enterprise.quotas.defaultAgentMaxTokensPerMonthDesc', '新建数字员工时带入的默认每月 Token 限额。留空表示无限制。')}
+                                    </div>
+                                </div>
+                            </div>
+
                             <div style={{ marginTop: '16px', display: 'flex', gap: '8px', alignItems: 'center' }}>
                                 <button className="btn btn-primary" onClick={saveQuotas} disabled={quotaSaving}>
                                     {quotaSaving ? t('common.loading') : t('common.save', 'Save')}

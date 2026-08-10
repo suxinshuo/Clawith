@@ -29,6 +29,34 @@ class SystemSettingDAO(BaseDAO[SystemSetting]):
             return default
         return setting.value
 
+    async def set_value(self, key: str, value: dict) -> SystemSetting:
+        """Create or update the JSON value for *key* (upsert).
+
+        Uses a "select then write" pattern (query for the row, update it if
+        present, otherwise insert a new one) rather than a database-native
+        ``INSERT ... ON CONFLICT`` upsert. This mirrors the existing
+        "generic write endpoint" implementation in
+        ``app.api.enterprise.update_system_setting`` (``PUT
+        /system-settings/{key}``), which this method is meant to let callers
+        stop bypassing. No dialect-specific upsert construct is introduced,
+        keeping this DAO consistent with the rest of the codebase's style.
+        """
+        async with self.session() as db:
+            result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
+            setting = result.scalar_one_or_none()
+            if setting is not None:
+                setting.value = value
+            else:
+                setting = SystemSetting(key=key, value=value)
+                db.add(setting)
+            # Flush (rather than relying solely on BaseDAO.session()'s
+            # auto-commit) so that DB-generated fields such as `updated_at`
+            # are populated on the returned object before this context
+            # manager exits, matching the pattern used by
+            # BaseDAO.create()/update().
+            await db.flush()
+            return setting
+
     async def is_invitation_code_enabled(self) -> bool:
         """Return whether invitation-code enforcement is active."""
         value = await self.get_value("invitation_code_enabled", {})

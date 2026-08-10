@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 import uuid
 
@@ -45,12 +46,36 @@ class _NoopExecutor:
 
 
 class _DB:
-    def __init__(self) -> None:
+    """Test double for the caller-owned session.
+
+    `_validate_targets` now loads a `Tenant` / `TenantTokenCounter` pair once per call
+    (task 7.1's `gate.load_subjects`) to feed the unified budget gate. Every existing test
+    in this file constructs Agent targets with no token limits configured (see `_target`
+    below), so returning "no row found" for both queries (the default here) is enough to
+    keep them exercising the same non-budget-related behavior they tested before task 7.1
+    — `budget.evaluate()` treats a missing tenant/counter the same as "no tenant-level
+    limit configured". Tests that need a specific tenant/counter (e.g. to exercise the
+    tenant-day budget check) pass `tenant`/`tenant_counter` explicitly.
+    """
+
+    def __init__(
+        self,
+        *,
+        tenant: object | None = None,
+        tenant_counter: object | None = None,
+    ) -> None:
         self.added: list[object] = []
         self.flush_count = 0
+        self.executed: list[object] = []
+        self._results = [tenant, tenant_counter]
 
     def add(self, value: object) -> None:
         self.added.append(value)
+
+    async def execute(self, statement: object):
+        self.executed.append(statement)
+        value = self._results.pop(0) if self._results else None
+        return SimpleNamespace(scalar_one_or_none=lambda: value)
 
     async def flush(self) -> None:
         self.flush_count += 1
@@ -219,6 +244,7 @@ def _target(
     participant_id: uuid.UUID | None = None,
     agent_id: uuid.UUID | None = None,
     name: str = "Target Agent",
+    **agent_overrides,
 ) -> ResolvedGroupMention:
     model = LLMModel(
         id=uuid.uuid4(),
@@ -229,17 +255,19 @@ def _target(
         label="Test",
         enabled=True,
     )
-    agent = Agent(
-        id=agent_id or uuid.uuid4(),
-        tenant_id=tenant_id,
-        creator_id=uuid.uuid4(),
-        name=name,
-        primary_model_id=model.id,
-        status="idle",
-        is_expired=False,
-        access_mode="company",
-        max_tool_rounds=50,
-    )
+    agent_fields = {
+        "id": agent_id or uuid.uuid4(),
+        "tenant_id": tenant_id,
+        "creator_id": uuid.uuid4(),
+        "name": name,
+        "primary_model_id": model.id,
+        "status": "idle",
+        "is_expired": False,
+        "access_mode": "company",
+        "max_tool_rounds": 50,
+    }
+    agent_fields.update(agent_overrides)
+    agent = Agent(**agent_fields)
     return ResolvedGroupMention(
         participant_id=participant_id or uuid.uuid4(),
         participant_type="agent",
@@ -250,6 +278,26 @@ def _target(
         agent=agent,
         model=model,
     )
+
+
+def _forced_enforce(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force `gate.check()`'s judgement to run under `enforce`.
+
+    `_validate_targets` doesn't pass an explicit `mode` to `gate.check()`, so without this
+    the outcome would depend on `current_enforcement_mode()` reading `system_settings` —
+    which isn't backed by a real database connection in these unit tests and would
+    transient-fail-open to `warn_only`, always allowing the request through regardless of
+    whether the budget was actually breached. Forcing `enforce` here mirrors the same
+    pattern used by `test_token_budget_gate_lanes.py`'s counterexamples 2/4/5.
+    """
+    from app.services.token_accounting import gate as gate_module
+    from app.services.token_accounting.budget import MODE_ENFORCE
+    from app.services.token_accounting.budget import evaluate as real_evaluate
+
+    async def forced_enforce_evaluate(**kwargs):
+        return await real_evaluate(**{**kwargs, "mode": MODE_ENFORCE})
+
+    monkeypatch.setattr(gate_module, "evaluate", forced_enforce_evaluate)
 
 
 def test_frozen_intent_rejects_a_noncanonical_participant_sequence() -> None:
@@ -518,6 +566,185 @@ async def test_cycle_limit_fails_preflight_before_terminal() -> None:
 
     assert raised.value.code == "agent_cycle_limit_reached"
     assert raised.value.repairable is True
+
+
+@pytest.mark.asyncio
+async def test_breached_agent_token_budget_fails_preflight_with_repairable_error(
+    monkeypatch,
+) -> None:
+    """A target Agent that has breached its own daily token limit is rejected.
+
+    Before task 7.1, this path was decided by a hand-rolled check in
+    `_target_budget_available` that never had any test coverage of the "over budget ->
+    blocked" branch for tokens specifically (the pre-existing tests in this file only ever
+    construct targets with no token limits configured, and
+    `test_token_period_consistency.py` only exercised the period-rollover exemption, not
+    the plain "still within the same period and over budget" case). This is the first test
+    in this file to drive `_validate_targets` through `gate.check(lane=LANE_GROUP_HANDOFF,
+    ...)` and confirm the `group_handoff_budget_unavailable` error code is still raised,
+    with `repairable=True` preserved (3.9).
+    """
+    _forced_enforce(monkeypatch)
+    source_run, scope, context, state = _records()
+    over_limit_target = _target(
+        tenant_id=source_run.tenant_id,
+        max_tokens_per_day=100_000,
+        tokens_used_today=200_000,
+        last_daily_reset=datetime.now(UTC),
+    )
+    ensure = AsyncMock(return_value=_cycle_check())
+
+    with (
+        patch(
+            "app.services.agent_runtime.group_handoff._load_source_run",
+            new=AsyncMock(return_value=source_run),
+        ),
+        patch(
+            "app.services.agent_runtime.group_handoff._load_sender_scope",
+            new=AsyncMock(return_value=scope),
+        ),
+        patch(
+            "app.services.agent_runtime.group_handoff._resolve_mentions",
+            new=AsyncMock(return_value=(over_limit_target,)),
+        ),
+        patch(
+            "app.services.agent_runtime.group_handoff.AgentCycleGuard.ensure_delegation_allowed",
+            new=ensure,
+        ),
+    ):
+        with pytest.raises(GroupAgentHandoffError) as raised:
+            await preflight_group_agent_handoff(
+                _DB(),  # type: ignore[arg-type]
+                state=state,
+                context=context,
+                content="Continue",
+                mention_participant_ids=(str(over_limit_target.participant_id),),
+                settings=_settings(),
+                clock=lambda: NOW,
+            )
+
+    assert raised.value.code == "group_handoff_budget_unavailable"
+    assert raised.value.repairable is True
+    # The budget check must short-circuit before the cycle guard runs, matching the order
+    # non-token checks used before task 7.1.
+    assert ensure.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_breached_tenant_token_budget_fails_preflight_for_every_target(
+    monkeypatch,
+) -> None:
+    """A breached tenant-day limit now blocks handoff targets too (unlike before task 7.1).
+
+    Before this task, `_target_budget_available` never looked at the tenant at all —
+    `tenant` was accepted only to compute the agent's effective timezone. After the
+    convergence to `gate.check()`, the tenant-day check now also applies to Group handoff
+    targets, matching the direct-conversation lane (this was an explicit, intended
+    consequence noted in design.md: "判定主体多了 tenant / tenant_counter：意味着租户日
+    上限击穿时所有目标都不可用").
+    """
+    _forced_enforce(monkeypatch)
+    source_run, scope, context, state = _records()
+    target = _target(tenant_id=source_run.tenant_id)  # no agent-level limits configured
+    tenant = SimpleNamespace(
+        id=source_run.tenant_id,
+        timezone="UTC",
+        max_tokens_per_day=500_000,
+    )
+    tenant_counter = SimpleNamespace(
+        tenant_id=source_run.tenant_id,
+        tokens_used_today=500_000,
+        last_daily_reset=datetime.now(UTC),
+    )
+    ensure = AsyncMock(return_value=_cycle_check())
+
+    with (
+        patch(
+            "app.services.agent_runtime.group_handoff._load_source_run",
+            new=AsyncMock(return_value=source_run),
+        ),
+        patch(
+            "app.services.agent_runtime.group_handoff._load_sender_scope",
+            new=AsyncMock(return_value=scope),
+        ),
+        patch(
+            "app.services.agent_runtime.group_handoff._resolve_mentions",
+            new=AsyncMock(return_value=(target,)),
+        ),
+        patch(
+            "app.services.agent_runtime.group_handoff.AgentCycleGuard.ensure_delegation_allowed",
+            new=ensure,
+        ),
+    ):
+        with pytest.raises(GroupAgentHandoffError) as raised:
+            await preflight_group_agent_handoff(
+                _DB(tenant=tenant, tenant_counter=tenant_counter),  # type: ignore[arg-type]
+                state=state,
+                context=context,
+                content="Continue",
+                mention_participant_ids=(str(target.participant_id),),
+                settings=_settings(),
+                clock=lambda: NOW,
+            )
+
+    assert raised.value.code == "group_handoff_budget_unavailable"
+    assert raised.value.repairable is True
+    assert ensure.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_within_budget_target_still_passes_preflight(monkeypatch) -> None:
+    """Guard test: a target within every limit is not accidentally blocked by the gate.
+
+    This pins the non-regression half of task 7.1's convergence — adding the token check
+    back in must not falsely reject a target that has plenty of budget left.
+    """
+    _forced_enforce(monkeypatch)
+    source_run, scope, context, state = _records()
+    target = _target(
+        tenant_id=source_run.tenant_id,
+        max_tokens_per_day=100_000,
+        tokens_used_today=1_000,
+        last_daily_reset=datetime.now(UTC),
+    )
+    tenant = SimpleNamespace(id=source_run.tenant_id, timezone="UTC", max_tokens_per_day=None)
+    tenant_counter = SimpleNamespace(
+        tenant_id=source_run.tenant_id,
+        tokens_used_today=0,
+        last_daily_reset=datetime.now(UTC),
+    )
+    ensure = AsyncMock(return_value=_cycle_check())
+
+    with (
+        patch(
+            "app.services.agent_runtime.group_handoff._load_source_run",
+            new=AsyncMock(return_value=source_run),
+        ),
+        patch(
+            "app.services.agent_runtime.group_handoff._load_sender_scope",
+            new=AsyncMock(return_value=scope),
+        ),
+        patch(
+            "app.services.agent_runtime.group_handoff._resolve_mentions",
+            new=AsyncMock(return_value=(target,)),
+        ),
+        patch(
+            "app.services.agent_runtime.group_handoff.AgentCycleGuard.ensure_delegation_allowed",
+            new=ensure,
+        ),
+    ):
+        intent = await preflight_group_agent_handoff(
+            _DB(tenant=tenant, tenant_counter=tenant_counter),  # type: ignore[arg-type]
+            state=state,
+            context=context,
+            content="Continue",
+            mention_participant_ids=(str(target.participant_id),),
+            settings=_settings(),
+            clock=lambda: NOW,
+        )
+
+    assert intent.mention_participant_ids == (target.participant_id,)
+    assert ensure.await_count == 1
 
 
 @pytest.mark.asyncio

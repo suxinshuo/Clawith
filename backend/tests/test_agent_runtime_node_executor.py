@@ -480,6 +480,40 @@ async def test_graph_commits_deterministic_compact_failure_without_retry() -> No
 
 
 @pytest.mark.asyncio
+async def test_token_budget_exceeded_compact_error_commits_a_failed_terminal_lifecycle() -> None:
+    """Task 6.5: pin that `_compact`'s existing `RunCompactorError` -> `lifecycle.reason`
+    propagation (exercised above for `input_exceeds_model_context`) also holds for the
+    new `token_budget_exceeded` code produced by the run_compact budget gate (task 6.1).
+    `RunCompactorError.code` and `is_deterministic_compact_error = True` are unchanged by
+    task 6.1 — this only confirms the upper layer's existing error-code propagation logic
+    generalizes to the new code without any change to `node_executor.py` itself.
+    """
+    run_id = uuid.uuid4()
+    executor = _executor(
+        ModelService(),
+        run_compactor=FailingRunCompactor(
+            RunCompactorError(
+                "token_budget_exceeded",
+                "企业当日 token 用量已达上限（500,000/500,000，scope=tenant_day）。",
+            )
+        ),
+    )
+    state = _state(run_id)
+    state["lifecycle"]["next_route"] = "compact"
+
+    update = await executor.execute(
+        "compact",
+        state,
+        _context(run_id, executor, "command-compact"),
+    )
+
+    assert update["lifecycle"]["status"] == "failed"
+    assert update["lifecycle"]["next_route"] == "terminal"
+    assert update["lifecycle"]["reason"] == "token_budget_exceeded"
+    assert update["lifecycle"]["error"]["code"] == "token_budget_exceeded"
+
+
+@pytest.mark.asyncio
 async def test_transient_compact_error_still_escapes_for_langgraph_retry() -> None:
     run_id = uuid.uuid4()
     error = TransientRunCompactorError(

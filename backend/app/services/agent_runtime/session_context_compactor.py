@@ -34,6 +34,16 @@ from app.services.llm.client import LLMMessage
 from app.services.llm.model_resolution import resolve_active_agent_model
 from app.services.llm.single_step import LLMCompletionStep, complete_llm_once
 from app.services.llm.utils import get_max_tokens
+from app.services.token_accounting.budget import budget_exceeded_message
+from app.services.token_accounting.gate import (
+    LANE_GROUP_COMPACT,
+    LANE_SESSION_COMPACT,
+    BudgetClearance,
+    BudgetSubjects,
+    check as gate_check,
+    clearance_from,
+    load_subjects,
+)
 from app.services.token_accounting.ledger import SYSTEM_SCOPE_GROUP_COMPACT
 
 
@@ -92,11 +102,22 @@ class SessionContextCompactorError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class CompactModelSelection:
-    """The one model allowed for a Session Compact operation."""
+    """The one model allowed for a Session Compact operation.
+
+    `subjects` carries the budget-check principals (agent / tenant /
+    tenant_counter) needed by the task 6.2 budget gate. It mirrors the
+    backward-compatible design of `RunCompactInputs.subjects` from task 6.1:
+    it defaults to `None` so construction sites/test doubles that do not
+    (yet) supply it keep working unchanged. The production resolver
+    (`_resolve_models`) always populates it; a missing subject set should
+    only happen for test doubles that construct `CompactModelSelection`
+    directly without going through `_resolve_models`.
+    """
 
     primary: LLMModel
     usage_agent_id: uuid.UUID | None
     system_scope: str | None = None
+    subjects: BudgetSubjects | None = None
 
     def __post_init__(self) -> None:
         # complete_llm_once（经由账本）要求 usage_agent_id/system_scope 恰好
@@ -126,6 +147,7 @@ class CompactCompletionPort(Protocol):
         tenant_id: uuid.UUID | None = None,
         system_scope: str | None = None,
         supports_vision: bool = False,
+        clearance: BudgetClearance,
     ) -> LLMCompletionStep: ...
 
 
@@ -323,10 +345,16 @@ class LLMSessionContextCompactor:
                     self._settings,
                     tenant_id=request.tenant_id,
                 )
+                subjects = await load_subjects(
+                    db,
+                    tenant_id=request.tenant_id,
+                    agent=None,
+                )
                 return CompactModelSelection(
                     primary=model,
                     usage_agent_id=None,
                     system_scope=SYSTEM_SCOPE_GROUP_COMPACT,
+                    subjects=subjects,
                 )
 
             if session.agent_id is None or session.agent_id != request.source_agent_id:
@@ -353,10 +381,16 @@ class LLMSessionContextCompactor:
                     "session_compact_model_unavailable",
                     "Session Agent has no usable model",
                 )
+            subjects = await load_subjects(
+                db,
+                tenant_id=request.tenant_id,
+                agent=agent,
+            )
             return CompactModelSelection(
                 primary=primary,
                 usage_agent_id=agent.id,
                 system_scope=None,
+                subjects=subjects,
             )
 
     def _budget(self, model: LLMModel):
@@ -384,6 +418,7 @@ class LLMSessionContextCompactor:
         system_scope: str | None,
         payload: JsonObject,
         watermark: uuid.UUID | None,
+        clearance: BudgetClearance,
     ) -> SessionContextCandidate:
         step = await self._completion(
             model,
@@ -393,6 +428,7 @@ class LLMSessionContextCompactor:
             tenant_id=tenant_id,
             system_scope=system_scope,
             supports_vision=False,
+            clearance=clearance,
         )
         return _candidate_from_step(step, watermark=watermark)
 
@@ -403,7 +439,38 @@ class LLMSessionContextCompactor:
         model: LLMModel,
         usage_agent_id: uuid.UUID | None,
         system_scope: str | None,
+        subjects: BudgetSubjects | None,
     ) -> SessionContextCandidate:
+        # `system_scope` 区分 session_compact（None，按 agent 记账）与
+        # group_compact（SYSTEM_SCOPE_GROUP_COMPACT，按租户记账）两个场景，
+        # 对应两个不同的 lane。判定只做一次，在进入下面的批次循环、发起第一次
+        # `_complete_batch` 调用之前完成——`_complete_batch` 在循环内会被多次
+        # 调用，重复判定没有意义。
+        lane = LANE_GROUP_COMPACT if system_scope is not None else LANE_SESSION_COMPACT
+        if subjects is not None:
+            verdict = await gate_check(
+                lane=lane,
+                subjects=subjects,
+                estimated_next_round_tokens=0,
+                run_id=None,
+            )
+            if not verdict.allowed:
+                raise SessionContextCompactorError(
+                    "token_budget_exceeded",
+                    budget_exceeded_message(verdict),
+                )
+            clearance = clearance_from(lane, verdict)
+        else:
+            # `subjects is None` 只应该来自测试替身直接构造 `CompactModelSelection`
+            # 而不经过 `_resolve_models`（生产唯一的构造点，总会带出 subjects）。
+            # 与任务 6.1 `RunCompactInputs.subjects is None` 的设计决定一致：判定
+            # 所需的输入缺失不等于判定跑过并拒绝，放行而不是 fail closed，理由见
+            # `run_compactor.compact_if_needed` 里的同名注释，不在此重复展开。
+            clearance = BudgetClearance.not_applicable(
+                lane,
+                reason="CompactModelSelection.subjects not supplied by this model_resolver",
+            )
+
         budget = self._budget(model)
         current = request.snapshot
         remaining = list(request.messages)
@@ -455,6 +522,7 @@ class LLMSessionContextCompactor:
                 system_scope=system_scope,
                 payload=payload,
                 watermark=watermark,
+                clearance=clearance,
             )
             current = _snapshot_from_candidate(
                 candidate,
@@ -471,6 +539,7 @@ class LLMSessionContextCompactor:
                 model=selection.primary,
                 usage_agent_id=selection.usage_agent_id,
                 system_scope=selection.system_scope,
+                subjects=selection.subjects,
             )
         except (SessionContextCompactorError, ModelCapabilityError):
             raise

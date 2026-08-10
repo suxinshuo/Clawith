@@ -580,6 +580,87 @@ async def test_later_child_write_failure_rolls_back_the_whole_entry_batch() -> N
 
 
 @pytest.mark.asyncio
+async def test_failed_planning_checkpoint_maps_error_code_to_failure_code() -> None:
+    """Task 6.3: pin the `error.code` -> `failure_code` mapping the scheduler
+    uses to deliver a terminal failure. `PlanningModelService.complete_once`
+    now returns `PlanningModelResult(error_code="token_budget_exceeded",
+    retryable=False)` when the budget gate blocks it (see
+    `test_agent_runtime_planning.py`); `PlanningRuntimeNodeExecutor._model`
+    writes that into `lifecycle["error"]["code"]`, and
+    `PlanningCheckpointScheduler.handle` — via `checkpoint_plan()` raising
+    `PlanningContractError` for a non-completed checkpoint, or (as exercised
+    here) the checkpoint already being `failed` — must surface it unchanged
+    as `DeliveryRequest.failure_code`.
+    """
+    run, checkpoint, root, _message, _scope, _candidates, _plan = _records()
+    checkpoint.state["lifecycle"].update(
+        {
+            "status": "failed",
+            "next_route": "terminal",
+            "reason": "token_budget_exceeded",
+            "error": {
+                "code": "token_budget_exceeded",
+                "message": "企业当日 token 用量已达上限（500,000/500,000，scope=tenant_day）。",
+            },
+            "waiting_request": None,
+        }
+    )
+    factory = _SessionFactory()
+
+    # A `failed` checkpoint is not `handle`'s job to deliver — that is
+    # `RuntimeCheckpointSideEffects.handle`'s `delivery_from_checkpoint()`
+    # path (checkpoint_side_effects.py), exercised in
+    # `test_agent_runtime_checkpoint_side_effects.py`. `PlanningCheckpointScheduler`
+    # only acts on `status == "completed"` checkpoints (`handle` returns
+    # immediately otherwise), so this asserts the scheduler correctly does
+    # *not* attempt to schedule entry Runs for an already-failed checkpoint,
+    # and does not consume the session factory.
+    await PlanningCheckpointScheduler(
+        session_factory=factory,  # type: ignore[arg-type]
+        settings=_settings(),
+    ).handle(run=run, checkpoint=checkpoint)
+
+    assert not factory.sessions
+
+
+def test_failed_planning_checkpoint_delivery_preserves_the_token_budget_error_code() -> None:
+    """The actual `error_code` -> `failure_code` mapping for a `token_budget_exceeded`
+    Planning failure lives in `delivery_from_checkpoint`
+    (`checkpoint_side_effects.py`), which `RuntimeCheckpointSideEffects.handle`
+    calls for every checkpoint regardless of `system_role`. This pins that
+    mapping for the `group_planning` system Run specifically, since task 6.3
+    is the first lane to produce a `token_budget_exceeded` failure on a
+    Planning Run.
+    """
+    from app.services.agent_runtime.checkpoint_side_effects import (
+        delivery_from_checkpoint,
+    )
+
+    run, checkpoint, _root, _message, _scope, _candidates, _plan = _records()
+    checkpoint.state["lifecycle"].update(
+        {
+            "status": "failed",
+            "next_route": "terminal",
+            "reason": "token_budget_exceeded",
+            "error": {
+                "code": "token_budget_exceeded",
+                "message": "企业当日 token 用量已达上限（500,000/500,000，scope=tenant_day）。",
+            },
+            "waiting_request": None,
+        }
+    )
+
+    delivery = delivery_from_checkpoint(run, checkpoint)
+
+    assert delivery is not None
+    assert delivery.lifecycle_status == "failed"
+    assert delivery.failure_code == "token_budget_exceeded"
+    assert delivery.failure_message == (
+        "企业当日 token 用量已达上限（500,000/500,000，scope=tenant_day）。"
+    )
+
+
+@pytest.mark.asyncio
 async def test_noncompleted_planning_checkpoint_never_schedules_or_resumes() -> None:
     run, checkpoint, root, _message, _scope, _candidates, _plan = _records()
     checkpoint.state["lifecycle"].update(

@@ -79,8 +79,12 @@ from app.services.llm.utils import get_max_tokens
 from app.services.token_accounting.budget import (
     PROGRAMMING_ERROR_TYPES,
     budget_exceeded_message,
-    evaluate as evaluate_budget,
-    should_emit_soft_warning,
+)
+from app.services.token_accounting.gate import (
+    LANE_BUSINESS_STEP,
+    BudgetClearance,
+    BudgetSubjects,
+    check as gate_check,
 )
 
 
@@ -246,6 +250,7 @@ class CompletionPort(Protocol):
         tools: list[dict] | None = None,
         agent_id: uuid.UUID | None = None,
         supports_vision: bool = False,
+        clearance: BudgetClearance,
     ) -> LLMCompletionStep: ...
 
 
@@ -1188,67 +1193,21 @@ class RuntimeModelStepService:
         有界（不超过一轮消耗），不是绝不超限。
 
         `budget_subjects` 由 `complete_once` 一次性取好、两阶段共用；为 None 表示
-        租户 ID 无效或加载已经失败，此处直接放行，不再尝试判定。判定本身抛异常时
-        按异常类型分类记日志（编程错误 error 级、基础设施/瞬时故障 warning 级），
-        两条路径都仍放行——拦不住比拦错代价小。
+        租户 ID 无效或加载已经失败——这是 `_resolve_budget_subjects` 的降级场景，
+        不属于 `gate.check()` 的职责范围，仍在这里短路处理。加载成功后的判定本身
+        （调 `evaluate()`、两级异常分类、命中/软告警日志）已收敛到
+        `gate.check(lane=LANE_BUSINESS_STEP, ...)`，这里只是一个薄封装。
         """
         if budget_subjects is None:
             return None
         tenant, counter = budget_subjects
 
-        try:
-            verdict = await evaluate_budget(
-                agent=agent,
-                tenant=tenant,
-                tenant_counter=counter,
-                estimated_next_round_tokens=estimated_next_round_tokens,
-            )
-        except PROGRAMMING_ERROR_TYPES as exc:
-            logger.opt(exception=True).error(
-                "[TokenBudget] token_budget_enforcement_disabled_bug run_id={} agent_id={} error={!r}",
-                context.run_id,
-                agent.id,
-                exc,
-            )
-            return None
-        except Exception as exc:  # noqa: BLE001 - 判定失败不能拖垮模型调用（基础设施/瞬时故障）
-            logger.warning(
-                "[TokenBudget] token_budget_enforcement_disabled_transient run_id={} agent_id={} error={!r}",
-                context.run_id,
-                agent.id,
-                exc,
-            )
-            return None
-
-        if verdict.blocked_scope is not None:
-            logger.warning(
-                "[TokenBudget] run_id={} agent_id={} scope={} used={} limit={} mode={} blocked={}",
-                context.run_id,
-                agent.id,
-                verdict.blocked_scope,
-                verdict.used,
-                verdict.limit,
-                verdict.mode,
-                not verdict.allowed,
-            )
-
-        if (
-            verdict.soft_warning
-            and verdict.reset_at is not None
-            and verdict.soft_warning_scope is not None
-            and verdict.soft_warning_subject_id is not None
-            and await should_emit_soft_warning(
-                verdict.soft_warning_scope,
-                verdict.soft_warning_subject_id,
-                verdict.reset_at,
-            )
-        ):
-            logger.warning(
-                "[TokenBudget] soft warning run_id={} scope={} subject_id={}",
-                context.run_id,
-                verdict.soft_warning_scope,
-                verdict.soft_warning_subject_id,
-            )
+        verdict = await gate_check(
+            lane=LANE_BUSINESS_STEP,
+            subjects=BudgetSubjects(agent=agent, tenant=tenant, tenant_counter=counter),
+            estimated_next_round_tokens=estimated_next_round_tokens,
+            run_id=context.run_id,
+        )
 
         if verdict.allowed:
             return None
@@ -1261,6 +1220,15 @@ class RuntimeModelStepService:
     ) -> RunCompactInputs:
         """Profile the exact business request shape used by the Compact node."""
         model, agent, ledger = await self._load(context, state)
+        # 顺带带出限额判定要用的主体（任务 6.1）：这里已经在 `_load` 里查过
+        # `agent`，只需再多两条 SELECT 取 tenant / tenant_counter（复用
+        # `_load_budget_subjects`，与 `_resolve_budget_subjects` 走的是同一份
+        # 加载逻辑，但 compact_inputs 不需要 `_resolve_budget_subjects` 的降级
+        # 包装——加载失败时让异常按 `_load` 已有的失败路径处理即可，不必在这里
+        # 再吞一次）。
+        tenant_id = uuid.UUID(context.tenant_id)
+        tenant, tenant_counter = await self._load_budget_subjects(tenant_id)
+        subjects = BudgetSubjects(agent=agent, tenant=tenant, tenant_counter=tenant_counter)
         allow_user_wait = not _is_group_agent_run(state)
         application_tools = (
             with_group_runtime_tools(
@@ -1339,6 +1307,7 @@ class RuntimeModelStepService:
             ledger=ledger,
             effective_input_budget=budget.effective_runtime_budget,
             current_input_tokens=current_input_tokens,
+            subjects=subjects,
         )
 
     async def _prepare_messages(
@@ -1528,6 +1497,17 @@ class RuntimeModelStepService:
             tools=tools,
             agent_id=agent.id,
             supports_vision=bool(model.supports_vision),
+            # 这条链路的限额判定已经在更早的 `_budget_gate`（内部调 `gate.check()`）
+            # 完成并短路过滤了超限请求 —— `_call_prepared` 只会在放行之后才被
+            # 调用。它本身拿不到那次判定的 verdict（`_budget_gate` 只返回
+            # `ModelStepResult | None`，不向上传递 verdict），所以这里传
+            # `not_applicable` 是诚实的占位：判定确实已经做过，只是没有 verdict
+            # 可以传给 `clearance_from`。真正把 verdict 向上传递（如果需要）不在
+            # 本任务（结构性约束）的范围内，属于任务 6 的范畴。
+            clearance=BudgetClearance.not_applicable(
+                LANE_BUSINESS_STEP,
+                reason="verdict already enforced by _budget_gate before this call",
+            ),
         )
 
     async def _call_prepared_with_retry(

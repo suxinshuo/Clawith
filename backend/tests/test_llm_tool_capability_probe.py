@@ -13,6 +13,8 @@ from app.api import enterprise
 from app.models.llm import LLMModel
 from app.schemas.schemas import LLMModelUpdate
 from app.services.llm.client import LLMResponse
+from app.services.token_accounting import gate as gate_module
+from app.services.token_accounting.budget import MODE_ENFORCE
 from app.services.token_accounting.ledger import SYSTEM_SCOPE_MODEL_PROBE
 
 
@@ -505,3 +507,246 @@ async def test_updating_model_identity_invalidates_prior_tool_probe(
     assert "changed" in (updated.tool_calling_error or "").lower()
     assert db.committed is True
     assert db.refreshed is True
+
+
+# ---------------------------------------------------------------------------
+# 任务 6.4：model_probe 接入限额闸门。
+#
+# `_resolve_probe_budget_clearance` 在 `create_llm_client` 之前用
+# `current_user.tenant_id` 单独开一次会话取 tenant / tenant_counter（`agent=None`，
+# model_probe 是租户级判定，只判 tenant_day 一档），调
+# `gate.check(lane=LANE_MODEL_PROBE, ...)`。以下测试覆盖四种场景：超限拦截、未超限
+# 不受影响（守护正常路径）、平台管理员放行（不做判定）、加载 subjects 失败时
+# fail-open。
+# ---------------------------------------------------------------------------
+
+
+def _forced_enforce(monkeypatch) -> None:
+    """把执行模式显式钉死为 enforce，避免结果随执行模式默认值/缓存状态摇摆
+    （与 test_agent_runtime_run_compactor.py / test_agent_runtime_planning.py 等
+    任务 6.1/6.2/6.3 测试文件里的同名辅助函数做法一致）。
+    """
+    original_evaluate = gate_module.evaluate
+
+    async def forced_enforce_evaluate(**kwargs):
+        return await original_evaluate(**{**kwargs, "mode": MODE_ENFORCE})
+
+    monkeypatch.setattr(gate_module, "evaluate", forced_enforce_evaluate)
+
+
+class _FakeDB:
+    """把 `async_session()` 换成一个只返回预置查询结果的最小会话替身。
+
+    `_resolve_probe_budget_clearance` 依次查询 `Tenant`、`TenantTokenCounter` 两条
+    SELECT（`gate.load_subjects` 的固定顺序），按序消费构造时传入的两个结果。
+    """
+
+    def __init__(self, tenant: object | None, tenant_counter: object | None) -> None:
+        self._results = [tenant, tenant_counter]
+
+    async def execute(self, _statement):
+        value = self._results.pop(0)
+        return SimpleNamespace(scalar_one_or_none=lambda: value)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc_info):
+        return False
+
+
+class _FailingSessionFactory:
+    """模拟 `async_session()` 本身打开会话就失败（基础设施故障）。"""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    def __call__(self):
+        raise self._exc
+
+
+def _breached_tenant_pair(tenant_id: uuid.UUID) -> tuple[SimpleNamespace, SimpleNamespace]:
+    """租户日上限（500,000）已击穿的 tenant/tenant_counter 对。
+
+    `last_daily_reset` 用真实挂钟时间而非固定过去日期——`gate.check()` 不传显式
+    `now`，`budget.evaluate()` 内部用 `datetime.now(UTC)` 判断周期是否翻页，固定的
+    过去日期迟早会被判定为「已翻页、计数视为 0」，掩盖真实的击穿场景（与
+    test_agent_runtime_run_compactor.py 等任务 6.1/6.2/6.3 测试文件里的同类辅助
+    函数注释一致）。
+    """
+    now = datetime.now(UTC)
+    tenant = SimpleNamespace(id=tenant_id, timezone="UTC", max_tokens_per_day=500_000)
+    counter = SimpleNamespace(tenant_id=tenant_id, tokens_used_today=500_000, last_daily_reset=now)
+    return tenant, counter
+
+
+def _clear_tenant_pair(tenant_id: uuid.UUID) -> tuple[SimpleNamespace, SimpleNamespace]:
+    """未设租户日上限（未击穿）的 tenant/tenant_counter 对，用于守护正常路径。"""
+    now = datetime.now(UTC)
+    tenant = SimpleNamespace(id=tenant_id, timezone="UTC", max_tokens_per_day=None)
+    counter = SimpleNamespace(tenant_id=tenant_id, tokens_used_today=0, last_daily_reset=now)
+    return tenant, counter
+
+
+@pytest.mark.asyncio
+async def test_breached_tenant_budget_blocks_probe_before_creating_a_client(monkeypatch) -> None:
+    """租户日上限已击穿 -> `create_llm_client` 未被调用，响应体结构化失败。"""
+    _forced_enforce(monkeypatch)
+    tenant_id = uuid.uuid4()
+    tenant, counter = _breached_tenant_pair(tenant_id)
+    monkeypatch.setattr(enterprise, "async_session", lambda: _FakeDB(tenant, counter))
+    monkeypatch.setattr(
+        enterprise,
+        "_resolve_llm_test_target",
+        AsyncMock(return_value=_target()),
+    )
+    created_clients: list[_Client] = []
+
+    def fake_create_llm_client(**kwargs):
+        del kwargs
+        client = _Client(LLMResponse(content="ok"))
+        created_clients.append(client)
+        return client
+
+    monkeypatch.setattr(enterprise, "create_llm_client", fake_create_llm_client)
+
+    result = await enterprise.test_llm_model(
+        enterprise.LLMTestRequest(
+            provider="ollama",
+            model="qwen-local",
+            api_key="ollama",
+            base_url="http://localhost:11434/v1",
+        ),
+        current_user=SimpleNamespace(id=uuid.uuid4(), role="org_admin", tenant_id=tenant_id),
+    )
+
+    assert created_clients == [], "超限时不得创建 LLM client，不发起 provider 请求"
+    assert result["success"] is False
+    assert result["error_code"] == "token_budget_exceeded"
+    assert "error" in result and result["error"]
+
+
+@pytest.mark.asyncio
+async def test_unbreached_tenant_budget_does_not_affect_the_probe_response_shape(
+    monkeypatch,
+) -> None:
+    """未超限时守护正常路径：闸门必须不误伤，响应形状与今天完全一致（3.3）。"""
+    _forced_enforce(monkeypatch)
+    tenant_id = uuid.uuid4()
+    tenant, counter = _clear_tenant_pair(tenant_id)
+    monkeypatch.setattr(enterprise, "async_session", lambda: _FakeDB(tenant, counter))
+    monkeypatch.setattr(
+        enterprise,
+        "_resolve_llm_test_target",
+        AsyncMock(return_value=_target()),
+    )
+    client = _Client(
+        LLMResponse(content="ok"),
+        LLMResponse(
+            content="",
+            tool_calls=[
+                {
+                    "id": "probe-finish",
+                    "type": "function",
+                    "function": {
+                        "name": "finish",
+                        "arguments": json.dumps({"content": "ok"}),
+                    },
+                }
+            ],
+        ),
+    )
+    monkeypatch.setattr(enterprise, "create_llm_client", lambda **_kwargs: client)
+    record = AsyncMock(return_value=True)
+    monkeypatch.setattr(enterprise, "record_token_usage_ledger", record)
+
+    result = await enterprise.test_llm_model(
+        enterprise.LLMTestRequest(
+            provider="ollama",
+            model="qwen-local",
+            api_key="ollama",
+            base_url="http://localhost:11434/v1",
+        ),
+        current_user=SimpleNamespace(id=uuid.uuid4(), role="org_admin", tenant_id=tenant_id),
+    )
+
+    assert result["success"] is True
+    assert result["connection_success"] is True
+    assert result["tool_calling_supported"] is True
+    assert "error_code" not in result
+    assert len(client.calls) == 2
+    assert record.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_platform_admin_without_tenant_skips_the_budget_check_and_calls_the_client(
+    monkeypatch,
+) -> None:
+    """`tenant_id is None`（平台管理员）时不做判定，直接放行，client 正常被调用。"""
+
+    def fail_if_called():
+        raise AssertionError(
+            "platform_admin_no_tenant clearance must skip opening a session entirely"
+        )
+
+    monkeypatch.setattr(enterprise, "async_session", fail_if_called)
+    monkeypatch.setattr(
+        enterprise,
+        "_resolve_llm_test_target",
+        AsyncMock(return_value=_target()),
+    )
+    client = _Client(
+        LLMResponse(content="ok"),
+        LLMResponse(content="I am done", tool_calls=[]),
+    )
+    monkeypatch.setattr(enterprise, "create_llm_client", lambda **_kwargs: client)
+    # tenant_id is None -> the probe's existing "unattributed usage" branch logs and
+    # skips the ledger write on its own; no ledger mock needed here.
+
+    result = await enterprise.test_llm_model(
+        enterprise.LLMTestRequest(
+            provider="ollama",
+            model="qwen-local",
+            api_key="ollama",
+            base_url="http://localhost:11434/v1",
+        ),
+        current_user=SimpleNamespace(id=uuid.uuid4(), role="platform_admin", tenant_id=None),
+    )
+
+    assert "error_code" not in result
+    assert len(client.calls) == 2, "平台管理员放行时 client 必须正常被调用"
+
+
+@pytest.mark.asyncio
+async def test_budget_subjects_load_failure_fails_open_and_calls_the_client(
+    monkeypatch,
+) -> None:
+    """加载 subjects（开会话）本身失败时 fail-open：client 仍被调用（3.6）。"""
+    monkeypatch.setattr(
+        enterprise, "async_session", _FailingSessionFactory(ConnectionError("db unreachable"))
+    )
+    monkeypatch.setattr(
+        enterprise,
+        "_resolve_llm_test_target",
+        AsyncMock(return_value=_target()),
+    )
+    client = _Client(
+        LLMResponse(content="ok"),
+        LLMResponse(content="I am done", tool_calls=[]),
+    )
+    monkeypatch.setattr(enterprise, "create_llm_client", lambda **_kwargs: client)
+    record = AsyncMock(return_value=True)
+    monkeypatch.setattr(enterprise, "record_token_usage_ledger", record)
+
+    result = await enterprise.test_llm_model(
+        enterprise.LLMTestRequest(
+            provider="ollama",
+            model="qwen-local",
+            api_key="ollama",
+            base_url="http://localhost:11434/v1",
+        ),
+        current_user=SimpleNamespace(id=uuid.uuid4(), role="org_admin", tenant_id=uuid.uuid4()),
+    )
+
+    assert "error_code" not in result
+    assert len(client.calls) == 2, "基础设施故障必须 fail-open，client 仍被调用"

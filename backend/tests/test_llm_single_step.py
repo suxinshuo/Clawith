@@ -14,6 +14,22 @@ from app.services.llm.client import (
     OpenAICompatibleClient,
     OpenAIResponsesClient,
 )
+from app.services.token_accounting.budget import BudgetVerdict
+from app.services.token_accounting.gate import BudgetClearance, clearance_from
+
+_TEST_LANE = "test_lane"
+
+
+def _not_applicable() -> BudgetClearance:
+    return BudgetClearance.not_applicable(_TEST_LANE, reason="test")
+
+
+def _allowed_clearance() -> BudgetClearance:
+    return clearance_from(_TEST_LANE, BudgetVerdict(allowed=True))
+
+
+def _denied_clearance() -> BudgetClearance:
+    return clearance_from(_TEST_LANE, BudgetVerdict(allowed=False, blocked_scope="agent_day"))
 
 _TINY_PNG_DATA_URL = (
     "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2ZQAAAABJRU5ErkJggg=="
@@ -154,6 +170,7 @@ async def test_complete_once_normalizes_tools_and_records_usage_without_executin
         messages,
         tools=tools,
         agent_id=agent_id,
+        clearance=_not_applicable(),
     )
 
     assert result.content == ""
@@ -217,6 +234,7 @@ async def test_complete_once_with_tenant_and_system_scope_records_to_the_ledger_
         [LLMMessage(role="user", content="Compact this")],
         tenant_id=tenant_id,
         system_scope="group_compact",
+        clearance=_not_applicable(),
     )
 
     assert result.usage.total_tokens == 15
@@ -263,6 +281,7 @@ async def test_complete_once_still_records_the_direct_agent_path_when_no_tenant_
         _model(),
         [LLMMessage(role="user", content="Chat")],
         agent_id=agent_id,
+        clearance=_not_applicable(),
     )
 
     assert legacy_calls == [(agent_id, legacy_calls[0][1])]
@@ -305,6 +324,7 @@ async def test_complete_once_records_provider_authoritative_usage_for_an_unregis
     result = await single_step.complete_llm_once(
         model,
         [LLMMessage(role="user", content="Compact this")],
+        clearance=_not_applicable(),
     )
 
     assert result.usage.total_tokens == 15
@@ -344,6 +364,7 @@ async def test_complete_once_resolves_anthropic_usage_by_protocol_not_by_key_sni
     result = await single_step.complete_llm_once(
         model,
         [LLMMessage(role="user", content="Hello")],
+        clearance=_not_applicable(),
     )
 
     assert result.usage.input_tokens == 100
@@ -363,6 +384,7 @@ async def test_complete_once_rejects_system_scope_without_a_tenant() -> None:
             [LLMMessage(role="user", content="Chat")],
             agent_id=uuid.uuid4(),
             system_scope="group_compact",
+            clearance=_not_applicable(),
         )
 
 
@@ -389,6 +411,7 @@ async def test_complete_once_returns_a_bounded_repair_instruction_for_invalid_ar
     result = await single_step.complete_llm_once(
         _model(),
         [LLMMessage(role="user", content="Write")],
+        clearance=_not_applicable(),
     )
 
     assert result.tool_calls == ()
@@ -411,6 +434,7 @@ async def test_complete_once_closes_the_provider_client_when_the_request_fails(
         await single_step.complete_llm_once(
             _model(),
             [LLMMessage(role="user", content="Hello")],
+            clearance=_not_applicable(),
         )
 
     assert client.closed is True
@@ -432,6 +456,7 @@ async def test_complete_once_sends_standard_multimodal_content_to_vision_provide
         _model(),
         [original],
         supports_vision=True,
+        clearance=_not_applicable(),
     )
 
     sent = client.calls[0]["messages"][0]
@@ -444,3 +469,101 @@ async def test_complete_once_sends_standard_multimodal_content_to_vision_provide
     ]
     assert isinstance(original.content, str)
     assert result.content == "described"
+
+
+@pytest.mark.asyncio
+async def test_complete_once_rejects_a_denied_clearance_before_calling_the_provider(
+    monkeypatch,
+) -> None:
+    """拿着「拒绝」的判定还调 complete_llm_once 是编程错误，必须在发 provider 请求前炸掉。
+
+    **Validates: Requirements 2.8, 2.9**
+    """
+    client = _Client(LLMResponse(content="should never be produced"))
+    _patch_client(monkeypatch, client)
+
+    with pytest.raises(RuntimeError, match="budget_clearance_violation"):
+        await single_step.complete_llm_once(
+            _model(),
+            [LLMMessage(role="user", content="Hello")],
+            agent_id=uuid.uuid4(),
+            clearance=_denied_clearance(),
+        )
+
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_complete_once_allows_a_not_applicable_clearance(monkeypatch) -> None:
+    """`not_applicable(reason=...)` 必须放行，不表态时的理由被记录在 clearance 上。
+
+    **Validates: Requirements 2.8, 2.9**
+    """
+    client = _Client(LLMResponse(content="ok"))
+    _patch_client(monkeypatch, client)
+
+    async def record(agent_id, usage):
+        del agent_id, usage
+
+    monkeypatch.setattr(single_step, "record_token_usage", record)
+    clearance = _not_applicable()
+
+    result = await single_step.complete_llm_once(
+        _model(),
+        [LLMMessage(role="user", content="Hello")],
+        agent_id=uuid.uuid4(),
+        clearance=clearance,
+    )
+
+    assert result.content == "ok"
+    assert clearance.not_applicable_reason == "test"
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_once_allows_an_allowed_verdict_clearance(monkeypatch) -> None:
+    """`verdict.allowed is True` 的 clearance 必须正常放行。
+
+    **Validates: Requirements 2.8, 2.9**
+    """
+    client = _Client(LLMResponse(content="ok"))
+    _patch_client(monkeypatch, client)
+
+    async def record(agent_id, usage):
+        del agent_id, usage
+
+    monkeypatch.setattr(single_step, "record_token_usage", record)
+
+    result = await single_step.complete_llm_once(
+        _model(),
+        [LLMMessage(role="user", content="Hello")],
+        agent_id=uuid.uuid4(),
+        clearance=_allowed_clearance(),
+    )
+
+    assert result.content == "ok"
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_once_requires_clearance_as_a_structural_constraint(
+    monkeypatch,
+) -> None:
+    """不传 `clearance` 就调不通——这是结构性约束，不只是文档约定。
+
+    `clearance` 是必填关键字参数（没有默认值），漏传时 Python 在调用期就抛
+    `TypeError`（缺少必需的关键字参数），provider 端口根本不会被触及。
+
+    **Validates: Requirements 2.8, 2.9**
+    """
+    client = _Client(LLMResponse(content="should never be produced"))
+    _patch_client(monkeypatch, client)
+
+    with pytest.raises(TypeError):
+        await single_step.complete_llm_once(  # type: ignore[call-arg]
+            _model(),
+            [LLMMessage(role="user", content="Hello")],
+            agent_id=uuid.uuid4(),
+        )
+
+    assert client.calls == []

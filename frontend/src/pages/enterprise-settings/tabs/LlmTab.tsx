@@ -15,7 +15,6 @@ interface LLMModel {
     label: string;
     base_url?: string;
     api_key_masked?: string;
-    max_tokens_per_day?: number;
     enabled: boolean;
     supports_vision?: boolean;
     supports_tool_calling?: boolean | null;

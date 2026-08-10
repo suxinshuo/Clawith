@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+from datetime import UTC, datetime
 import json
+from types import SimpleNamespace
 import uuid
 
 import pytest
@@ -26,6 +28,8 @@ from app.services.agent_runtime.state import (
 )
 from app.services.llm.single_step import LLMCompletionStep
 from app.services.llm.finish import FINISH_PROTOCOL_REMINDER
+from app.services.token_accounting.budget import MODE_ENFORCE
+from app.services.token_accounting.gate import BudgetSubjects
 from app.services.token_tracker import TokenUsage
 
 
@@ -186,6 +190,7 @@ def _service(
     effective_budget: int,
     current_tokens: int,
     ledger: dict | None = None,
+    subjects: BudgetSubjects | None = None,
 ) -> RuntimeRunCompactorService:
     async def load(
         _state: RuntimeGraphState,
@@ -196,6 +201,7 @@ def _service(
             ledger=ledger or {},
             effective_input_budget=effective_budget,
             current_input_tokens=current_tokens,
+            subjects=subjects,
         )
 
     return RuntimeRunCompactorService(
@@ -769,6 +775,196 @@ async def test_invalid_summary_is_deterministic_and_never_committed() -> None:
     assert raised.value.code == "invalid_thread_compact_output"
     assert "thread_summary" not in state
     assert "summary_covered_through_message_id" not in state
+
+
+def _breached_agent_subjects(*, tenant_id: uuid.UUID) -> BudgetSubjects:
+    """A subjects triple whose agent day limit is already breached.
+
+    `last_daily_reset` is anchored to the real wall clock (not a fixed past
+    date) because `compact_if_needed` -> `gate.check()` does not pass an
+    explicit `now`, so `budget.evaluate()` uses `datetime.now(UTC)`. A fixed
+    past timestamp would eventually look like a stale/rolled-over period and
+    the breach would silently disappear as effective_used resets to 0.
+    """
+    now = datetime.now(UTC)
+    agent = SimpleNamespace(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        timezone=None,
+        max_tokens_per_day=100_000,
+        max_tokens_per_month=None,
+        tokens_used_today=200_000,
+        tokens_used_month=0,
+        last_daily_reset=now,
+        last_monthly_reset=now,
+    )
+    tenant = SimpleNamespace(id=tenant_id, timezone="UTC", max_tokens_per_day=None)
+    counter = SimpleNamespace(tenant_id=tenant_id, tokens_used_today=0, last_daily_reset=now)
+    return BudgetSubjects(agent=agent, tenant=tenant, tenant_counter=counter)
+
+
+def _clear_agent_subjects(*, tenant_id: uuid.UUID) -> BudgetSubjects:
+    """A subjects triple with no limits configured (never breached)."""
+    now = datetime.now(UTC)
+    agent = SimpleNamespace(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        timezone=None,
+        max_tokens_per_day=None,
+        max_tokens_per_month=None,
+        tokens_used_today=0,
+        tokens_used_month=0,
+        last_daily_reset=now,
+        last_monthly_reset=now,
+    )
+    tenant = SimpleNamespace(id=tenant_id, timezone="UTC", max_tokens_per_day=None)
+    counter = SimpleNamespace(tenant_id=tenant_id, tokens_used_today=0, last_daily_reset=now)
+    return BudgetSubjects(agent=agent, tenant=tenant, tenant_counter=counter)
+
+
+@pytest.mark.asyncio
+async def test_breached_agent_budget_blocks_compact_before_completion_is_called(
+    monkeypatch,
+) -> None:
+    """Task 6.1: an already-breached Agent must be blocked before any provider call.
+
+    This is Counterexample 2 from task 1 turned into a positive assertion
+    (design.md "Fix Checking" / bugfix.md Property 1): the `run_compact` lane
+    now carries a real budget gate, so reaching the 80% compaction watermark
+    with an over-limit Agent must raise `RunCompactorError("token_budget_exceeded")`
+    and never call the completion port.
+    """
+    # 用真实 evaluate()（不打桩判定本身），但把执行模式显式钉死为 enforce，
+    # 避免这条测试的结果随任务 3.2 的默认值/缓存状态而摇摆——判定的输入形状
+    # 才是本任务关心的东西，不是执行模式默认值。
+    from app.services.token_accounting import gate as gate_module
+
+    original_evaluate = gate_module.evaluate
+
+    async def forced_enforce_evaluate(**kwargs):
+        return await original_evaluate(**{**kwargs, "mode": MODE_ENFORCE})
+
+    monkeypatch.setattr(gate_module, "evaluate", forced_enforce_evaluate)
+
+    messages = [
+        *[
+            {"id": f"old-{index}", "role": "user", "content": "old history " * 12}
+            for index in range(8)
+        ],
+        {
+            "id": "current",
+            "role": "user",
+            "content": "EXACT CURRENT INPUT",
+            "runtime_input": "current",
+        },
+    ]
+    state, context, tenant_id = _state(messages)
+
+    calls: list[tuple] = []
+
+    async def recording_completion(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _step()
+
+    with pytest.raises(RunCompactorError) as raised:
+        await _service(
+            model=_model(tenant_id),
+            completion=recording_completion,
+            effective_budget=1_000,
+            current_tokens=800,  # 80% watermark, triggers compaction
+            subjects=_breached_agent_subjects(tenant_id=tenant_id),
+        ).compact_if_needed(state, context)
+
+    assert raised.value.code == "token_budget_exceeded"
+    assert raised.value.is_deterministic_compact_error is True
+    assert calls == [], (
+        "completion port must not be called once the budget gate blocks the "
+        "compaction request"
+    )
+
+
+@pytest.mark.asyncio
+async def test_unbreached_agent_budget_allows_compact_to_call_completion(
+    monkeypatch,
+) -> None:
+    """Guard rail: the new gate must not accidentally block the normal compact path.
+
+    Reaching the 80% watermark with an Agent that has no limits configured
+    must still compact normally — the budget gate allows it and the
+    completion port is called exactly as before (Preservation 3.3 / 3.5).
+    """
+    from app.services.token_accounting import gate as gate_module
+
+    original_evaluate = gate_module.evaluate
+
+    async def forced_enforce_evaluate(**kwargs):
+        return await original_evaluate(**{**kwargs, "mode": MODE_ENFORCE})
+
+    monkeypatch.setattr(gate_module, "evaluate", forced_enforce_evaluate)
+
+    messages = [
+        *[
+            {"id": f"old-{index}", "role": "user", "content": "old history " * 12}
+            for index in range(8)
+        ],
+        {
+            "id": "current",
+            "role": "user",
+            "content": "EXACT CURRENT INPUT",
+            "runtime_input": "current",
+        },
+    ]
+    state, context, tenant_id = _state(messages)
+
+    calls: list[tuple] = []
+
+    async def recording_completion(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _step()
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=recording_completion,
+        effective_budget=1_000,
+        current_tokens=800,
+        subjects=_clear_agent_subjects(tenant_id=tenant_id),
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert len(calls) == 1, "completion port must still be called when the gate allows"
+
+
+@pytest.mark.asyncio
+async def test_missing_subjects_does_not_block_compact() -> None:
+    """Backward compatibility: `subjects=None` (test doubles / not-yet-updated
+    input loaders) must not fail closed — it behaves exactly like the pre-6.1
+    unchecked path (see the design note on `RunCompactInputs.subjects`)."""
+    messages = [
+        *[
+            {"id": f"old-{index}", "role": "user", "content": "old history " * 12}
+            for index in range(8)
+        ],
+        {
+            "id": "current",
+            "role": "user",
+            "content": "EXACT CURRENT INPUT",
+            "runtime_input": "current",
+        },
+    ]
+    state, context, tenant_id = _state(messages)
+
+    async def complete(*_args, **_kwargs):
+        return _step()
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=800,
+        subjects=None,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
 
 
 @pytest.mark.asyncio

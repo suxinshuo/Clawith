@@ -1118,6 +1118,21 @@
       "sendTest": "发送测试邮件"
     },
     "quotas": {
+      "tokenBudgetEnforcement": {
+        "title": "Token 限额执行",
+        "effectiveMode": "当前生效模式",
+        "modeEnforce": "拦截",
+        "modeWarnOnly": "仅告警",
+        "graceWindow": "Grace 窗口",
+        "graceInactive": "无生效中的 grace 窗口",
+        "graceEndingSoon": "即将结束",
+        "graceRemainingDays": "剩余 {{days}} 天 {{hours}} 小时",
+        "graceRemainingHours": "剩余 {{hours}} 小时 {{minutes}} 分钟",
+        "modeLabel": "执行模式",
+        "enforceNow": "立即启用拦截",
+        "propagationHint": "修改后最长 {{seconds}} 秒在全部 worker 生效。",
+        "readOnlyHint": "仅平台管理员可修改此设置。"
+      },
       "defaultUserQuotas": "默认用户配额",
       "defaultsApply": "这些默认设置适用于新注册的用户。现有用户不受影响。",
       "conversationLimits": "对话限制",
@@ -1145,7 +1160,14 @@
       "minPollInterval": "最小轮询间隔（分钟）",
       "minPollIntervalDesc": "全公司下限：数字员工的轮询速度不能快于此值",
       "maxWebhookRate": "最大 Webhook 速率（/分钟）",
-      "maxWebhookRateDesc": "全公司上限：每个数字员工每分钟的最大 Webhook 点击次数"
+      "maxWebhookRateDesc": "全公司上限：每个数字员工每分钟的最大 Webhook 点击次数",
+      "tokenLimits": "Token 限额",
+      "tenantMaxTokensPerDay": "企业每日 Token 上限",
+      "tenantMaxTokensPerDayDesc": "含系统开销（群聊压缩 / 规划 / 连通性测试）。留空表示无限制。",
+      "defaultAgentMaxTokensPerDay": "数字员工默认每日 Token 上限",
+      "defaultAgentMaxTokensPerDayDesc": "新建数字员工时带入的默认每日 Token 限额。留空表示无限制。",
+      "defaultAgentMaxTokensPerMonth": "数字员工默认每月 Token 上限",
+      "defaultAgentMaxTokensPerMonthDesc": "新建数字员工时带入的默认每月 Token 限额。留空表示无限制。"
     },
     "tabs": {
       "llm": "模型池",

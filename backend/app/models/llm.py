@@ -56,6 +56,10 @@ class LLMModel(Base):
     api_key_encrypted: Mapped[str] = mapped_column(String(1024), nullable=False)
     base_url: Mapped[str | None] = mapped_column(String(500))
     label: Mapped[str] = mapped_column(String(200), nullable=False)  # Display name
+    # Not read by any execution path (see bugfix `token-usage-limit-not-enforced`, change 6):
+    # removed from the API write surface (LLMModelCreate/Update/Out), retained only for
+    # backward compatibility with historical values. Whether to DROP this column is left to a
+    # separate cleanup migration.
     max_tokens_per_day: Mapped[int | None] = mapped_column(Integer)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     supports_vision: Mapped[bool] = mapped_column(Boolean, default=False)

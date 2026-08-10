@@ -1,10 +1,20 @@
 """周期判定收敛为单一实现，新建 Agent 继承租户默认限额。
 
 `agents.py::_lazy_reset_token_counters` 与 `group_handoff.py::_target_budget_available`
-曾各自手写一套"计数器是否已跨周期"的判断，且都按 UTC `.date()` 比较 —— 与
-`token_accounting.periods` 里按租户时区判定的 `is_new_local_day` / `is_new_local_month`
-不一致。两套定义迟早分叉：UTC 与租户时区的日期分界点本就不同，跨越 UTC 零点未必跨越
-Asia/Shanghai (UTC+8) 零点，反之亦然。
+（token 部分，任务 7.1 拆分后已删除，周期翻页语义完全收敛到 `budget.evaluate()` /
+`budget._effective_used()`，与 `business_step` 等其它链路共用同一份实现）曾各自手写
+一套"计数器是否已跨周期"的判断，且都按 UTC `.date()` 比较 —— 与 `token_accounting.periods`
+里按租户时区判定的 `is_new_local_day` / `is_new_local_month` 不一致。两套定义迟早分叉：
+UTC 与租户时区的日期分界点本就不同，跨越 UTC 零点未必跨越 Asia/Shanghai (UTC+8) 零点，
+反之亦然。
+
+**任务 7.1 更新**：`_target_budget_available` 的 token 判断部分（`max_tokens_per_day`/
+`max_tokens_per_month` 命中 + 周期翻页豁免）已删除，改由 `_validate_targets` 对每个
+目标调 `gate.check(lane=LANE_GROUP_HANDOFF, ...)`，内部就是 `budget.evaluate()`。
+本文件下面这四条测试测的正是"周期翻页豁免语义"本身（不是 `group_handoff` 特有的
+行为），因此迁移为直接驱动 `budget.evaluate()`——这与 `business_step` / `run_compact`
+等其它链路现在共用的判定入口完全一致，测试意图（"按租户时区而非 UTC 判断是否翻页"）
+保持不变，只是不再通过一个已被删除的函数签名去验证它。
 
 这里直接调用被测函数、构造能让"按 UTC 比较"与"按租户时区比较"给出不同答案的具体
 时间点，断言结果，而不是检查源码文本里是否出现某个函数名 —— 后者只要函数名出现在
@@ -25,7 +35,12 @@ from app.models.agent import Agent
 from app.models.tenant import Tenant
 from app.models.user import User
 from app.schemas.schemas import AgentCreate
-from app.services.agent_runtime import group_handoff
+from app.services.token_accounting import budget
+from app.services.token_accounting.budget import (
+    MODE_ENFORCE,
+    SCOPE_AGENT_DAY,
+    SCOPE_AGENT_MONTH,
+)
 from app.services.token_accounting.periods import is_new_local_day, is_new_local_month
 
 
@@ -227,11 +242,14 @@ async def test_lazy_reset_zeroes_the_input_token_counters_too():
 
 
 # ---------------------------------------------------------------------------
-# _target_budget_available (backend/app/services/agent_runtime/group_handoff.py)
+# 周期翻页豁免语义（曾由 group_handoff.py::_target_budget_available 的 token 部分
+# 手写判断，任务 7.1 拆分后该部分已删除；这四条测试的意图——"按租户时区而非 UTC
+# 判断计数器是否已跨周期"——保持不变，迁移为直接驱动 budget.evaluate()，与
+# business_step / run_compact 等其它链路现在共用的同一个判定入口一致）
 # ---------------------------------------------------------------------------
 
 
-def test_target_budget_blocked_when_daily_counter_has_not_rolled_over_in_tenant_local_day():
+async def test_target_budget_blocked_when_daily_counter_has_not_rolled_over_in_tenant_local_day():
     """Over budget, and the tenant-local day has not turned over -> blocked.
 
     Crosses UTC midnight (old `.date()` compare would call this "rolled over" and
@@ -254,11 +272,15 @@ def test_target_budget_blocked_when_daily_counter_has_not_rolled_over_in_tenant_
         max_llm_calls_per_day=1000,
         llm_calls_today=0,
     )
+    counter = SimpleNamespace(tokens_used_today=0, last_daily_reset=now)
 
-    assert group_handoff._target_budget_available(agent, now=now, tenant=tenant) is False
+    verdict = await budget.evaluate(agent=agent, tenant=tenant, tenant_counter=counter, now=now, mode=MODE_ENFORCE)
+
+    assert verdict.allowed is False
+    assert verdict.blocked_scope == SCOPE_AGENT_DAY
 
 
-def test_target_budget_available_when_daily_counter_has_rolled_over_in_tenant_local_day():
+async def test_target_budget_available_when_daily_counter_has_rolled_over_in_tenant_local_day():
     """Over budget, but the tenant-local day already turned over -> available.
 
     Same UTC calendar date on both ends (old `.date()` compare would call this "not rolled
@@ -281,11 +303,15 @@ def test_target_budget_available_when_daily_counter_has_rolled_over_in_tenant_lo
         max_llm_calls_per_day=1000,
         llm_calls_today=0,
     )
+    counter = SimpleNamespace(tokens_used_today=0, last_daily_reset=now)
 
-    assert group_handoff._target_budget_available(agent, now=now, tenant=tenant) is True
+    verdict = await budget.evaluate(agent=agent, tenant=tenant, tenant_counter=counter, now=now, mode=MODE_ENFORCE)
+
+    assert verdict.allowed is True
+    assert verdict.blocked_scope is None
 
 
-def test_target_budget_blocked_when_monthly_counter_has_not_rolled_over_in_tenant_local_month():
+async def test_target_budget_blocked_when_monthly_counter_has_not_rolled_over_in_tenant_local_month():
     """Over budget, and the tenant-local month has not turned over -> blocked.
 
     Crosses the UTC month boundary (old `(year, month)` compare would call this "rolled
@@ -309,11 +335,15 @@ def test_target_budget_blocked_when_monthly_counter_has_not_rolled_over_in_tenan
         max_llm_calls_per_day=1000,
         llm_calls_today=0,
     )
+    counter = SimpleNamespace(tokens_used_today=0, last_daily_reset=now)
 
-    assert group_handoff._target_budget_available(agent, now=now, tenant=tenant) is False
+    verdict = await budget.evaluate(agent=agent, tenant=tenant, tenant_counter=counter, now=now, mode=MODE_ENFORCE)
+
+    assert verdict.allowed is False
+    assert verdict.blocked_scope == SCOPE_AGENT_MONTH
 
 
-def test_target_budget_available_when_monthly_counter_has_rolled_over_in_tenant_local_month():
+async def test_target_budget_available_when_monthly_counter_has_rolled_over_in_tenant_local_month():
     """Over budget, but the tenant-local month already turned over -> available.
 
     Same UTC (year, month) on both ends (old compare would call this "not rolled over")
@@ -337,8 +367,12 @@ def test_target_budget_available_when_monthly_counter_has_rolled_over_in_tenant_
         max_llm_calls_per_day=1000,
         llm_calls_today=0,
     )
+    counter = SimpleNamespace(tokens_used_today=0, last_daily_reset=now)
 
-    assert group_handoff._target_budget_available(agent, now=now, tenant=tenant) is True
+    verdict = await budget.evaluate(agent=agent, tenant=tenant, tenant_counter=counter, now=now, mode=MODE_ENFORCE)
+
+    assert verdict.allowed is True
+    assert verdict.blocked_scope is None
 
 
 # ---------------------------------------------------------------------------

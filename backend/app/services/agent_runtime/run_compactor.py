@@ -40,6 +40,14 @@ from app.services.llm.multimodal_content import (
     project_multimodal_for_summary,
 )
 from app.services.llm.utils import get_max_tokens
+from app.services.token_accounting.budget import budget_exceeded_message
+from app.services.token_accounting.gate import (
+    LANE_RUN_COMPACT,
+    BudgetClearance,
+    BudgetSubjects,
+    check as gate_check,
+    clearance_from,
+)
 
 
 _TOOL_NAME = "commit_thread_summary"
@@ -144,12 +152,24 @@ class TransientRunCompactorError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class RunCompactInputs:
-    """Request facts required by one Thread Compact attempt."""
+    """Request facts required by one Thread Compact attempt.
+
+    `subjects` carries the budget-check principals (agent / tenant /
+    tenant_counter) needed by the task 6.1 budget gate. It is optional and
+    defaults to `None` for backward compatibility with construction sites
+    that do not (yet) supply it; `compact_if_needed` treats a `None` subject
+    set as "no clearance verdict available" and lets the compaction proceed
+    unchecked rather than failing closed — see the design note on
+    `compact_if_needed` for the rationale (this path always originates from
+    `model_step_service.compact_inputs`, which now always populates it; a
+    missing subject set should only happen for test doubles).
+    """
 
     model: LLMModel
     ledger: Ledger
     effective_input_budget: int | None = None
     current_input_tokens: int | None = None
+    subjects: BudgetSubjects | None = None
 
 
 class RunCompactCompletionPort(Protocol):
@@ -161,6 +181,7 @@ class RunCompactCompletionPort(Protocol):
         tools: list[dict] | None = None,
         agent_id: uuid.UUID | None = None,
         supports_vision: bool = False,
+        clearance: BudgetClearance,
     ) -> LLMCompletionStep: ...
 
 
@@ -561,6 +582,7 @@ class RuntimeRunCompactorService:
         exact_inputs: Sequence[JsonObject],
         batch_budget: int,
         summary_budget: int,
+        clearance: BudgetClearance,
     ) -> JsonObject:
         summary = (
             dict(existing_summary) if existing_summary is not None else None
@@ -595,6 +617,7 @@ class RuntimeRunCompactorService:
                     tools=[_COMPACT_TOOL],
                     agent_id=agent_id,
                     supports_vision=False,
+                    clearance=clearance,
                 )
             except Exception as exc:
                 if classify_error(exc) == FailoverErrorType.RETRYABLE:
@@ -633,6 +656,41 @@ class RuntimeRunCompactorService:
             raise RunCompactorError(exc.code, str(exc)) from exc
         if not _should_compact(inputs):
             return RunCompactResult()
+
+        # 限额判定（任务 6.1）：压缩本身也是一次模型调用，会按 agent_id 记账消耗
+        # Agent 额度。只做一次「击穿判定」（estimated_next_round_tokens=0，不做
+        # 预算预扣——超限幅度有界由 business_step 自己的两阶段估算保证），并且
+        # 必须在发起真正的 provider 请求（`_compact_batches` 内部调
+        # `self._completion(...)`）之前完成。
+        #
+        # `inputs.subjects is None` 时不判定、直接放行：这条路径今天只会来自
+        # `model_step_service.compact_inputs`（生产唯一的 `RunCompactInputs`
+        # 构造点，此后总会带出 `subjects`）或测试替身没有传 `subjects` 的旧构造
+        # 方式。选择放行而不是 fail closed 的理由——与 3.6 定下的 fail-open 判据
+        # 一致：这里不是"判定失败"（判定本身没有跑），而是"判定所需的输入缺失"，
+        # 性质上更接近"这条链路暂时没有接入闸门"（今天 `session_compact` /
+        # `planning` / `model_probe` 三条链路仍是这个状态），不是"已经判定超限却
+        # 放行"。让缺失主体在这里 fail closed 会把一个构造问题伪装成一次限额拦截，
+        # 制造一个更难查的假阳性；而放行则保持与"这条链路还没接闸门"完全一致的、
+        # 已经被 Preservation Checking 覆盖过的行为。
+        if inputs.subjects is not None:
+            verdict = await gate_check(
+                lane=LANE_RUN_COMPACT,
+                subjects=inputs.subjects,
+                estimated_next_round_tokens=0,
+                run_id=context.run_id,
+            )
+            if not verdict.allowed:
+                raise RunCompactorError(
+                    "token_budget_exceeded",
+                    budget_exceeded_message(verdict),
+                )
+            clearance = clearance_from(LANE_RUN_COMPACT, verdict)
+        else:
+            clearance = BudgetClearance.not_applicable(
+                LANE_RUN_COMPACT,
+                reason="RunCompactInputs.subjects not supplied by this input_loader",
+            )
 
         assert inputs.effective_input_budget is not None
         budgets = compact_context_budgets(inputs.effective_input_budget)
@@ -693,6 +751,7 @@ class RuntimeRunCompactorService:
             exact_inputs=exact_inputs,
             batch_budget=compact_model_budget,
             summary_budget=budgets.summary_tokens,
+            clearance=clearance,
         )
         recent_messages = _flatten(retained)
         summary_tokens = _estimate_tokens(summary)

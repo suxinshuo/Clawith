@@ -43,10 +43,12 @@ from app.services.group_message_service import (
     _required_content,
     _resolve_mentions,
 )
-from app.services.token_accounting.periods import (
-    effective_timezone,
-    is_new_local_day,
-    is_new_local_month,
+from app.services.token_accounting.budget import budget_exceeded_message
+from app.services.token_accounting.gate import (
+    LANE_GROUP_HANDOFF,
+    BudgetSubjects,
+    check as gate_check,
+    load_subjects,
 )
 
 
@@ -423,7 +425,17 @@ def _source_run_matches(
         )
 
 
-def _target_budget_available(agent: Agent, *, now: datetime, tenant=None) -> bool:
+def _target_run_budget_available(agent: Agent, *, now: datetime) -> bool:
+    """Non-token Run-availability checks for a Group handoff target.
+
+    Token-limit availability is no longer decided here — it is delegated to the same
+    `gate.check(lane=LANE_GROUP_HANDOFF, ...)` the rest of the platform uses (see
+    `_validate_targets`), so a Group handoff and a direct conversation agree on the same
+    verdict and the same effective execution mode (2.10). What remains here is exactly the
+    two checks that never had anything to do with token accounting: `max_tool_rounds` and
+    `max_llm_calls_per_day`. Their semantics are unchanged, field for field, from the
+    pre-split `_target_budget_available`.
+    """
     if (
         isinstance(agent.max_tool_rounds, bool)
         or not isinstance(agent.max_tool_rounds, int)
@@ -431,16 +443,6 @@ def _target_budget_available(agent: Agent, *, now: datetime, tenant=None) -> boo
     ):
         return False
 
-    tz_name = effective_timezone(agent, tenant)
-    if agent.max_tokens_per_day and (agent.tokens_used_today or 0) >= agent.max_tokens_per_day:
-        # A stale counter from a prior tenant-local day doesn't count against the limit —
-        # the accounting path will zero it on the next call. Judge rollover with the same
-        # periods helpers the accounting path uses, not a hand-rolled UTC comparison.
-        if not is_new_local_day(agent.last_daily_reset, tz_name, now=now):
-            return False
-    if agent.max_tokens_per_month and (agent.tokens_used_month or 0) >= agent.max_tokens_per_month:
-        if not is_new_local_month(agent.last_monthly_reset, tz_name, now=now):
-            return False
     if (
         agent.max_llm_calls_per_day
         and (agent.llm_calls_today or 0) >= agent.max_llm_calls_per_day
@@ -531,12 +533,35 @@ async def _validate_targets(
             "An Agent cannot create a public handoff to itself",
             repairable=True,
         )
+    # Load the tenant and its token counter once in this session and reuse them for
+    # every target below — the target count is normally 1-3, and there is no reason to
+    # repeat the same two SELECTs per target. `mention.agent` differs per target, so
+    # `BudgetSubjects` is still constructed once per mention.
+    subjects = await load_subjects(db, tenant_id=source_run.tenant_id)
     for mention in resolved:
         assert mention.agent is not None
-        if not _target_budget_available(mention.agent, now=clock):
+        if not _target_run_budget_available(mention.agent, now=clock):
             raise GroupAgentHandoffError(
                 "group_handoff_budget_unavailable",
                 f"Agent participant {mention.participant_id} has no available Run budget",
+                repairable=True,
+            )
+        verdict = await gate_check(
+            lane=LANE_GROUP_HANDOFF,
+            subjects=BudgetSubjects(
+                agent=mention.agent,
+                tenant=subjects.tenant,
+                tenant_counter=subjects.tenant_counter,
+            ),
+            estimated_next_round_tokens=0,
+            run_id=str(source_run.id),
+            now=clock,
+        )
+        if not verdict.allowed:
+            raise GroupAgentHandoffError(
+                "group_handoff_budget_unavailable",
+                f"Agent participant {mention.participant_id} has no available Run budget: "
+                + budget_exceeded_message(verdict),
                 repairable=True,
             )
         rollout = RuntimeRolloutPolicy.from_settings(settings).decide(

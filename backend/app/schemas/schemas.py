@@ -408,7 +408,6 @@ class LLMModelCreate(BaseModel):
     base_url: str | None = None
     label: str
     temperature: float | None = Field(None, ge=0.0, le=2.0)
-    max_tokens_per_day: int | None = None
     enabled: bool = True
     supports_vision: bool = False
     max_output_tokens: int | None = None
@@ -421,7 +420,6 @@ class LLMModelUpdate(BaseModel):
     base_url: str | None = None
     label: str | None = None
     temperature: float | None = Field(None, ge=0.0, le=2.0)
-    max_tokens_per_day: int | None = None
     enabled: bool | None = None
     supports_vision: bool | None = None
     max_output_tokens: int | None = None
@@ -436,7 +434,6 @@ class LLMModelOut(BaseModel):
     label: str
     temperature: float | None = None
     api_key_masked: str = ""
-    max_tokens_per_day: int | None = None
     enabled: bool
     supports_vision: bool = False
     supports_tool_calling: bool | None = None

@@ -1,0 +1,524 @@
+{
+  "pbtResults": {},
+  "executionHistory": {
+    "1. 编写 Bug Condition 探索性复现测试（在未修复代码上先跑出反例）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241466334
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241480562
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786243284736
+      }
+    ],
+    "2. 编写保留行为基线测试（在实施修复之前）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241466621
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786243289813
+      }
+    ],
+    "3.1 让 `budget.evaluate()` 支持 `agent=None`": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241466735
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786244487900
+      }
+    ],
+    "3.2 兜底语义分层 + 默认执行模式翻为 `enforce`（变更 1 代码部分 + 变更 2）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241466805
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786244745248
+      }
+    ],
+    "3.3 进程内模式缓存（TTL + stale-if-error + 显式失效）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241467041
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786245373012
+      }
+    ],
+    "3.4 `current_enforcement_state()` 与 grace 窗口语义": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241467276
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786245860554
+      }
+    ],
+    "3.5 更新既有测试（默认值翻转导致的期望变化 + 缓存污染防护）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241467329
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786246811807
+      }
+    ],
+    "4.1 新增 `backend/app/services/token_accounting/gate.py`": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241467382
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786247399349
+      }
+    ],
+    "4.2 `model_step_service` 的 `business_step` 收敛到 `gate.check()`": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241467435
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786247857971
+      }
+    ],
+    "5. 批次 C：`complete_llm_once` 增加必填 `clearance` 参数（独立合入 / 独立回退）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241467479
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786248676719
+      }
+    ],
+    "6.1 `run_compact` 接入（`run_compactor.py`）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241467520
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786249711575
+      }
+    ],
+    "6.2 `session_compact` / `group_compact` 接入（`session_context_compactor.py`）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241467557
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786250488422
+      }
+    ],
+    "6.3 `planning` 接入（`planning.py`）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241467599
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786251225748
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786253782334
+      }
+    ],
+    "6.4 `model_probe` 接入（`enterprise.py` 的连通性测试端点）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241467645
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786253788323
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786254793816
+      }
+    ],
+    "6.5 各链路终止原因落到 `token_budget_exceeded` 的测试": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241467674
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786254799823
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786255150630
+      }
+    ],
+    "7.1 拆分 `_target_budget_available`": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241467704
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786255158534
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786256905268
+      }
+    ],
+    "7.2 Property 3 域穷举测试（含两处有意的行为变更）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241467733
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786256911444
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786257919825
+      }
+    ],
+    "8.1 `SystemSettingDAO.set_value`（`system_setting_dao.py`）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241467775
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786257968540
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786258244084
+      }
+    ],
+    "8.2 执行模式端点 + 通用端点护栏（`enterprise.py`）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241467814
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786258280761
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786259457913
+      }
+    ],
+    "8.3 变更 6：模型级 `max_tokens_per_day` 从 API 写面移除（保留数据库列）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241467846
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786259484764
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786259877034
+      }
+    ],
+    "8.4 变更 7：租户三列的读写接口（`enterprise.py`）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241467880
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786259883178
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786260247382
+      }
+    ],
+    "9.1 「Token 限额执行」区块（`EnterpriseSettings.tsx` quotas tab）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241467915
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786260260295
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786262098239
+      }
+    ],
+    "9.2 租户三列输入框（`EnterpriseSettings.tsx`）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241467946
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786262118103
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786262488132
+      }
+    ],
+    "9.3 删除 `LlmTab.tsx:18` 的 `max_tokens_per_day` TS 字段声明": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241467986
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786262494912
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786262758719
+      }
+    ],
+    "10.1 前置检查：用 `alembic heads` 确认 `down_revision`": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241468020
+      }
+    ],
+    "10.2 编写迁移 `backend/alembic/versions/2026xxxxxxxx_token_budget_enforce_default.py`": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241468068
+      }
+    ],
+    "10.3 部署清单补一步灰度通知": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241468098
+      }
+    ],
+    "11.1 复验 `system_settings.token_budget_enforcement_mode` 的实际值与形状": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241468124
+      }
+    ],
+    "11.2 复验用户配置的上限究竟在哪一档": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241468159
+      }
+    ],
+    "11.3 复验迁移链 head（并入任务 10.1 执行，此处只登记结论）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241468198
+      }
+    ],
+    "11.4 复验 `jsonb` 比较与 `jsonb_build_object` 行为 + upgrade/downgrade 往返": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241468234
+      }
+    ],
+    "11.5 复验记账侧未受影响（3.5 / 3.11）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241468276
+      }
+    ],
+    "11.6 实测多 worker 下模式改动的生效时延": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241468309
+      }
+    ],
+    "12. 全链路集成测试（无库部分）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241468347
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786262998749
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786270366161
+      }
+    ],
+    "13.1 复跑 Bug Condition 探索性测试，确认现在通过": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241468384
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786270380325
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786271270884
+      }
+    ],
+    "13.2 复跑保留行为基线测试，确认仍然通过": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241468436
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786270381079
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786271271629
+      }
+    ],
+    "14. Checkpoint - 确认全部测试通过": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786241468568
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786271283763
+      },
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786271467762
+      }
+    ],
+    "6. 批次 D：四条缺闸门的链路接入 `gate.check()`": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786255150707
+      }
+    ],
+    "7. 批次 E：`group_handoff` 收敛到统一判定": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786257920005
+      }
+    ],
+    "8. 批次 F：配置面收口（后端）": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786260247554
+      }
+    ],
+    "9. 批次 G：前端入口": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786262758812
+      }
+    ],
+    "13. 复跑两个 Property，确认修复成立且无回归": [
+      {
+        "executionId": "8b399729-71ae-4e65-af33-2e7d3707b8f8",
+        "chatSessionId": "sess_5f457719-c199-4963-8b7a-8e07d679819b",
+        "timestamp": 1786271271716
+      }
+    ]
+  }
+}

@@ -29,10 +29,24 @@ from app.services.agent_runtime.state import (
     RuntimeNodeName,
     RuntimeStateUpdate,
 )
+from loguru import logger
+
 from app.services.llm.client import LLMMessage
 from app.services.llm.single_step import LLMCompletionStep, complete_llm_once
 from app.services.llm.model_resolution import load_active_model
 from app.services.llm.utils import get_max_tokens
+from app.services.token_accounting.budget import (
+    PROGRAMMING_ERROR_TYPES,
+    budget_exceeded_message,
+)
+from app.services.token_accounting.gate import (
+    LANE_PLANNING,
+    BudgetClearance,
+    BudgetSubjects,
+    check as gate_check,
+    clearance_from,
+    load_subjects,
+)
 from app.services.token_accounting.ledger import SYSTEM_SCOPE_PLANNING
 
 
@@ -127,6 +141,7 @@ class PlanningCompletionPort(Protocol):
         tenant_id: uuid.UUID | None = None,
         system_scope: str | None = None,
         supports_vision: bool = False,
+        clearance: BudgetClearance,
     ) -> LLMCompletionStep: ...
 
 
@@ -425,6 +440,45 @@ class PlanningModelService:
         # misclassify a future parse failure as a retryable LLM call failure.
         return model, tenant_id
 
+    async def _resolve_budget_subjects(
+        self,
+        context: RuntimeContext,
+        tenant_id: uuid.UUID,
+    ) -> BudgetSubjects | None:
+        """一次性取好限额判定要用的主体（任务 6.3）。
+
+        Planning 是租户级判定，只判 `tenant_day` 一档（`agent=None`，依赖任务 3.1），
+        用 `self._session_factory` 单独开一次会话 —— 与任务 6.1 / 6.2 不同的是，
+        `_load_model` 已经把它自己开的会话关掉了，这里不能顺带查，必须重新开一次。
+
+        返回 `None` 表示开会话或加载本身失败（不是"判定输入缺失"，是"取判定输入这个
+        动作本身失败"）——按异常类型分类记日志，判据与
+        `model_step_service._resolve_budget_subjects` 完全一致：
+        `PROGRAMMING_ERROR_TYPES`（签名漂移等代码 bug）吵到 ERROR，其余
+        （基础设施/瞬时故障，包括 `session_factory()` 打开会话本身失败）落 WARNING，
+        两者都 fail-open——放行而不阻塞 Planning（3.6）。调用方据此构造
+        `BudgetClearance.not_applicable(...)`，不做拦截。
+        """
+        try:
+            async with self._session_factory() as db:
+                return await load_subjects(db, tenant_id=tenant_id, agent=None)
+        except PROGRAMMING_ERROR_TYPES as exc:
+            logger.opt(exception=True).error(
+                "[TokenBudget] token_budget_enforcement_disabled_bug run_id={} lane={} error={!r}",
+                context.run_id,
+                LANE_PLANNING,
+                exc,
+            )
+            return None
+        except Exception as exc:  # noqa: BLE001 - 加载失败不能拖垮 Planning 调用（基础设施/瞬时故障）
+            logger.warning(
+                "[TokenBudget] token_budget_enforcement_disabled_transient run_id={} lane={} error={!r}",
+                context.run_id,
+                LANE_PLANNING,
+                exc,
+            )
+            return None
+
     async def complete_once(
         self,
         state: RuntimeGraphState,
@@ -452,6 +506,49 @@ class PlanningModelService:
                 error_code=exc.code,
                 error_message=str(exc),
                 retryable=False,
+            )
+
+        # 限额判定（任务 6.3）：Planning 调用会按租户当日计数记账
+        # （`system_scope=SYSTEM_SCOPE_PLANNING`），必须在真正发起 provider 请求
+        # （下面的 `self._completion(...)`）之前完成一次「击穿判定」
+        # （`estimated_next_round_tokens=0`，只做判定不做预算预扣——超限幅度有界
+        # 由 business_step 自己的两阶段估算保证）。`run_id` 传 `context.run_id`
+        # （与 6.1 一致；这条链路确实有 run_id，不同于 6.2 的 session/group compact
+        # 没有 run_id 概念的场景）。
+        #
+        # `subjects is None` 时不判定、直接放行：与任务 6.1 / 6.2 的设计决定一致——
+        # 判定所需的输入缺失（这里特指 `_resolve_budget_subjects` 开会话或加载本身
+        # 失败）不等于判定跑过并拒绝。理由已在 `run_compactor.compact_if_needed`
+        # 里完整展开，此处不重复论证：让缺失主体 fail closed 会把一次基础设施故障
+        # 伪装成一次限额拦截，制造更难查的假阳性；而放行则与 3.6 的 fail-open 判据
+        # 完全一致（`_resolve_budget_subjects` 内部已经按异常类型分级记过日志）。
+        subjects = await self._resolve_budget_subjects(context, tenant_id)
+        if subjects is not None:
+            verdict = await gate_check(
+                lane=LANE_PLANNING,
+                subjects=subjects,
+                estimated_next_round_tokens=0,
+                run_id=context.run_id,
+            )
+            if not verdict.allowed:
+                # `retryable=False`：命中限额是一个确定性结果（判定输入没变，
+                # 立刻重试只会拿到同样的拒绝），不属于 3.6 fail-open 覆盖的
+                # "基础设施/瞬时故障"范畴，`_model` 节点据此直接终止 Planning
+                # Run 而不进入修复循环（`attempt <= self._max_repairs`）；
+                # `planning_scheduler` 消费 `error_code` 作为 `failure_code`
+                # 时同样不区分 retryable，终止即最终结果——已用测试
+                # （`test_agent_runtime_planning_scheduler.py`）钉住这个映射,
+                # 并确认既有重试逻辑（Planning 修复循环）不会把它当瞬时故障重试。
+                return PlanningModelResult(
+                    error_code="token_budget_exceeded",
+                    error_message=budget_exceeded_message(verdict),
+                    retryable=False,
+                )
+            clearance = clearance_from(LANE_PLANNING, verdict)
+        else:
+            clearance = BudgetClearance.not_applicable(
+                LANE_PLANNING,
+                reason="planning budget subjects unavailable (session_factory or load failed)",
             )
 
         planning_state = state["lifecycle"].get("planning")
@@ -486,6 +583,7 @@ class PlanningModelService:
                 tenant_id=tenant_id,
                 system_scope=SYSTEM_SCOPE_PLANNING,
                 supports_vision=False,
+                clearance=clearance,
             )
         except Exception:
             return PlanningModelResult(

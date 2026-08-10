@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
 from loguru import logger
 from test_agent_runtime_model_step_service import _agent as _real_agent
 from test_agent_runtime_model_step_service import _build as _real_build
@@ -28,18 +29,34 @@ from test_agent_runtime_node_executor import _state as _node_state
 
 from app.services.agent_runtime import model_step_service, node_executor
 from app.services.llm.single_step import LLMCompletionStep
+from app.services.token_accounting import gate
 from app.services.token_accounting.budget import (
     MODE_ENFORCE,
     MODE_WARN_ONLY,
     SCOPE_AGENT_DAY,
     SCOPE_TENANT_DAY,
     BudgetVerdict,
+    reset_enforcement_mode_cache,
 )
 from app.services.token_tracker import TokenUsage
 
 NOW = datetime(2026, 8, 6, 16, 30, tzinfo=UTC)
 TENANT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 AGENT_ID = uuid.UUID("22222222-2222-2222-2222-222222222222")
+
+
+@pytest.fixture(autouse=True)
+def _reset_enforcement_mode_cache_between_tests():
+    """避免用例间通过 30 秒 TTL 的进程内模式缓存互相污染（任务 3.3）。
+
+    本文件里大多数用例都通过 monkeypatch 覆盖 `gate.evaluate`（`_budget_gate` 收敛到
+    `gate.check()` 后，判定入口在 `gate` 模块里）显式传 mode，不直接触发
+    `current_enforcement_mode()`；但少数用例（例如驱动 `complete_once` 的真实两阶段
+    判定）会走到默认参数，仍需要重置以保证隔离。
+    """
+    reset_enforcement_mode_cache()
+    yield
+    reset_enforcement_mode_cache()
 
 
 def _blocked_verdict() -> BudgetVerdict:
@@ -91,7 +108,7 @@ async def test_budget_gate_returns_an_error_step_when_blocked(monkeypatch) -> No
     async def fake_evaluate(**kwargs):
         return _blocked_verdict()
 
-    monkeypatch.setattr(model_step_service, "evaluate_budget", fake_evaluate)
+    monkeypatch.setattr(gate, "evaluate", fake_evaluate)
 
     result = await service._budget_gate(_context(), _agent(), (tenant, counter), estimated_next_round_tokens=0)
 
@@ -111,14 +128,14 @@ async def test_budget_gate_returns_none_when_allowed(monkeypatch) -> None:
         calls.append(kwargs)
         return BudgetVerdict(allowed=True, mode=MODE_ENFORCE)
 
-    monkeypatch.setattr(model_step_service, "evaluate_budget", fake_evaluate)
+    monkeypatch.setattr(gate, "evaluate", fake_evaluate)
 
     result = await service._budget_gate(_context(), _agent(), (tenant, counter), estimated_next_round_tokens=0)
 
     assert result is None
     # 若判定内部抛异常，fail-open 处理同样返回 None——必须证明是判定真的放行了，
     # 不是判定崩溃后被兜底吞掉了。
-    assert len(calls) == 1, "evaluate_budget 必须被真正调用，而不是走了 fail-open"
+    assert len(calls) == 1, "evaluate 必须被真正调用，而不是走了 fail-open"
 
 
 async def test_warn_only_breach_does_not_block(monkeypatch) -> None:
@@ -139,12 +156,12 @@ async def test_warn_only_breach_does_not_block(monkeypatch) -> None:
             mode=MODE_WARN_ONLY,
         )
 
-    monkeypatch.setattr(model_step_service, "evaluate_budget", fake_evaluate)
+    monkeypatch.setattr(gate, "evaluate", fake_evaluate)
 
     result = await service._budget_gate(_context(), _agent(), (tenant, counter), estimated_next_round_tokens=0)
 
     assert result is None
-    assert len(calls) == 1, "evaluate_budget 必须被真正调用，而不是走了 fail-open"
+    assert len(calls) == 1, "evaluate 必须被真正调用，而不是走了 fail-open"
 
 
 async def test_preflight_estimate_is_passed_through(monkeypatch) -> None:
@@ -158,7 +175,7 @@ async def test_preflight_estimate_is_passed_through(monkeypatch) -> None:
         captured.update(kwargs)
         return BudgetVerdict(allowed=True, mode=MODE_ENFORCE)
 
-    monkeypatch.setattr(model_step_service, "evaluate_budget", fake_evaluate)
+    monkeypatch.setattr(gate, "evaluate", fake_evaluate)
 
     await service._budget_gate(_context(), _agent(), (tenant, counter), estimated_next_round_tokens=7_777)
 
@@ -246,7 +263,7 @@ async def test_budget_gate_programming_error_logs_at_error_and_still_allows(monk
     async def fake_evaluate(**kwargs):
         raise TypeError("signature drift")
 
-    monkeypatch.setattr(model_step_service, "evaluate_budget", fake_evaluate)
+    monkeypatch.setattr(gate, "evaluate", fake_evaluate)
 
     try:
         result = await service._budget_gate(_context(), _agent(), (tenant, counter), estimated_next_round_tokens=0)
@@ -266,7 +283,7 @@ async def test_budget_gate_transient_failure_logs_at_warning_and_still_allows(mo
     async def fake_evaluate(**kwargs):
         raise OSError("connection refused")
 
-    monkeypatch.setattr(model_step_service, "evaluate_budget", fake_evaluate)
+    monkeypatch.setattr(gate, "evaluate", fake_evaluate)
 
     try:
         result = await service._budget_gate(_context(), _agent(), (tenant, counter), estimated_next_round_tokens=0)
@@ -305,8 +322,8 @@ async def test_soft_warning_dedup_uses_the_verdicts_own_scope_and_subject(monkey
         captured["reset_at"] = reset_at_arg
         return True
 
-    monkeypatch.setattr(model_step_service, "evaluate_budget", fake_evaluate)
-    monkeypatch.setattr(model_step_service, "should_emit_soft_warning", fake_should_emit)
+    monkeypatch.setattr(gate, "evaluate", fake_evaluate)
+    monkeypatch.setattr(gate, "should_emit_soft_warning", fake_should_emit)
 
     await service._budget_gate(_context(), _agent(), (tenant, counter), estimated_next_round_tokens=0)
 
@@ -381,7 +398,7 @@ async def test_complete_once_short_circuits_at_the_first_budget_gate(monkeypatch
             return _blocked_verdict()
         return BudgetVerdict(allowed=True, mode=MODE_ENFORCE)
 
-    monkeypatch.setattr(model_step_service, "evaluate_budget", fake_evaluate)
+    monkeypatch.setattr(gate, "evaluate", fake_evaluate)
 
     builder = _RealContextBuilder(_real_build())
     result = await _real_service(model, agent, builder, completion).complete_once(state, _real_context(state))
@@ -405,7 +422,7 @@ async def test_complete_once_short_circuits_at_the_second_budget_gate(monkeypatc
             return BudgetVerdict(allowed=True, mode=MODE_ENFORCE)
         return _blocked_verdict()
 
-    monkeypatch.setattr(model_step_service, "evaluate_budget", fake_evaluate)
+    monkeypatch.setattr(gate, "evaluate", fake_evaluate)
 
     result = await _real_service(model, agent, _RealContextBuilder(_real_build()), completion).complete_once(
         state, _real_context(state)
@@ -427,7 +444,7 @@ async def test_complete_once_calls_the_completion_port_when_both_gates_allow(mon
     async def fake_evaluate(**kwargs):
         return BudgetVerdict(allowed=True, mode=MODE_ENFORCE)
 
-    monkeypatch.setattr(model_step_service, "evaluate_budget", fake_evaluate)
+    monkeypatch.setattr(gate, "evaluate", fake_evaluate)
 
     result = await _real_service(model, agent, _RealContextBuilder(_real_build()), completion).complete_once(
         state, _real_context(state)

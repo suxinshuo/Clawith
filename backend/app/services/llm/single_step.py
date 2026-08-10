@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 import uuid
 
+from app.services.token_accounting.gate import BudgetClearance
 from app.services.token_accounting.ledger import record as record_token_usage_ledger
 from app.services.token_accounting.normalize import (
     PROTOCOL_OPENAI_COMPATIBLE,
@@ -47,6 +48,7 @@ async def complete_llm_once(
     tenant_id: uuid.UUID | None = None,
     system_scope: str | None = None,
     supports_vision: bool = False,
+    clearance: BudgetClearance,
 ) -> LLMCompletionStep:
     """Call one pinned model exactly once and normalize its tool proposals.
 
@@ -57,7 +59,17 @@ async def complete_llm_once(
     which resolves its own tenant. Callers with no owning Agent (group
     compaction, planning, connectivity probes) must pass ``tenant_id`` and
     ``system_scope`` instead, or their usage is dropped rather than recorded.
+
+    ``clearance`` is a required keyword argument by design (see design.md
+    变更 4): every caller must state whether a budget verdict was checked
+    before reaching this provider boundary, or explicitly declare that budget
+    enforcement does not apply here (``BudgetClearance.not_applicable``).
+    Passing a clearance whose verdict is a denial (``verdict.allowed is
+    False``) and still calling this function is a programming error - the
+    caller should have short-circuited before ever reaching this boundary.
     """
+    if clearance.verdict is not None and not clearance.verdict.allowed:
+        raise RuntimeError("budget_clearance_violation")
     if system_scope is not None and tenant_id is None:
         # system_scope only makes sense against the ledger's tenant-level
         # scope, and the legacy branch below has no tenant to check it

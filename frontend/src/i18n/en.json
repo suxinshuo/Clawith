@@ -1038,6 +1038,21 @@
       "sendTest": "Send Test Email"
     },
     "quotas": {
+      "tokenBudgetEnforcement": {
+        "title": "Token Budget Enforcement",
+        "effectiveMode": "Current Effective Mode",
+        "modeEnforce": "Enforcing",
+        "modeWarnOnly": "Warn only",
+        "graceWindow": "Grace Window",
+        "graceInactive": "No active grace window",
+        "graceEndingSoon": "Ending soon",
+        "graceRemainingDays": "{{days}}d {{hours}}h remaining",
+        "graceRemainingHours": "{{hours}}h {{minutes}}m remaining",
+        "modeLabel": "Enforcement Mode",
+        "enforceNow": "Enforce Now",
+        "propagationHint": "Changes take effect on all workers within {{seconds}} seconds.",
+        "readOnlyHint": "Only platform admins can change this setting."
+      },
       "defaultUserQuotas": "Default User Quotas",
       "defaultsApply": "These defaults apply to newly registered users. Existing users are not affected.",
       "conversationLimits": "Conversation Limits",
@@ -1065,7 +1080,14 @@
       "minPollInterval": "Min Poll Interval (min)",
       "minPollIntervalDesc": "Company-wide floor: agents cannot poll faster than this",
       "maxWebhookRate": "Max Webhook Rate (/min)",
-      "maxWebhookRateDesc": "Company-wide ceiling: max webhook hits per minute per agent"
+      "maxWebhookRateDesc": "Company-wide ceiling: max webhook hits per minute per agent",
+      "tokenLimits": "Token Limits",
+      "tenantMaxTokensPerDay": "Tenant Max Tokens / Day",
+      "tenantMaxTokensPerDayDesc": "Includes system overhead (group compaction / planning / connectivity tests). Leave empty for no limit.",
+      "defaultAgentMaxTokensPerDay": "Default Agent Max Tokens / Day",
+      "defaultAgentMaxTokensPerDayDesc": "Default daily token limit applied to newly created agents. Leave empty for no limit.",
+      "defaultAgentMaxTokensPerMonth": "Default Agent Max Tokens / Month",
+      "defaultAgentMaxTokensPerMonthDesc": "Default monthly token limit applied to newly created agents. Leave empty for no limit."
     },
     "stats": {
       "users": "{{count}} users",

@@ -28,6 +28,12 @@ from app.services.agent_runtime.group_handoff import (
     GroupAgentHandoffApplyResult,
     GroupAgentHandoffError,
 )
+from app.services.token_accounting.budget import (
+    SCOPE_TENANT_DAY,
+    MODE_ENFORCE,
+    BudgetVerdict,
+    budget_exceeded_message,
+)
 
 
 NOW = datetime(2026, 7, 13, 15, 0, tzinfo=UTC)
@@ -1050,6 +1056,71 @@ async def test_write_file_protocol_failure_guides_user_to_regenerate() -> None:
         "错误码：model_tool_protocol_violation\n"
         f"Run ID：{run.id}"
     )
+
+
+@pytest.mark.asyncio
+async def test_token_budget_exceeded_failure_renders_the_budget_exceeded_message() -> None:
+    """Task 6.5: drive `_safe_failure_content` with a real `token_budget_exceeded`
+    failure and confirm the rendered text carries both the error code and the
+    four pieces of information `budget_exceeded_message()` produces (blocked_scope,
+    thousands-separated used/limit, and `reset_at.isoformat(timespec="minutes")`),
+    using the real `BudgetVerdict` / `budget_exceeded_message()` rather than a
+    hand-written message string.
+    """
+    tenant_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    session = _session(tenant_id=tenant_id, agent_id=None, group_id=group_id)
+    run = _run(tenant_id=tenant_id, session=session, agent_id=agent_id)
+    participant = _participant(agent_id)
+    membership = GroupMember(
+        group_id=group_id,
+        participant_id=participant.id,
+        role="member",
+        removed_at=None,
+    )
+    db = _RecordingDB(
+        run,
+        None,
+        session,
+        _agent(tenant_id, agent_id),
+        participant,
+        _group(tenant_id, group_id),
+        membership,
+    )
+
+    verdict = BudgetVerdict(
+        allowed=False,
+        blocked_scope=SCOPE_TENANT_DAY,
+        used=500_000,
+        limit=500_000,
+        reset_at=datetime(2026, 8, 7, 16, 0, tzinfo=UTC),
+        mode=MODE_ENFORCE,
+    )
+    message = budget_exceeded_message(verdict)
+
+    receipt = await deliver_runtime_message(
+        db,
+        _terminal_request(
+            run,
+            status="failed",
+            failure_code="token_budget_exceeded",
+            failure_message=message,
+        ),
+        clock=lambda: NOW,
+    )
+
+    assert receipt.status == "delivered"
+    content = _added(db, ChatMessage)[0].content
+    assert "错误码：token_budget_exceeded" in content
+    assert message in content
+    # Belt-and-suspenders: confirm each of the four pieces of information
+    # budget_exceeded_message() produces is actually present in the rendered
+    # text, not just that the whole message string matched verbatim.
+    assert "企业当日" in content
+    assert f"{verdict.used:,}" in content
+    assert f"{verdict.limit:,}" in content
+    assert verdict.reset_at.isoformat(timespec="minutes") in content
 
 
 @pytest.mark.asyncio
