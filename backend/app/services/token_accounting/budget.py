@@ -256,6 +256,7 @@ class BudgetVerdict:
     blocked_scope: str | None = None
     used: int | None = None
     limit: int | None = None
+    estimated: int | None = None
     reset_at: datetime | None = None
     mode: str = MODE_WARN_ONLY
     soft_warning: bool = False
@@ -490,6 +491,7 @@ async def evaluate(
                 blocked_scope=scope,
                 used=used,
                 limit=limit,
+                estimated=estimated_next_round_tokens if estimated_next_round_tokens > 0 else None,
                 reset_at=reset_at,
                 mode=effective_mode,
             )
@@ -533,6 +535,12 @@ def budget_exceeded_message(verdict: BudgetVerdict) -> str:
     used = f"{verdict.used:,}" if verdict.used is not None else "?"
     limit = f"{verdict.limit:,}" if verdict.limit is not None else "?"
     reset = verdict.reset_at.isoformat(timespec="minutes") if verdict.reset_at is not None else "下一个周期"
+    if verdict.estimated is not None and verdict.estimated > 0:
+        return (
+            f"{label} token 用量已达上限（已用 {used} + 本轮预估 {verdict.estimated:,} ≥ 上限 {limit}，"
+            f"scope={verdict.blocked_scope}）。"
+            f"额度将在 {reset} 释放，或请管理员调高上限。"
+        )
     return (
         f"{label} token 用量已达上限（{used}/{limit}，scope={verdict.blocked_scope}）。"
         f"额度将在 {reset} 释放，或请管理员调高上限。"
