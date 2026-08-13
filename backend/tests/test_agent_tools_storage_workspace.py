@@ -6,6 +6,7 @@ import pytest
 from app.services import agent_tools
 from app.services import workspace_collaboration
 from app.services.storage_runtime.base import StorageBackend, StorageEntry, StorageVersion, WriteCondition, ConditionalWriteResult
+from app.services.storage_runtime.local import LocalStorageBackend
 
 
 @asynccontextmanager
@@ -345,3 +346,72 @@ async def test_delete_workspace_directory_uses_prefix_existence(monkeypatch, tmp
     assert result.ok is True
     assert f"{agent_id}/workspace/dir/a.txt" not in storage.files
     assert f"{agent_id}/workspace/dir/nested/b.txt" not in storage.files
+
+
+@pytest.mark.asyncio
+async def test_execute_code_uses_real_workspace_on_local_storage(monkeypatch, tmp_path):
+    """execute_code must run against the agent's real on-disk workspace when the
+    storage backend is local, so sandbox backends (e.g. Docker) can bind-mount it.
+
+    A temp-dir copy (the pre-fix behavior) is invisible to the host Docker daemon
+    when Clawith itself runs containerized, so the sandbox container ends up with
+    an empty mounted directory.
+    """
+    agent_id = uuid.uuid4()
+    storage = LocalStorageBackend(str(tmp_path))
+    monkeypatch.setattr(agent_tools, "get_storage_backend", lambda: storage)
+    monkeypatch.setattr(agent_tools, "WORKSPACE_ROOT", tmp_path)
+
+    async def _tenant(_agent_id):
+        return None
+
+    monkeypatch.setattr(agent_tools, "_get_agent_tenant_id", _tenant)
+
+    captured_ws = {}
+
+    async def _fake_execute_code_outcome(_agent_id, ws, _arguments, **_kwargs):
+        captured_ws["ws"] = ws
+        return agent_tools._typed_success("ok")
+
+    monkeypatch.setattr(agent_tools, "_execute_code_outcome", _fake_execute_code_outcome)
+
+    await agent_tools.execute_builtin_tool_outcome(
+        "execute_code",
+        {"language": "python", "code": "print('hi')"},
+        agent_id,
+        agent_id,
+    )
+
+    assert captured_ws["ws"] == tmp_path / str(agent_id)
+
+
+@pytest.mark.asyncio
+async def test_execute_code_uses_temp_workspace_on_non_local_storage(monkeypatch, tmp_path):
+    """Remote (e.g. S3) storage still needs the temp-dir materialize/sync-back path."""
+    agent_id = uuid.uuid4()
+    storage = MemoryStorageBackend()
+    monkeypatch.setattr(agent_tools, "get_storage_backend", lambda: storage)
+    monkeypatch.setattr(agent_tools, "WORKSPACE_ROOT", tmp_path)
+
+    async def _tenant(_agent_id):
+        return None
+
+    monkeypatch.setattr(agent_tools, "_get_agent_tenant_id", _tenant)
+
+    captured_ws = {}
+
+    async def _fake_execute_code_outcome(_agent_id, ws, _arguments, **_kwargs):
+        captured_ws["ws"] = ws
+        return agent_tools._typed_success("ok")
+
+    monkeypatch.setattr(agent_tools, "_execute_code_outcome", _fake_execute_code_outcome)
+
+    await agent_tools.execute_builtin_tool_outcome(
+        "execute_code",
+        {"language": "python", "code": "print('hi')"},
+        agent_id,
+        agent_id,
+    )
+
+    assert captured_ws["ws"] != tmp_path / str(agent_id)
+    assert not (tmp_path / str(agent_id)).exists()
