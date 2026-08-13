@@ -85,6 +85,7 @@ from app.services.workspace_collaboration import (
 )
 from app.services.storage import get_storage_backend, normalize_storage_key
 from app.services.storage_runtime.base import WriteCondition, content_hash_bytes
+from app.services.storage_runtime.local import LocalStorageBackend
 from app.services.workspace_locking import workspace_locks
 from app.config import get_settings
 from app.services.llm.finish import (
@@ -1587,6 +1588,22 @@ def _agent_workspace_root(agent_id: uuid.UUID) -> Path:
     return WORKSPACE_ROOT / str(agent_id)
 
 
+def _local_disk_workspace_root(agent_id: uuid.UUID) -> Path | None:
+    """Return the agent's real on-disk workspace root, or None on remote storage.
+
+    ``LocalStorageBackend`` writes agent files to exactly this path (see
+    ``agent_storage_key``), so when it's the active backend, tools that need
+    a real filesystem directory (e.g. execute_code's Docker sandbox mount)
+    can use it directly instead of materializing a throwaway copy under
+    /tmp — a copy the Docker daemon's bind mount can't resolve when Clawith
+    itself runs containerized (AGENT_DATA_HOST_DIR only maps paths under
+    AGENT_DATA_DIR).
+    """
+    if isinstance(get_storage_backend(), LocalStorageBackend):
+        return _agent_workspace_root(agent_id)
+    return None
+
+
 def _non_empty_paths(*paths: str | None) -> list[str] | None:
     selected = [path for path in paths if path]
     return selected or None
@@ -2608,6 +2625,19 @@ async def execute_builtin_tool_outcome(
             sync_back=True,
         )
     if tool_name in {"execute_code", "execute_code_e2b"}:
+        local_ws = _local_disk_workspace_root(agent_id)
+        if local_ws is not None:
+            # Local storage backend: run directly against the agent's real
+            # workspace directory so Docker/other sandbox backends can bind
+            # mount it. See _local_disk_workspace_root for why a temp copy
+            # breaks that mount.
+            return await _execute_code_outcome(
+                agent_id,
+                local_ws,
+                arguments,
+                tool_name=tool_name,
+                on_output=on_output,
+            )
         return await _run_with_temp_workspace_outcome(
             agent_id,
             tenant_id,
@@ -2860,6 +2890,9 @@ async def _execute_tool_direct(
                 tool_name,
                 _observability_arguments(tool_name, arguments),
             )
+            local_ws = _local_disk_workspace_root(agent_id)
+            if local_ws is not None:
+                return await _execute_code(agent_id, local_ws, arguments, tool_name=tool_name)
             return await _run_with_temp_workspace(
                 agent_id,
                 _agent_tenant_id,
@@ -3235,12 +3268,18 @@ async def execute_tool(
                 tool_name,
                 _observability_arguments(tool_name, arguments),
             )
-            result = await _run_with_temp_workspace(
-                agent_id,
-                _agent_tenant_id,
-                lambda temp_ws: _execute_code(agent_id, temp_ws, arguments, tool_name=tool_name, on_output=on_output),
-                sync_back=True,
-            )
+            local_ws = _local_disk_workspace_root(agent_id)
+            if local_ws is not None:
+                result = await _execute_code(agent_id, local_ws, arguments, tool_name=tool_name, on_output=on_output)
+            else:
+                result = await _run_with_temp_workspace(
+                    agent_id,
+                    _agent_tenant_id,
+                    lambda temp_ws: _execute_code(
+                        agent_id, temp_ws, arguments, tool_name=tool_name, on_output=on_output
+                    ),
+                    sync_back=True,
+                )
         elif tool_name == "upload_image":
             file_path = (arguments.get("file_path") or "").strip()
             result = await _run_with_temp_workspace(
