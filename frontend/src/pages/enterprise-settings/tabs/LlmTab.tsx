@@ -22,6 +22,7 @@ interface LLMModel {
     tool_calling_checked_at?: string | null;
     tool_calling_error?: string | null;
     max_output_tokens?: number;
+    context_window_tokens_override?: number;
     request_timeout?: number;
     temperature?: number;
     created_at: string;
@@ -83,6 +84,7 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
         label: '',
         supports_vision: false,
         max_output_tokens: '' as string,
+        context_window_tokens_override: '' as string,
         request_timeout: '' as string,
         temperature: '' as string,
     });
@@ -231,6 +233,7 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
             label: '',
             supports_vision: false,
             max_output_tokens: defaultSpec ? String(defaultSpec.default_max_tokens) : '4096',
+            context_window_tokens_override: '',
             request_timeout: '',
             temperature: '',
         });
@@ -415,6 +418,11 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
                             <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('enterprise.llm.maxOutputTokensDesc', 'Limits generation length')}</div>
                         </div>
                         <div className="form-group">
+                            <label className="form-label">{t('enterprise.llm.contextWindowTokens', 'Context Window (tokens)')}</label>
+                            <input className="form-input" type="number" min="1" placeholder={t('enterprise.llm.contextWindowTokensPlaceholder', 'e.g. 1000000 (Leave empty for platform default)')} value={modelForm.context_window_tokens_override} onChange={e => setModelForm({ ...modelForm, context_window_tokens_override: e.target.value })} />
+                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('enterprise.llm.contextWindowTokensDesc', "The model's real input+output context window. Leave empty to use the platform-wide fallback.")}</div>
+                        </div>
+                        <div className="form-group">
                             <label className="form-label">{t('enterprise.llm.requestTimeout', 'Request Timeout (s)')}</label>
                             <input className="form-input" type="number" min="1" placeholder={t('enterprise.llm.requestTimeoutPlaceholder', 'e.g. 120 (Leave empty for default)')} value={modelForm.request_timeout} onChange={e => setModelForm({ ...modelForm, request_timeout: e.target.value })} />
                             <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('enterprise.llm.requestTimeoutDesc', 'Increase for slow local models.')}</div>
@@ -432,6 +440,7 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
                             addModel.mutate({
                                 ...modelForm,
                                 max_output_tokens: modelForm.max_output_tokens ? Number(modelForm.max_output_tokens) : null,
+                                context_window_tokens_override: modelForm.context_window_tokens_override ? Number(modelForm.context_window_tokens_override) : null,
                                 request_timeout: modelForm.request_timeout ? Number(modelForm.request_timeout) : null,
                                 temperature: modelForm.temperature !== '' ? Number(modelForm.temperature) : null,
                             });
@@ -491,6 +500,11 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
                                         <input className="form-input" type="number" placeholder={t('enterprise.llm.maxOutputTokensPlaceholder', 'e.g. 4096')} value={modelForm.max_output_tokens} onChange={e => setModelForm({ ...modelForm, max_output_tokens: e.target.value })} />
                                     </div>
                                     <div className="form-group">
+                                        <label className="form-label">{t('enterprise.llm.contextWindowTokens', 'Context Window (tokens)')}</label>
+                                        <input className="form-input" type="number" min="1" placeholder={t('enterprise.llm.contextWindowTokensPlaceholder', 'e.g. 1000000 (Leave empty for platform default)')} value={modelForm.context_window_tokens_override} onChange={e => setModelForm({ ...modelForm, context_window_tokens_override: e.target.value })} />
+                                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('enterprise.llm.contextWindowTokensDesc', "The model's real input+output context window. Leave empty to use the platform-wide fallback.")}</div>
+                                    </div>
+                                    <div className="form-group">
                                         <label className="form-label">{t('enterprise.llm.requestTimeout', 'Request Timeout (s)')}</label>
                                         <input className="form-input" type="number" min="1" placeholder={t('enterprise.llm.requestTimeoutPlaceholder', 'e.g. 120 (Leave empty for default)')} value={modelForm.request_timeout} onChange={e => setModelForm({ ...modelForm, request_timeout: e.target.value })} />
                                     </div>
@@ -508,6 +522,7 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
                                             data: {
                                                 ...modelForm,
                                                 max_output_tokens: modelForm.max_output_tokens ? Number(modelForm.max_output_tokens) : null,
+                                                context_window_tokens_override: modelForm.context_window_tokens_override ? Number(modelForm.context_window_tokens_override) : null,
                                                 request_timeout: modelForm.request_timeout ? Number(modelForm.request_timeout) : null,
                                                 temperature: modelForm.temperature !== '' ? Number(modelForm.temperature) : null,
                                             },
@@ -614,6 +629,7 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
                                             api_key: m.api_key_masked || '',
                                             supports_vision: m.supports_vision || false,
                                             max_output_tokens: m.max_output_tokens ? String(m.max_output_tokens) : '',
+                                            context_window_tokens_override: m.context_window_tokens_override ? String(m.context_window_tokens_override) : '',
                                             request_timeout: m.request_timeout ? String(m.request_timeout) : '',
                                             temperature: m.temperature !== null && m.temperature !== undefined ? String(m.temperature) : '',
                                         });

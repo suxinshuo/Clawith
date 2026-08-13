@@ -11,7 +11,7 @@ import pytest
 
 from app.api import enterprise
 from app.models.llm import LLMModel
-from app.schemas.schemas import LLMModelUpdate
+from app.schemas.schemas import LLMModelCreate, LLMModelUpdate
 from app.services.llm.client import LLMResponse
 from app.services.token_accounting import gate as gate_module
 from app.services.token_accounting.budget import MODE_ENFORCE
@@ -507,6 +507,79 @@ async def test_updating_model_identity_invalidates_prior_tool_probe(
     assert "changed" in (updated.tool_calling_error or "").lower()
     assert db.committed is True
     assert db.refreshed is True
+
+
+@pytest.mark.asyncio
+async def test_updating_context_window_override_does_not_invalidate_tool_probe() -> None:
+    """`context_window_tokens_override` 不是身份指纹的一部分，改它不该打断已验证的探测结果。"""
+    tenant_id = uuid.uuid4()
+    checked_at = datetime.now(UTC)
+    model = LLMModel(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        provider="anthropic",
+        model="claude-sonnet-5",
+        api_key_encrypted="stored-key",
+        label="Claude 1M",
+        enabled=True,
+        supports_vision=False,
+        supports_tool_calling=True,
+        tool_calling_capability_source="probe",
+        tool_calling_checked_at=checked_at,
+        tool_calling_error=None,
+        created_at=checked_at,
+    )
+    db = _DB(model)
+
+    updated = await enterprise.update_llm_model(
+        model.id,
+        LLMModelUpdate(context_window_tokens_override=1_000_000),
+        current_user=SimpleNamespace(tenant_id=tenant_id, role="admin"),
+        db=db,  # type: ignore[arg-type]
+    )
+
+    assert updated.context_window_tokens_override == 1_000_000
+    assert updated.supports_tool_calling is True
+    assert updated.tool_calling_capability_source == "probe"
+    assert db.committed is True
+
+
+class _AddDB:
+    """Stands in for the ORM session; a real flush would populate `id`/`created_at`
+    from the column defaults, so this fakes that side effect too."""
+
+    def __init__(self) -> None:
+        self.added: list[LLMModel] = []
+
+    def add(self, model: LLMModel) -> None:
+        model.id = uuid.uuid4()
+        model.created_at = datetime.now(UTC)
+        self.added.append(model)
+
+    async def flush(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_creating_model_persists_context_window_override(monkeypatch) -> None:
+    monkeypatch.setattr(enterprise, "encrypt_data", lambda value, _key: f"enc:{value}")
+    db = _AddDB()
+
+    created = await enterprise.add_llm_model(
+        LLMModelCreate(
+            provider="anthropic",
+            model="claude-sonnet-5",
+            api_key="sk-test",
+            label="Claude 1M",
+            context_window_tokens_override=1_000_000,
+        ),
+        tenant_id=None,
+        current_user=SimpleNamespace(tenant_id=None, role="platform_admin"),
+        db=db,  # type: ignore[arg-type]
+    )
+
+    assert created.context_window_tokens_override == 1_000_000
+    assert db.added[0].context_window_tokens_override == 1_000_000
 
 
 # ---------------------------------------------------------------------------
