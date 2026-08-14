@@ -7,9 +7,12 @@ Provides a consistent interface for all LLM operations across the application.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import json
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine, Literal
 
@@ -28,6 +31,80 @@ class LLMError(Exception):
 
 class LLMRequestShapeError(LLMError):
     """The final provider request violates a portable message-shape invariant."""
+
+
+class LLMHTTPError(LLMError):
+    """A provider answered with an error status.
+
+    Carries the throttling hints the response headers gave us so callers can
+    back off the way the provider asked instead of guessing. Without this,
+    ``Retry-After`` dies at the client boundary and a retry loop can only apply
+    a blind exponential backoff — which for a per-minute rate-limit window
+    means every attempt lands inside the same throttled window.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
+
+
+def parse_retry_after(value: str | None) -> float | None:
+    """Parse an HTTP ``Retry-After`` value into seconds.
+
+    Handles both forms RFC 9110 allows: delta-seconds and an HTTP-date. A date
+    already in the past clamps to 0 (the window has reopened); anything
+    unparseable or negative returns None so the caller falls back to its own
+    backoff instead of trusting a malformed header.
+    """
+    if value is None:
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        pass
+    else:
+        return seconds if seconds >= 0 else None
+    try:
+        deadline = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if deadline is None:
+        return None
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+    return max(0.0, remaining)
+
+
+def _http_status_error(
+    status_code: int,
+    headers: Mapping[str, str] | None,
+    body: str,
+) -> LLMHTTPError:
+    """Build the canonical HTTP-status error.
+
+    The ``HTTP {code}: {body}`` message shape is load-bearing — `classify_error`
+    and the runtime's retry logging both scrape the status code out of the
+    stringified exception.
+    """
+    retry_after = None
+    if headers is not None:
+        retry_after = parse_retry_after(headers.get("retry-after"))
+    return LLMHTTPError(
+        f"HTTP {status_code}: {body}",
+        status_code=status_code,
+        retry_after_seconds=retry_after,
+    )
 
 
 # ============================================================================
@@ -647,7 +724,11 @@ class OpenAICompatibleClient(LLMClient):
 
         if response.status_code >= 400:
             error_text = response.text[:500]
-            raise LLMError(f"HTTP {response.status_code}: {error_text}")
+            raise _http_status_error(
+                response.status_code,
+                response.headers,
+                error_text,
+            )
 
         data = response.json()
 
@@ -699,7 +780,11 @@ class OpenAICompatibleClient(LLMClient):
                         error_body = ""
                         async for chunk in resp.aiter_bytes():
                             error_body += chunk.decode(errors="replace")
-                        raise LLMError(f"HTTP {resp.status_code}: {error_body[:500]}")
+                        raise _http_status_error(
+                            resp.status_code,
+                            resp.headers,
+                            error_body[:500],
+                        )
 
                     async for line in resp.aiter_lines():
                         chunk, in_think, tag_buffer, json_buffer = self._parse_stream_line(
@@ -1116,7 +1201,11 @@ class OpenAIResponsesClient(LLMClient):
 
         if response.status_code >= 400:
             error_text = response.text[:500]
-            raise LLMError(f"HTTP {response.status_code}: {error_text}")
+            raise _http_status_error(
+                response.status_code,
+                response.headers,
+                error_text,
+            )
 
         data = response.json()
         api_error = self._extract_api_error(data)
@@ -1531,7 +1620,11 @@ class GeminiClient(LLMClient):
 
         if response.status_code >= 400:
             error_text = response.text[:500]
-            raise LLMError(f"HTTP {response.status_code}: {error_text}")
+            raise _http_status_error(
+                response.status_code,
+                response.headers,
+                error_text,
+            )
 
         data = response.json()
         if isinstance(data, dict) and data.get("error"):
@@ -1588,7 +1681,11 @@ class GeminiClient(LLMClient):
                     error_body = ""
                     async for chunk in resp.aiter_bytes():
                         error_body += chunk.decode(errors="replace")
-                    raise LLMError(f"HTTP {resp.status_code}: {error_body[:500]}")
+                    raise _http_status_error(
+                        resp.status_code,
+                        resp.headers,
+                        error_body[:500],
+                    )
 
                 async for line in resp.aiter_lines():
                     if not line.startswith("data:"):
@@ -1813,7 +1910,11 @@ class AnthropicClient(LLMClient):
 
         if response.status_code >= 400:
             error_text = response.text[:500]
-            raise LLMError(f"HTTP {response.status_code}: {error_text}")
+            raise _http_status_error(
+                response.status_code,
+                response.headers,
+                error_text,
+            )
 
         data = response.json()
         if data.get("type") == "error":
@@ -1891,7 +1992,11 @@ class AnthropicClient(LLMClient):
                     error_body = ""
                     async for chunk in resp.aiter_bytes():
                         error_body += chunk.decode(errors="replace")
-                    raise LLMError(f"HTTP {resp.status_code}: {error_body[:500]}")
+                    raise _http_status_error(
+                        resp.status_code,
+                        resp.headers,
+                        error_body[:500],
+                    )
 
                 current_event = None
 

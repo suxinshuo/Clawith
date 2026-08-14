@@ -92,9 +92,18 @@ _ACTIVE_AGENT_STATUSES = frozenset({"creating", "running", "idle"})
 _LEDGER_METADATA_KEY = "__clawith_tool_execution__"
 _RUNTIME_WAIT_TOOL_NAME = "wait"
 _DEFAULT_MODEL_RETRY_ATTEMPTS = 3
-_DEFAULT_MODEL_RETRY_BASE_DELAY_SECONDS = 1.0
-_DEFAULT_MODEL_RETRY_MAX_DELAY_SECONDS = 8.0
+# Provider rate limits (Anthropic's included) reset on a per-minute window, so a
+# blind backoff has to be able to reach into the next window. 4s -> 8s -> 16s
+# spans ~28s across the four attempts; the old 1s -> 2s -> 4s (~7s) budget
+# guaranteed that every attempt of a throttled request landed inside the very
+# same window it was already being rejected by.
+_DEFAULT_MODEL_RETRY_BASE_DELAY_SECONDS = 4.0
+_DEFAULT_MODEL_RETRY_MAX_DELAY_SECONDS = 32.0
 _DEFAULT_MODEL_RETRY_JITTER_RATIO = 0.2
+# Ceiling on a provider-supplied `Retry-After`. The hint is authoritative over
+# our own guess, but it parks a Run's worker while we sleep on it, so a bad or
+# hostile value must not hold the worker indefinitely.
+_DEFAULT_MODEL_RETRY_PROVIDER_HINT_CAP_SECONDS = 60.0
 _AGENTBAY_SCREENSHOT_TOOL_NAMES = frozenset(
     {
         "agentbay_browser_screenshot",
@@ -173,6 +182,20 @@ async def _missing_visible_group_mentions(
 def _retry_http_status(error: Exception) -> str:
     match = re.search(r"(?<!\d)(408|429|500|502|503|504)(?!\d)", str(error))
     return match.group(1) if match else "unknown"
+
+
+def _provider_retry_hint_seconds(error: Exception) -> float | None:
+    """Read the provider's own wait hint (``Retry-After``) off the error.
+
+    Only `LLMHTTPError` carries one; anything else — or a nonsensical value —
+    returns None so the caller falls back to its exponential backoff.
+    """
+    hint = getattr(error, "retry_after_seconds", None)
+    if isinstance(hint, bool) or not isinstance(hint, (int, float)):
+        return None
+    if hint < 0:
+        return None
+    return float(hint)
 _RUNTIME_WAIT_TOOL_DEFINITION: dict = {
     "type": "function",
     "function": {
@@ -997,6 +1020,9 @@ class RuntimeModelStepService:
         model_retry_base_delay_seconds: float = _DEFAULT_MODEL_RETRY_BASE_DELAY_SECONDS,
         model_retry_max_delay_seconds: float = _DEFAULT_MODEL_RETRY_MAX_DELAY_SECONDS,
         model_retry_jitter_ratio: float = _DEFAULT_MODEL_RETRY_JITTER_RATIO,
+        model_retry_provider_hint_cap_seconds: float = (
+            _DEFAULT_MODEL_RETRY_PROVIDER_HINT_CAP_SECONDS
+        ),
         retry_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._session_factory = session_factory
@@ -1019,6 +1045,10 @@ class RuntimeModelStepService:
         self._model_retry_jitter_ratio = min(
             1.0,
             max(0.0, model_retry_jitter_ratio),
+        )
+        self._model_retry_provider_hint_cap_seconds = max(
+            0.0,
+            model_retry_provider_hint_cap_seconds,
         )
         self._retry_sleep = retry_sleep
 
@@ -1520,6 +1550,7 @@ class RuntimeModelStepService:
     ) -> LLMCompletionStep:
         """Retry only transient provider failures before model failover."""
         total_attempts = self._model_retry_attempts + 1
+        waited_seconds = 0.0
         for attempt in range(1, total_attempts + 1):
             try:
                 return await self._call_prepared(
@@ -1537,10 +1568,12 @@ class RuntimeModelStepService:
                     if classification == FailoverErrorType.RETRYABLE:
                         logger.warning(
                             "[RuntimeModelRetry] exhausted provider={} model={} "
-                            "attempts={} error_type={} http_status={} classification={}",
+                            "attempts={} waited_seconds={:.3f} error_type={} "
+                            "http_status={} classification={}",
                             model.provider,
                             model.model,
                             total_attempts,
+                            waited_seconds,
                             type(exc).__name__,
                             _retry_http_status(exc),
                             classification.value,
@@ -1551,14 +1584,37 @@ class RuntimeModelStepService:
                     self._model_retry_base_delay_seconds * (2 ** (attempt - 1)),
                     self._model_retry_max_delay_seconds,
                 )
-                jitter = random.uniform(
-                    1.0 - self._model_retry_jitter_ratio,
-                    1.0 + self._model_retry_jitter_ratio,
-                )
-                delay = base_delay * jitter
+                provider_hint = _provider_retry_hint_seconds(exc)
+                if provider_hint is None:
+                    backoff_source = "exponential"
+                    jitter = random.uniform(
+                        1.0 - self._model_retry_jitter_ratio,
+                        1.0 + self._model_retry_jitter_ratio,
+                    )
+                    delay = base_delay * jitter
+                else:
+                    # The provider told us when its window reopens, so that value
+                    # wins over our guess — but never sleep *less* than the blind
+                    # backoff would have (a `Retry-After: 0` must not turn this
+                    # into a tight spin), and jitter upward only so concurrent Runs
+                    # spread out instead of all waking exactly at the reset
+                    # instant and colliding again.
+                    backoff_source = "provider_hint"
+                    jitter = random.uniform(
+                        1.0,
+                        1.0 + self._model_retry_jitter_ratio,
+                    )
+                    delay = (
+                        min(
+                            max(provider_hint, base_delay),
+                            self._model_retry_provider_hint_cap_seconds,
+                        )
+                        * jitter
+                    )
                 logger.warning(
                     "[RuntimeModelRetry] provider={} model={} attempt={}/{} "
-                    "error_type={} http_status={} classification={} backoff_seconds={:.3f}",
+                    "error_type={} http_status={} classification={} "
+                    "backoff_source={} backoff_seconds={:.3f}",
                     model.provider,
                     model.model,
                     attempt,
@@ -1566,8 +1622,10 @@ class RuntimeModelStepService:
                     type(exc).__name__,
                     _retry_http_status(exc),
                     classification.value,
+                    backoff_source,
                     delay,
                 )
+                waited_seconds += delay
                 await self._retry_sleep(delay)
 
         raise AssertionError("model retry loop exhausted without an exception")
