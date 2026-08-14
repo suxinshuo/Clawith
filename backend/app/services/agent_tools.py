@@ -56,6 +56,8 @@ from app.models.task import Task
 from app.models.user import User as UserModel
 from app.services.channel_session import find_or_create_channel_session
 from app.services.channel_user_service import get_platform_user_by_org_member
+from app.services.audit_logger import write_audit_log
+from app.services.credential_resolver import CredentialResolver
 from app.services.feishu_service import (
     FEISHU_PERMISSION_CODES,
     FEISHU_PERMISSION_KEYWORDS,
@@ -2872,6 +2874,8 @@ async def execute_builtin_tool_outcome(
                 mcp_target,
                 arguments,
                 agent_id=agent_id,
+                user_id=user_id,
+                session_id=session_id,
             )
     return await execute_tool(
         tool_name,
@@ -3522,7 +3526,13 @@ async def execute_tool(
             result = await _neon_create_database(agent_id, arguments)
         else:
             # Try MCP tool execution
-            result = await _execute_mcp_tool(tool_name, arguments, agent_id=agent_id)
+            result = await _execute_mcp_tool(
+                tool_name,
+                arguments,
+                agent_id=agent_id,
+                user_id=user_id,
+                session_id=session_id,
+            )
 
         # Log tool call activity (skip noisy read operations)
         if tool_name not in ("list_files", "read_file", "read_document"):
@@ -6874,7 +6884,129 @@ async def _resolve_mcp_execution_target(
             # Completion semantics are admin-owned Tool metadata. Per-Agent
             # config may supply credentials but cannot redefine completion.
             "async_completion": trusted_async_completion,
+            # Credential requirements are admin-owned for the same reason: a
+            # per-Agent config override must not be able to drop the auth
+            # requirement or silently widen the scopes it must satisfy.
+            "required_credential_provider": (
+                str(tool.required_credential_provider or "").strip() or None
+            ),
+            "required_scopes": str(
+                (tool.config or {}).get("required_scopes") or ""
+            ),
         }
+
+
+async def _resolve_mcp_credential_headers(
+    target: dict,
+    *,
+    agent_id,
+    user_id,
+    session_id: str,
+) -> tuple[dict[str, str], ToolExecutionOutcome | None]:
+    """Build the ``X-Clawith-*`` identity headers an MCP server authenticates with.
+
+    Returns ``(headers, None)`` when the call may proceed, or ``({}, outcome)``
+    when the required credential is absent or does not carry the mandated
+    scopes.  Tools that declare no ``required_credential_provider`` resolve to
+    ``({}, None)``, so unauthenticated MCP servers are unaffected.
+
+    A missing credential must never degrade into an unauthenticated call: the
+    downstream server would either reject it or, worse, silently act without a
+    user identity.
+    """
+    provider = target.get("required_credential_provider")
+    if not provider:
+        return {}, None
+
+    if user_id is None:
+        logger.warning(
+            "[MCP] Tool {} requires credential provider {} but the call "
+            "carries no user identity",
+            target.get("full_name"),
+            provider,
+        )
+        return {}, _typed_failure(
+            "MCP tool requires a user credential, but this call carries no "
+            "user identity to resolve one for.",
+            "mcp_credential_user_missing",
+        )
+
+    tenant_id_str = await _get_agent_tenant_id(agent_id)
+    if not tenant_id_str:
+        logger.warning(
+            "[MCP] Cannot resolve credential: agent {} has no tenant", agent_id
+        )
+        return {}, _typed_failure(
+            "MCP credential cannot be resolved: the Agent has no tenant.",
+            "mcp_credential_tenant_missing",
+        )
+    tenant_id = uuid.UUID(tenant_id_str)
+
+    try:
+        cred = await CredentialResolver().resolve(
+            user_id, tenant_id, provider, agent_id=agent_id
+        )
+    except Exception:
+        logger.exception(
+            "[MCP] Credential resolution error for provider={}", provider
+        )
+        return {}, _typed_failure(
+            "MCP credential resolution failed.",
+            "mcp_credential_resolution_failed",
+        )
+
+    if cred is None:
+        await write_audit_log(
+            action="credential_resolve_fail",
+            details={
+                "provider": provider,
+                "tool_name": target.get("full_name"),
+                "reason": "not_found",
+            },
+            agent_id=agent_id,
+            user_id=user_id,
+        )
+        # Guidance text is user-facing: it tells the operator how to authorize.
+        guidance = await _build_credential_guidance(
+            provider=provider,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            session_id=session_id,
+            agent_id=agent_id,
+        )
+        return {}, _typed_failure(guidance, "mcp_credential_missing")
+
+    # Scope validation before dispatch, so an under-scoped token fails with an
+    # actionable message instead of an opaque provider-side rejection.
+    required_scopes_str = target.get("required_scopes") or ""
+    if required_scopes_str and cred.scopes:
+        missing = _parse_credential_scopes(required_scopes_str) - set(cred.scopes)
+        if missing:
+            return {}, _typed_failure(
+                f"❌ 凭据权限不足：{provider} 需要以下权限 "
+                f"{', '.join(sorted(missing))}，但当前授权未包含。"
+                f"请重新授权并勾选所需权限。",
+                "mcp_credential_scope_insufficient",
+            )
+
+    await write_audit_log(
+        action="credential_resolve",
+        details={
+            "provider": provider,
+            "tool_name": target.get("full_name"),
+            "credential_source": cred.source,
+            "credential_id": str(cred.credential_id),
+        },
+        agent_id=agent_id,
+        user_id=user_id,
+    )
+
+    headers = {"X-Clawith-User-Token": cred.access_token}
+    if cred.external_user_id:
+        headers["X-Clawith-User-Id"] = cred.external_user_id
+    if cred.scopes:
+        headers["X-Clawith-User-Scopes"] = ",".join(cred.scopes)
+    return headers, None
 
 
 async def _execute_resolved_mcp_target_outcome(
@@ -6882,6 +7014,8 @@ async def _execute_resolved_mcp_target_outcome(
     arguments: dict,
     *,
     agent_id,
+    user_id=None,
+    session_id: str = "",
 ) -> ToolExecutionOutcome:
     unavailable_error = target.get("unavailable_error_code")
     if unavailable_error:
@@ -6929,7 +7063,20 @@ async def _execute_resolved_mcp_target_outcome(
         except Exception:
             direct_api_key = None
 
-    client = MCPClient(server_url, api_key=direct_api_key)
+    user_headers, credential_failure = await _resolve_mcp_credential_headers(
+        target,
+        agent_id=agent_id,
+        user_id=user_id,
+        session_id=session_id,
+    )
+    if credential_failure is not None:
+        return credential_failure
+
+    client = MCPClient(
+        server_url,
+        api_key=direct_api_key,
+        user_headers=user_headers,
+    )
     try:
         data = await client.call_tool_result(raw_name, arguments)
     except MCPTransportDetectionError:
@@ -6959,6 +7106,8 @@ async def _execute_mcp_tool_outcome(
     tool_name: str,
     arguments: dict,
     agent_id=None,
+    user_id=None,
+    session_id: str = "",
 ) -> ToolExecutionOutcome:
     """Durable exact-name MCP execution adapter."""
     try:
@@ -6982,10 +7131,18 @@ async def _execute_mcp_tool_outcome(
         target,
         arguments,
         agent_id=agent_id,
+        user_id=user_id,
+        session_id=session_id,
     )
 
 
-async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None) -> str:
+async def _execute_mcp_tool(
+    tool_name: str,
+    arguments: dict,
+    agent_id=None,
+    user_id=None,
+    session_id: str = "",
+) -> str:
     """Legacy text wrapper; bare-name compatibility is isolated here."""
     try:
         target = await _resolve_mcp_execution_target(
@@ -6999,6 +7156,8 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None) -> s
             target,
             arguments,
             agent_id=agent_id,
+            user_id=user_id,
+            session_id=session_id,
         )
         return _legacy_tool_outcome_text(
             outcome,
