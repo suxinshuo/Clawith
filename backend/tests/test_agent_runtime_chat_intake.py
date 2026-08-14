@@ -24,10 +24,17 @@ from app.services.agent_runtime.chat_intake import (
     enqueue_chat_runtime,
     stored_user_content,
 )
+from app.services.agent_runtime.context_builder import ContextBuilder
 from app.services.agent_runtime.contracts import (
     ResumeRunCommand,
     RunHandle,
     StartRunCommand,
+)
+from app.services.agent_runtime.group_context_builder import GroupContextBuilder
+from app.services.agent_runtime.session_context_service import (
+    MessagePosition,
+    SessionContextPack,
+    SessionContextSnapshot,
 )
 
 
@@ -365,6 +372,201 @@ async def test_external_group_chat_uses_unified_session_without_native_group_sco
         },
     }
     assert command.payload["source_channel"] == "feishu"
+
+
+@pytest.mark.asyncio
+async def test_external_group_chat_freezes_the_trigger_message_as_context_cutoff() -> None:
+    """Group Sessions capture context through the cutoff branch, so a channel
+    intake must freeze the trigger position it just persisted. Channel group
+    Runs never enter a scheduling lane, so the cutoff is the only position."""
+    agent, user, _direct_session, model = _records()
+    session = ChatSession(
+        id=uuid.uuid4(),
+        tenant_id=agent.tenant_id,
+        session_type="group",
+        group_id=None,
+        agent_id=agent.id,
+        user_id=agent.creator_id,
+        title="Feishu Group",
+        source_channel="feishu",
+        external_conv_id="feishu_group_oc_123",
+        is_group=True,
+        is_primary=False,
+    )
+    db = _Session()
+    participant = SimpleNamespace(id=uuid.uuid4())
+    handle = _handle(agent.tenant_id)
+
+    with (
+        patch(
+            "app.services.agent_runtime.chat_intake.get_or_create_user_participant",
+            new=AsyncMock(return_value=participant),
+        ),
+        patch(
+            "app.services.agent_runtime.chat_intake.RuntimeCommandIntake.start_run",
+            new=AsyncMock(return_value=handle),
+        ) as start_run,
+    ):
+        await enqueue_chat_runtime(
+            db,  # type: ignore[arg-type]
+            agent=agent,
+            user=user,
+            session=session,
+            model=model,
+            content="[发送者: Ada] Review this update",
+            source_channel="feishu",
+            settings_override=_settings(enabled=True),
+        )
+
+    message = db.added[0]
+    assert isinstance(message, ChatMessage)
+    assert message.created_at is not None
+    assert message.created_at.tzinfo is not None
+    command = start_run.await_args.args[0]
+    assert command.source_id == str(message.id)
+    assert command.payload["message_id"] == str(message.id)
+    assert command.payload["context_cutoff"] == {
+        "message_id": str(message.id),
+        "created_at": message.created_at.isoformat(),
+    }
+    # The channel group lane stays unscheduled; the cutoff carries the position.
+    assert command.scheduling_lane_key is None
+    assert command.scheduling_position_id is None
+    assert command.scheduling_position_created_at is None
+
+
+@pytest.mark.asyncio
+async def test_channel_group_start_payload_satisfies_the_context_capture_contract() -> None:
+    """Regression seam: the Command that chat_intake freezes must be directly
+    consumable by the group cutoff branch of ContextBuilder.capture_run_inputs.
+
+    These two sides drifted apart once -- the intake omitted context_cutoff that
+    the capture hard-requires -- and every external-channel group message failed
+    deterministically, then surfaced as a generic reconciliation rejection.
+    """
+    agent, user, _direct_session, model = _records()
+    session = ChatSession(
+        id=uuid.uuid4(),
+        tenant_id=agent.tenant_id,
+        session_type="group",
+        group_id=None,
+        agent_id=agent.id,
+        user_id=agent.creator_id,
+        title="Feishu Group",
+        source_channel="feishu",
+        external_conv_id="feishu_group_oc_123",
+        is_group=True,
+        is_primary=False,
+    )
+    participant = SimpleNamespace(id=uuid.uuid4())
+    handle = _handle(agent.tenant_id)
+    intake_db = _Session()
+
+    with (
+        patch(
+            "app.services.agent_runtime.chat_intake.get_or_create_user_participant",
+            new=AsyncMock(return_value=participant),
+        ),
+        patch(
+            "app.services.agent_runtime.chat_intake.RuntimeCommandIntake.start_run",
+            new=AsyncMock(return_value=handle),
+        ) as start_run,
+    ):
+        await enqueue_chat_runtime(
+            intake_db,  # type: ignore[arg-type]
+            agent=agent,
+            user=user,
+            session=session,
+            model=model,
+            content="[发送者: Ada] Review this update",
+            source_channel="feishu",
+            settings_override=_settings(enabled=True),
+        )
+
+    command = start_run.await_args.args[0]
+    message = intake_db.added[0]
+    assert isinstance(message, ChatMessage)
+
+    loaded: list[MessagePosition] = []
+
+    class _ContextService:
+        async def load_context_pack_through(self, _db, *, tenant_id, session_id, cutoff):
+            del tenant_id, session_id
+            loaded.append(cutoff)
+            return SessionContextPack(
+                snapshot=SessionContextSnapshot.empty(),
+                recent_messages=(
+                    {
+                        "id": str(message.id),
+                        "role": "user",
+                        "content": message.content,
+                        "created_at": message.created_at.isoformat(),
+                    },
+                ),
+            )
+
+        async def load_context_pack(self, *_args, **_kwargs):
+            raise AssertionError("a group Session must use the cutoff-specific path")
+
+    # The real GroupContextBuilder is used deliberately: an external-channel group
+    # payload carries no group_id, so it must skip native group scope untouched.
+    builder = ContextBuilder(
+        _ContextService(),  # type: ignore[arg-type]
+        group_context_builder=GroupContextBuilder(),
+    )
+
+    snapshots = await builder.capture_run_inputs(
+        _Session(results=["group"]),  # type: ignore[arg-type]
+        tenant_id=agent.tenant_id,
+        session_id=session.id,
+        agent_id=agent.id,
+        source_type=command.source_type,
+        source_id=command.source_id,
+        scheduling_position_created_at=command.scheduling_position_created_at,
+        scheduling_position_id=command.scheduling_position_id,
+        initial_input=command.payload,
+    )
+
+    assert loaded == [
+        MessagePosition(created_at=message.created_at, message_id=message.id)
+    ]
+    assert "group_context" not in snapshots.initial_input
+    assert [entry["id"] for entry in snapshots.recent_session_messages] == [
+        str(message.id)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_direct_chat_start_carries_no_group_context_cutoff() -> None:
+    """Direct Threads are already the native LangGraph history, so they must not
+    gain a group cutoff that would create a second short-term context truth."""
+    agent, user, session, model = _records()
+    db = _Session()
+    participant = SimpleNamespace(id=uuid.uuid4())
+    handle = _handle(agent.tenant_id)
+
+    with (
+        patch(
+            "app.services.agent_runtime.chat_intake.get_or_create_user_participant",
+            new=AsyncMock(return_value=participant),
+        ),
+        patch(
+            "app.services.agent_runtime.chat_intake.RuntimeCommandIntake.start_run",
+            new=AsyncMock(return_value=handle),
+        ) as start_run,
+    ):
+        await enqueue_chat_runtime(
+            db,  # type: ignore[arg-type]
+            agent=agent,
+            user=user,
+            session=session,
+            model=model,
+            content="direct question",
+            settings_override=_settings(enabled=True),
+        )
+
+    command = start_run.await_args.args[0]
+    assert "context_cutoff" not in command.payload
 
 
 @pytest.mark.asyncio

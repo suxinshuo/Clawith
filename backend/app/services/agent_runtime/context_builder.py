@@ -217,11 +217,19 @@ def _group_cutoff(
         initial_input.get("message_id"),
         field="message_id",
     )
-    if (
-        source_type != "chat"
-        or source_id != str(cutoff_id)
-        or message_id != cutoff_id
-        or scheduling_position_id != cutoff_id
+    if source_type != "chat" or source_id != str(cutoff_id) or message_id != cutoff_id:
+        raise ContextBuildError(
+            "invalid_group_context_cutoff",
+            "Group payload and source must match the context_cutoff Message",
+        )
+    # External-channel group Sessions (Feishu/Slack/... group chats) deliberately
+    # stay out of a scheduling lane, and the agent_runs CHECK keeps the Message
+    # Position triple either all-NULL or all-set. An entirely absent position is
+    # therefore a valid unqueued Run whose ordering truth is the cutoff itself,
+    # not broken scheduling state. A half-populated triple still is.
+    unqueued = scheduling_position_id is None and scheduling_position_created_at is None
+    if not unqueued and (
+        scheduling_position_id != cutoff_id
         or scheduling_position_created_at is None
         or scheduling_position_created_at.tzinfo is None
         or scheduling_position_created_at.utcoffset() is None
