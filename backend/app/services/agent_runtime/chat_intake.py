@@ -678,6 +678,21 @@ async def enqueue_chat_runtime(
         # registration facts and converge through source_execution uniqueness.
         else session.created_at or datetime.now(UTC)
     )
+    # A group Session reads its Session Context up to the trigger Message, so the
+    # Run must freeze that position as its cutoff. Without it the durable Command
+    # cannot be built at all, and the Runtime retries the deterministic failure
+    # until it exhausts its attempts.
+    group_context_cutoff: dict | None = None
+    if session.session_type == "group":
+        if persisted_message is None or persisted_message.created_at is None:
+            raise ChatRuntimeIntakeError(
+                "group_chat_cutoff_unavailable",
+                "Group Chat start requires a persisted trigger message position",
+            )
+        group_context_cutoff = {
+            "message_id": str(persisted_message.id),
+            "created_at": persisted_message.created_at.isoformat(),
+        }
     handle = await adapter.start_run(
         StartRunCommand(
             tenant_id=tenant_id,
@@ -708,6 +723,11 @@ async def enqueue_chat_runtime(
                 "source_channel": normalized_channel,
                 "user_id": str(user.id),
                 "application_tools_enabled": application_tools_enabled,
+                **(
+                    {"context_cutoff": group_context_cutoff}
+                    if group_context_cutoff is not None
+                    else {}
+                ),
                 **(
                     {"runtime_instruction": normalized_runtime_instruction}
                     if normalized_runtime_instruction

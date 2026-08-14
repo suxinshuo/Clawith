@@ -294,6 +294,74 @@ async def test_missing_or_mismatched_group_cutoff_fails_before_context_read(
 
 
 @pytest.mark.asyncio
+async def test_unqueued_group_run_reads_its_cutoff_without_a_scheduling_position() -> None:
+    """External-channel group Sessions deliberately stay out of a scheduling
+    lane, so their whole Message Position triple is NULL. The cutoff payload is
+    then the only ordering truth and must still drive a deterministic read."""
+    cutoff_id = uuid.UUID(int=20)
+    service = _ContextService(
+        SessionContextPack(
+            snapshot=SessionContextSnapshot.empty(),
+            recent_messages=(
+                _message(cutoff_id, created_at=NOW, content="channel group trigger"),
+            ),
+        )
+    )
+    builder = _builder(service)
+
+    snapshots = await builder.capture_run_inputs(
+        _Db(),  # type: ignore[arg-type]
+        tenant_id=uuid.UUID(int=100),
+        session_id=uuid.UUID(int=101),
+        agent_id=uuid.UUID(int=102),
+        source_type="chat",
+        source_id=str(cutoff_id),
+        scheduling_position_created_at=None,
+        scheduling_position_id=None,
+        initial_input=_initial(cutoff_id, NOW),
+    )
+
+    assert service.calls == [MessagePosition(created_at=NOW, message_id=cutoff_id)]
+    assert [message["content"] for message in snapshots.recent_session_messages] == [
+        "channel group trigger"
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("position_id", "position_created_at"),
+    [
+        (uuid.UUID(int=20), None),
+        (None, NOW),
+    ],
+)
+async def test_half_populated_scheduling_position_still_fails_group_cutoff(
+    position_id,
+    position_created_at,
+) -> None:
+    """Only a fully absent Message Position means "unqueued". A half-populated
+    triple is corrupt scheduling state and must never relax the cutoff check."""
+    service = _ContextService()
+    builder = _builder(service)
+
+    with pytest.raises(ContextBuildError) as exc_info:
+        await builder.capture_run_inputs(
+            _Db(),  # type: ignore[arg-type]
+            tenant_id=uuid.UUID(int=100),
+            session_id=uuid.UUID(int=101),
+            agent_id=uuid.UUID(int=102),
+            source_type="chat",
+            source_id=str(uuid.UUID(int=20)),
+            scheduling_position_created_at=position_created_at,
+            scheduling_position_id=position_id,
+            initial_input=_initial(uuid.UUID(int=20), NOW),
+        )
+
+    assert exc_info.value.code == "invalid_group_context_cutoff"
+    assert service.calls == []
+
+
+@pytest.mark.asyncio
 async def test_later_group_run_uses_its_own_later_cutoff_data() -> None:
     first_id = uuid.UUID(int=20)
     later_id = uuid.UUID(int=30)
