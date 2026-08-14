@@ -281,22 +281,33 @@ def test_feishu_wiki_list_schema_matches_handler_contract() -> None:
     assert schema["additionalProperties"] is False
 
 
-def test_send_feishu_message_legacy_schema_matches_compatibility_handler() -> None:
-    schema = builtin_model_definition("send_feishu_message")["function"][
-        "parameters"
-    ]
+def test_send_feishu_message_schema_covers_individual_and_group_targets() -> None:
+    schema = builtin_model_definition("send_feishu_message")["function"]["parameters"]
 
-    assert set(schema["properties"]) == {"target_member_id", "message"}
-    assert schema["required"] == ["target_member_id", "message"]
-    assert schema["additionalProperties"] is False
-
-
-def test_send_feishu_message_remains_hidden_from_model_workset() -> None:
-    model_names = {
-        item["function"]["name"] for item in agent_tools.AGENT_TOOLS
+    assert set(schema["properties"]) == {
+        "target_member_id",
+        "chat_id",
+        "chat_name",
+        "message",
     }
+    assert schema["required"] == ["message"]
+    assert schema["anyOf"] == [
+        {"required": ["target_member_id"]},
+        {"required": ["chat_id"]},
+        {"required": ["chat_name"]},
+    ]
+    assert schema["additionalProperties"] is False
+    # 旧的姓名快捷方式不能回来：个人收件人只认稳定 member id。
+    assert "member_name" not in schema["properties"]
+    assert "user_id" not in schema["properties"]
 
-    assert "send_feishu_message" not in model_names
+
+def test_send_feishu_message_is_model_visible_with_a_typed_outcome() -> None:
+    model_names = {item["function"]["name"] for item in agent_tools.AGENT_TOOLS}
+
+    assert "send_feishu_message" in model_names
+    # Gate A 与 Gate B 必须成对；只开可见性会让 run 挂在人工确认上。
+    assert "send_feishu_message" in agent_tools.RUNTIME_TYPED_APPLICATION_TOOL_NAMES
 
 
 @pytest.mark.parametrize(

@@ -286,9 +286,9 @@ async def test_send_feishu_message_legacy_user_id_is_rejected():
         {"user_id": "ou_1", "message": "hi"},
     )
 
-    assert "send_feishu_message is a legacy shortcut" in result
+    assert "no longer accepts member_name or user_id" in result
     assert "query_directory" in result
-    assert "send_channel_message" in result
+    assert "chat_id" in result
 
 
 @pytest.mark.asyncio
@@ -348,7 +348,7 @@ def test_human_send_tool_schemas_are_id_first():
     assert "member_name" not in file_schema["properties"]
     assert file_schema["required"] == ["file_path"]
 
-    assert "send_feishu_message" not in tool_names
+    assert "send_feishu_message" in tool_names
 
 
 def _seed_tool(tool_name):
@@ -382,18 +382,20 @@ def test_seeded_human_send_tool_schemas_are_id_first():
     assert "member_name" not in file_schema["properties"]
     assert file_schema["required"] == ["file_path"]
 
-    assert "hidden legacy compatibility" in feishu_tool["description"].lower()
+    assert "hidden legacy compatibility" not in feishu_tool["description"].lower()
     assert feishu_tool["is_default"] is False
     assert set(feishu_schema["properties"]) == {
         "target_member_id",
+        "chat_id",
+        "chat_name",
         "message",
     }
-    assert feishu_schema["required"] == ["target_member_id", "message"]
+    assert feishu_schema["required"] == ["message"]
     assert feishu_schema["additionalProperties"] is False
 
 
 @pytest.mark.asyncio
-async def test_get_agent_tools_for_llm_filters_legacy_feishu_tool_from_db():
+async def test_get_agent_tools_for_llm_exposes_feishu_message_when_the_channel_is_ready():
     agent_id = uuid.uuid4()
     tenant_id = uuid.uuid4()
     source = _make_agent(id=agent_id, tenant_id=tenant_id, is_system=False)
@@ -434,7 +436,7 @@ async def test_get_agent_tools_for_llm_filters_legacy_feishu_tool_from_db():
 
     tool_names = {tool["function"]["name"] for tool in tools}
     assert "send_platform_message" in tool_names
-    assert "send_feishu_message" not in tool_names
+    assert "send_feishu_message" in tool_names
 
 
 @pytest.mark.asyncio

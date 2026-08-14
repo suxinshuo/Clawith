@@ -370,7 +370,6 @@ async def _get_scoped_agentbay_client(
 
 _HIDDEN_FROM_LLM_TOOL_NAMES = {
     "query_roster",
-    "send_feishu_message",
 }
 
 # Compatibility export for call sites that still expect an OpenAI tools list.
@@ -556,6 +555,13 @@ RUNTIME_TYPED_APPLICATION_TOOL_NAMES = frozenset(
         "feishu_user_search",
         "feishu_approval_query",
         "feishu_approval_get",
+        "feishu_chat_search",
+        "feishu_chat_messages",
+        "send_feishu_message",
+        "send_feishu_card_kv",
+        "send_feishu_card_actions",
+        "send_feishu_card_table",
+        "send_feishu_card_approval",
         "read_emails",
         "send_email",
         "reply_email",
@@ -2800,6 +2806,20 @@ async def execute_builtin_tool_outcome(
         )
     if tool_name == "send_channel_message":
         return await _send_channel_message_outcome(agent_id, arguments)
+    if tool_name == "send_feishu_message":
+        return await _send_feishu_message_outcome(agent_id, arguments)
+    if tool_name in {
+        "send_feishu_card_kv",
+        "send_feishu_card_actions",
+        "send_feishu_card_table",
+        "send_feishu_card_approval",
+    }:
+        return await _send_feishu_card_outcome(
+            tool_name,
+            agent_id,
+            arguments,
+            session_id,
+        )
     if tool_name == "send_platform_message":
         return await _send_platform_message_outcome(agent_id, arguments)
     if tool_name == "query_directory":
@@ -5735,6 +5755,231 @@ async def _resolve_feishu_user_credential(
         return None
 
 
+def _feishu_response_items(response: Mapping) -> list | None:
+    """安全取出飞书响应里的 data.items。
+
+    返回 [] 表示「合法但为空」（data 缺失或 items 缺失都算），返回 None 表示
+    响应结构非法。飞书对空结果会返回 data: null，直接 .get("data", {}) 会炸。
+    """
+    data = response.get("data")
+    if data is None:
+        return []
+    if not isinstance(data, Mapping):
+        return None
+    items = data.get("items")
+    if items is None:
+        return []
+    return items if isinstance(items, list) else None
+
+
+async def _feishu_chat_search_outcome(
+    agent_id: uuid.UUID,
+    arguments: dict,
+) -> ToolExecutionOutcome:
+    """按关键词搜索机器人可见的飞书群聊，并把一次真实读取归类成执行事实。"""
+    query = arguments.get("query")
+    if not isinstance(query, str) or not query.strip():
+        return _typed_failure(
+            "feishu_chat_search requires query.",
+            "invalid_tool_arguments",
+        )
+    query = query.strip()
+    if len(query) > 64:
+        return _typed_failure(
+            "feishu_chat_search query must be at most 64 characters.",
+            "invalid_tool_arguments",
+        )
+
+    page_size_value = arguments.get("page_size", 20)
+    if isinstance(page_size_value, bool) or not isinstance(page_size_value, int):
+        return _typed_failure(
+            "feishu_chat_search page_size must be an integer.",
+            "invalid_tool_arguments",
+        )
+    page_size = max(1, min(page_size_value, 100))
+
+    app_id, app_secret = await _get_feishu_credentials(agent_id)
+    if not app_id or not app_secret:
+        return _typed_failure(
+            "The Agent has no complete Feishu channel credentials.",
+            "feishu_channel_not_configured",
+        )
+
+    from app.services.feishu_service import feishu_service
+
+    try:
+        response = await feishu_service.search_chats(
+            app_id,
+            app_secret,
+            query,
+            page_size=page_size,
+        )
+    except Exception as exc:
+        return _feishu_read_exception_outcome("chat_search", exc)
+
+    if not isinstance(response, Mapping):
+        return _typed_failure(
+            "Feishu chat search returned an unreadable response.",
+            "feishu_chat_search_response_invalid",
+            retryable=True,
+        )
+    if response.get("code") != 0:
+        # search_chats 不经过 _parse_api_response，所以权限拒绝必须在这里登记，
+        # 否则 _feishu_outcome_with_user_fallback 永远不会用用户身份重放。
+        _note_feishu_permission_response(response)
+        return _typed_failure(
+            f"Feishu rejected the chat search: {response.get('msg') or 'unknown error'} "
+            f"(code {response.get('code')}).",
+            "feishu_chat_search_rejected",
+        )
+
+    items = _feishu_response_items(response)
+    if items is None:
+        return _typed_failure(
+            "Feishu chat search returned an invalid result list.",
+            "feishu_chat_search_response_invalid",
+            retryable=True,
+        )
+    if not items:
+        return _typed_success(f"No Feishu group chats matched '{query}'.")
+
+    lines = [
+        f"Feishu group chat search returned {len(items)} result(s) for '{query}':"
+    ]
+    for index, item in enumerate(items, start=1):
+        if not isinstance(item, Mapping):
+            return _typed_failure(
+                "Feishu chat search returned an invalid result item.",
+                "feishu_chat_search_response_invalid",
+                retryable=True,
+            )
+        name = item.get("name") or "(unnamed)"
+        chat_id = item.get("chat_id") or ""
+        member_count = item.get("user_count") or "?"
+        lines.append(f"{index}. {name} (chat_id={chat_id}, members={member_count})")
+    lines.append(
+        "Next: feishu_chat_messages(chat_id=...) to read history, or "
+        "send_feishu_message(chat_id=..., message=...) to post."
+    )
+    return _typed_success("\n".join(lines))
+
+
+async def _feishu_chat_messages_outcome(
+    agent_id: uuid.UUID,
+    arguments: dict,
+) -> ToolExecutionOutcome:
+    """读取飞书群聊历史消息，并把一次真实读取归类成执行事实。"""
+    chat_id = (arguments.get("chat_id") or "").strip()
+    if not chat_id:
+        return _typed_failure(
+            "feishu_chat_messages requires chat_id. Use feishu_chat_search first.",
+            "invalid_tool_arguments",
+        )
+
+    page_size_value = arguments.get("page_size", 50)
+    if isinstance(page_size_value, bool) or not isinstance(page_size_value, int):
+        return _typed_failure(
+            "feishu_chat_messages page_size must be an integer.",
+            "invalid_tool_arguments",
+        )
+    page_size = max(1, min(page_size_value, 50))
+
+    sort_type = arguments.get("sort_type", "ByCreateTimeDesc")
+    if sort_type not in ("ByCreateTimeAsc", "ByCreateTimeDesc"):
+        sort_type = "ByCreateTimeDesc"
+
+    start_time_str: str | None = None
+    end_time_str: str | None = None
+    raw_start = (arguments.get("start_time") or "").strip()
+    raw_end = (arguments.get("end_time") or "").strip()
+    if raw_start:
+        try:
+            start_time_str = str(int(_iso_to_ts(raw_start)))
+        except ValueError:
+            return _typed_failure(
+                f"Invalid start_time: {raw_start}. Use ISO 8601, "
+                "e.g. 2024-01-15T09:00:00+08:00.",
+                "invalid_tool_arguments",
+            )
+    if raw_end:
+        try:
+            end_time_str = str(int(_iso_to_ts(raw_end)))
+        except ValueError:
+            return _typed_failure(
+                f"Invalid end_time: {raw_end}. Use ISO 8601, "
+                "e.g. 2024-01-15T18:00:00+08:00.",
+                "invalid_tool_arguments",
+            )
+
+    app_id, app_secret = await _get_feishu_credentials(agent_id)
+    if not app_id or not app_secret:
+        return _typed_failure(
+            "The Agent has no complete Feishu channel credentials.",
+            "feishu_channel_not_configured",
+        )
+
+    from app.services.feishu_service import feishu_service
+
+    try:
+        response = await feishu_service.list_chat_messages(
+            app_id,
+            app_secret,
+            chat_id,
+            start_time=start_time_str,
+            end_time=end_time_str,
+            sort_type=sort_type,
+            page_size=page_size,
+        )
+    except Exception as exc:
+        return _feishu_read_exception_outcome("chat_messages", exc)
+
+    if not isinstance(response, Mapping):
+        return _typed_failure(
+            "Feishu chat messages returned an unreadable response.",
+            "feishu_chat_messages_response_invalid",
+            retryable=True,
+        )
+    if response.get("code") != 0:
+        # 同上：list_chat_messages 也不经过 _parse_api_response。
+        _note_feishu_permission_response(response)
+        return _typed_failure(
+            f"Feishu rejected the chat history read: "
+            f"{response.get('msg') or 'unknown error'} (code {response.get('code')}).",
+            "feishu_chat_messages_rejected",
+        )
+
+    items = _feishu_response_items(response)
+    if items is None:
+        return _typed_failure(
+            "Feishu chat messages returned an invalid result list.",
+            "feishu_chat_messages_response_invalid",
+            retryable=True,
+        )
+    if not items:
+        return _typed_success(
+            f"No messages found in chat {chat_id} for the given range."
+        )
+
+    lines = [f"Feishu chat {chat_id} returned {len(items)} message(s):"]
+    for item in items:
+        if not isinstance(item, Mapping):
+            return _typed_failure(
+                "Feishu chat messages returned an invalid result item.",
+                "feishu_chat_messages_response_invalid",
+                retryable=True,
+            )
+        message_id = item.get("message_id") or ""
+        msg_type = item.get("msg_type") or "unknown"
+        sender = item.get("sender")
+        sender_id = sender.get("id") if isinstance(sender, Mapping) else ""
+        body = item.get("body")
+        content = body.get("content") if isinstance(body, Mapping) else ""
+        lines.append(
+            f"- [{message_id}] sender={sender_id} type={msg_type} content={content}"
+        )
+    return _typed_success("\n".join(lines))
+
+
 async def _feishu_with_user_fallback(
     agent_id: uuid.UUID,
     user_id: uuid.UUID,
@@ -5834,6 +6079,8 @@ _FEISHU_USER_FALLBACK_SCOPES: dict[str, list[str]] = {
     "feishu_drive_delete": ["drive:drive"],
     "feishu_approval_query": ["approval:instance:readonly"],
     "feishu_approval_get": ["approval:instance:readonly"],
+    "feishu_chat_search": ["im:chat:readonly"],
+    "feishu_chat_messages": ["im:message:readonly"],
     "bitable_list_tables": ["bitable:app:readonly"],
     "bitable_list_fields": ["bitable:app:readonly"],
     "bitable_query_records": ["bitable:app:readonly"],
@@ -5912,6 +6159,10 @@ async def _feishu_scoped_outcome(
         return await _feishu_approval_query_outcome(agent_id, arguments)
     if tool_name == "feishu_approval_get":
         return await _feishu_approval_get_outcome(agent_id, arguments)
+    if tool_name == "feishu_chat_search":
+        return await _feishu_chat_search_outcome(agent_id, arguments)
+    if tool_name == "feishu_chat_messages":
+        return await _feishu_chat_messages_outcome(agent_id, arguments)
     if tool_name in {
         "bitable_list_tables",
         "bitable_list_fields",
@@ -9081,32 +9332,13 @@ async def _query_directory(agent_id: uuid.UUID, args: dict) -> str:
 
 
 async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
-    """Send a Feishu message to a person in the agent's relationship list."""
-    target_member_id = (args.get("target_member_id") or "").strip()
-    member_name = (args.get("member_name") or "").strip()
-    direct_user_id = (args.get("user_id") or "").strip()
-    chat_id = (args.get("chat_id") or "").strip()
-    chat_name = (args.get("chat_name") or "").strip()
-    message_text = (args.get("message") or "").strip()
-
-    if not message_text:
-        return "❌ Please provide message content"
-    if (member_name or direct_user_id) and not target_member_id:
-        return (
-            "❌ send_feishu_message is a legacy shortcut and no longer accepts member_name or user_id. "
-            "Call query_directory(member_type=\"human\", query=\"...\") first, then retry with "
-            "send_channel_message(target_member_id=\"...\", channel=\"feishu\", message=\"...\")."
-        )
-    if not target_member_id:
-        return "❌ Please provide target_member_id from query_directory, or use send_channel_message for Feishu."
-
-    return await _send_channel_message(
-        agent_id,
-        {
-            "target_member_id": target_member_id,
-            "message": message_text,
-            "channel": "feishu",
-        },
+    """Legacy display adapter; Durable Runtime uses the typed helper."""
+    outcome = await _send_feishu_message_outcome(agent_id, args)
+    if not isinstance(outcome, ToolExecutionOutcome):
+        return outcome
+    return _legacy_tool_outcome_text(
+        outcome,
+        fallback="Feishu message did not return a summary.",
     )
 
 
@@ -9227,6 +9459,196 @@ async def _send_feishu_message_to_member_outcome(
         )
 
 
+async def _send_feishu_message_to_chat_outcome(
+    agent_id: uuid.UUID,
+    chat_id: str,
+    chat_name: str,
+    message_text: str,
+) -> ToolExecutionOutcome:
+    """向飞书群聊发送纯文本，并把 provider 的结构化响应归类成执行事实。
+
+    个人发送走 _send_feishu_message_to_member_outcome（关系网关 + user_id）；
+    群聊靠飞书自身的成员校验，这里只需要一个 chat_id。
+    """
+    from app.services.feishu_service import feishu_service
+
+    try:
+        async with async_session() as db:
+            config_result = await db.execute(
+                select(ChannelConfig).where(
+                    ChannelConfig.agent_id == agent_id,
+                    ChannelConfig.channel_type == "feishu",
+                )
+            )
+            config = config_result.scalar_one_or_none()
+    except Exception as exc:
+        logger.exception("[Feishu] Group message setup failed")
+        return _typed_failure(
+            f"Feishu group message could not be prepared: {type(exc).__name__}.",
+            "feishu_message_setup_failed",
+        )
+    if not config or not config.app_id or not config.app_secret:
+        return _typed_failure(
+            "This Agent has no Feishu channel configured.",
+            "feishu_channel_not_configured",
+        )
+
+    resolved_chat_id = chat_id
+    if not resolved_chat_id:
+        try:
+            search_resp = await feishu_service.search_chats(
+                config.app_id,
+                config.app_secret,
+                chat_name,
+                page_size=5,
+            )
+        except Exception as exc:
+            # 群名还没解析出来，什么都没发出去，所以这是 read 失败。
+            return _feishu_read_exception_outcome("chat_search", exc)
+        if not isinstance(search_resp, Mapping):
+            return _typed_failure(
+                "Feishu chat search returned an unreadable response.",
+                "feishu_chat_search_response_invalid",
+                retryable=True,
+            )
+        if search_resp.get("code") != 0:
+            # 防御性登记：send_feishu_message 不经过 _FEISHU_USER_FALLBACK_SCOPES
+            # 分发路径（它有自己独立的 Gate B 分支），所以这里登记的权限响应目前
+            # 没有消费者，不会触发 _feishu_outcome_with_user_fallback 的用户身份
+            # 重放——这与 feishu_chat_search 工具自身的同名调用不同。保留登记是
+            # 为了未来接入，但不要假设它已经生效。
+            _note_feishu_permission_response(search_resp)
+            return _typed_failure(
+                f"Feishu group search failed for '{chat_name}': "
+                f"{search_resp.get('msg') or 'unknown error'} "
+                f"(code {search_resp.get('code')}). "
+                "Use feishu_chat_search to retry with user-identity fallback.",
+                "feishu_chat_search_rejected",
+            )
+        items = _feishu_response_items(search_resp)
+        if not items:
+            return _typed_failure(
+                f"No Feishu group found matching '{chat_name}'. "
+                "Use feishu_chat_search to confirm the exact name.",
+                "feishu_chat_not_found",
+            )
+        first = items[0]
+        resolved_chat_id = (
+            (first.get("chat_id") or "").strip() if isinstance(first, Mapping) else ""
+        )
+        if not resolved_chat_id:
+            return _typed_failure(
+                "Feishu group search returned no chat_id.",
+                "feishu_chat_search_response_invalid",
+                retryable=True,
+            )
+
+    try:
+        response = await feishu_service.send_message(
+            config.app_id,
+            config.app_secret,
+            receive_id=resolved_chat_id,
+            msg_type="text",
+            content=json.dumps({"text": message_text}, ensure_ascii=False),
+            receive_id_type="chat_id",
+        )
+    except Exception as exc:
+        # send_message 内部走 _parse_api_response：确定性拒绝抛带 code 的
+        # FeishuAPIError -> failed；超时/5xx -> unknown。分类交给公共 helper。
+        return _feishu_write_exception_outcome("message", exc)
+
+    if not isinstance(response, Mapping):
+        return _typed_unknown(
+            "Feishu returned an unreadable response; reconcile before retrying.",
+            "feishu_response_invalid",
+        )
+    if response.get("code") != 0:
+        # 防御性分支：当前 provider 实现会改为抛异常，这里与
+        # _send_feishu_message_to_member_outcome 保持同样的兜底形状。
+        return _typed_failure(
+            f"Feishu rejected the group message: "
+            f"{response.get('msg') or 'unknown error'} (code {response.get('code')}).",
+            "feishu_message_rejected",
+        )
+
+    # provider 成功即执行事实；会话历史同步是尽力而为，失败不能改写结论、
+    # 更不能触发重发。
+    try:
+        async with async_session() as db:
+            await _save_feishu_card_to_history(
+                agent_id,
+                db,
+                target_member=None,
+                receive_id=resolved_chat_id,
+                receive_id_type="chat_id",
+                summary_text=message_text,
+            )
+    except Exception as history_error:
+        logger.warning(
+            "[Feishu] Confirmed group send but failed to sync history: {}",
+            type(history_error).__name__,
+        )
+
+    return _typed_success(
+        f"Successfully sent message to Feishu group (chat_id: {resolved_chat_id})."
+    )
+
+
+async def _send_feishu_message_outcome(
+    agent_id: uuid.UUID,
+    args: dict,
+) -> ToolExecutionOutcome | str:
+    """send_feishu_message 的 typed 入口。
+
+    个人走 target_member_id（复用已 typed 的 send_channel_message 通道），
+    群聊走 chat_id / chat_name。两类目标必须且只能给一个。
+    """
+    target_member_id = (args.get("target_member_id") or "").strip()
+    chat_id = (args.get("chat_id") or "").strip()
+    chat_name = (args.get("chat_name") or "").strip()
+    message_text = (args.get("message") or "").strip()
+    legacy_member_name = (args.get("member_name") or "").strip()
+    legacy_user_id = (args.get("user_id") or "").strip()
+
+    if not message_text:
+        return _typed_failure(
+            "send_feishu_message requires message.",
+            "invalid_tool_arguments",
+        )
+    if legacy_member_name or legacy_user_id:
+        # schema 已不再声明这两个参数，但模型仍可能凭记忆传过来。
+        return _typed_failure(
+            "send_feishu_message no longer accepts member_name or user_id. "
+            'Call query_directory(member_type="human", query="...") to get a '
+            "target_member_id (send_channel_message accepts the same id), or "
+            "pass chat_id / chat_name to reach a group.",
+            "invalid_tool_arguments",
+        )
+    has_individual = bool(target_member_id)
+    has_group = bool(chat_id or chat_name)
+    if has_individual == has_group:
+        return _typed_failure(
+            "send_feishu_message requires exactly one of target_member_id "
+            "(individual) or chat_id / chat_name (group).",
+            "invalid_tool_arguments",
+        )
+    if has_individual:
+        return await _send_channel_message_outcome(
+            agent_id,
+            {
+                "target_member_id": target_member_id,
+                "message": message_text,
+                "channel": "feishu",
+            },
+        )
+    return await _send_feishu_message_to_chat_outcome(
+        agent_id,
+        chat_id,
+        chat_name,
+        message_text,
+    )
+
+
 async def _send_feishu_message_to_member(
     agent_id: uuid.UUID,
     member_name: str,
@@ -9332,7 +9754,8 @@ async def _resolve_feishu_card_target(
     Returns (config, receive_id, receive_id_type, target_member, err).
     target_member is the resolved OrgMember when sending to a person via name
     or user_id (used for history persistence); None for groups or current-
-    session paths (in which case _dispatch_feishu_card looks it up post-hoc).
+    session paths (in which case _dispatch_feishu_card_outcome looks it up
+    post-hoc).
     """
     member_name = (args.get("member_name") or "").strip()
     user_id_arg = (args.get("user_id") or "").strip()
@@ -9387,7 +9810,7 @@ def _has_explicit_feishu_target(args: dict) -> bool:
     )
 
 
-async def _dispatch_feishu_card(
+async def _dispatch_feishu_card_outcome(
     agent_id: uuid.UUID,
     args: dict,
     *,
@@ -9395,41 +9818,67 @@ async def _dispatch_feishu_card(
     build_card,
     fallback_text_builder,
     session_id: str = "",
-) -> str:
-    """Shared plumbing for the 4 send_feishu_card_* tools.
-
-    Default target = current Feishu conversation (derived from the ChatSession's
-    external_conv_id). When the LLM passes member_name / user_id / chat_id /
-    chat_name in args, that explicit recipient overrides — same semantics as
-    send_feishu_message. User targets are gated by AgentRelationship; groups
-    rely on Feishu's own membership enforcement.
+) -> ToolExecutionOutcome:
+    """Shared plumbing for the 4 send_feishu_card_* tools: resolve a target,
+    build and send the card, and classify the result as a typed execution fact.
     """
+    from app.services.feishu_service import feishu_service
+
     try:
-        from app.services.feishu_service import feishu_service
-        explicit = _has_explicit_feishu_target(args)
-        config, receive_id, id_type, resolved_member, err = await _resolve_feishu_card_target(
-            agent_id, args, session_id,
-        )
+        (
+            config,
+            receive_id,
+            id_type,
+            resolved_member,
+            err,
+        ) = await _resolve_feishu_card_target(agent_id, args, session_id)
         if err:
-            return err
+            # err is already "❌ "-prefixed display text from
+            # _resolve_feishu_card_target; result_summary is a plain fact, and
+            # the legacy string adapter adds its own "❌ " prefix on render, so
+            # strip the leading glyph here to avoid a doubled "❌ ❌ ...".
+            return _typed_failure(err.removeprefix("❌ ").strip(), "feishu_card_target_unresolved")
 
         try:
             card_dict = build_card(str(agent_id))
-        except Exception as e:
+        except Exception as exc:
             logger.exception(f"[Feishu] {card_kind} build failed")
-            return f"❌ 卡片构造失败：{str(e)[:160]}"
+            return _typed_failure(
+                f"Card build failed: {type(exc).__name__}.",
+                "feishu_card_build_failed",
+            )
 
         fallback_text = fallback_text_builder()
-        resp = await feishu_service.send_card_with_fallback(
-            config.app_id, config.app_secret,
-            receive_id, id_type, card_dict, fallback_text,
-            stage=f"send_feishu_{card_kind}",
-        )
-        if resp.get("code") != 0:
-            return f"❌ 卡片发送失败：{resp.get('msg')} (code {resp.get('code')})"
+        try:
+            resp = await feishu_service.send_card_with_fallback(
+                config.app_id,
+                config.app_secret,
+                receive_id,
+                id_type,
+                card_dict,
+                fallback_text,
+                stage=f"send_feishu_{card_kind}",
+            )
+        except Exception as exc:
+            # send_card_with_fallback 的 markdown 降级路径最终调 send_message，
+            # 确定性拒绝（机器人不在群、receive_id 非法）会抛带 code 的
+            # FeishuAPIError -> failed；超时/5xx -> unknown。
+            return _feishu_write_exception_outcome("card", exc)
 
-        # History persistence: route by id_type. For p2p/group we write the outgoing
-        # card text into the matching channel session so it shows in the audit trail.
+        if not isinstance(resp, Mapping):
+            return _typed_unknown(
+                "Feishu returned an unreadable response; reconcile before retrying.",
+                "feishu_response_invalid",
+            )
+        if resp.get("code") != 0:
+            # 防御性分支：当前 provider 实现在失败时抛异常。
+            return _typed_failure(
+                f"Feishu rejected the card: {resp.get('msg') or 'unknown error'} "
+                f"(code {resp.get('code')}).",
+                "feishu_card_rejected",
+            )
+
+        # 已确认送达即执行事实；历史落库是尽力而为的产品同步，失败不能改写结论。
         try:
             async with async_session() as db:
                 target_member = resolved_member
@@ -9439,7 +9888,8 @@ async def _dispatch_feishu_card(
                         .join(OrgMember, AgentRelationship.member_id == OrgMember.id)
                         .where(
                             AgentRelationship.agent_id == agent_id,
-                            (OrgMember.external_id == receive_id) | (OrgMember.open_id == receive_id),
+                            (OrgMember.external_id == receive_id)
+                            | (OrgMember.open_id == receive_id),
                             OrgMember.status == "active",
                         )
                         .options(selectinload(AgentRelationship.member))
@@ -9448,48 +9898,67 @@ async def _dispatch_feishu_card(
                     if rel:
                         target_member = rel.member
                 await _save_feishu_card_to_history(
-                    agent_id, db,
+                    agent_id,
+                    db,
                     target_member=target_member,
                     receive_id=receive_id,
                     receive_id_type=id_type,
                     summary_text=fallback_text,
                 )
-        except Exception as e:
-            logger.warning(f"[Feishu] {card_kind} history save failed: {e}")
+        except Exception as history_error:
+            logger.warning(
+                f"[Feishu] {card_kind} history save failed: {type(history_error).__name__}"
+            )
 
         mode = "降级 markdown" if "card_id" not in resp else "卡片"
-        if explicit:
+        if _has_explicit_feishu_target(args):
             if id_type == "chat_id":
                 target_label = f"群 (chat_id: {receive_id})"
             else:
                 who = (resolved_member.name if resolved_member else None) or receive_id
                 target_label = f"用户 {who}"
         else:
-            target_label = "当前群" if id_type == "chat_id" else "当前会话"
-        return f"✅ 已通过{mode}发送到{target_label}"
-    except Exception as e:
+            target_label = (
+                f"当前群 (chat_id: {receive_id})" if id_type == "chat_id" else "当前会话"
+            )
+        return _typed_success(f"已通过{mode}发送到{target_label}")
+    except Exception as exc:
         logger.exception(f"[Feishu] {card_kind} dispatch error")
-        return f"❌ 卡片发送出错：{str(e)[:200]}"
+        return _typed_failure(
+            f"Feishu card could not be prepared: {type(exc).__name__}.",
+            "feishu_card_setup_failed",
+        )
 
 
-async def _send_feishu_card_kv(agent_id: uuid.UUID, args: dict, session_id: str = "") -> str:
+async def _send_feishu_card_kv_outcome(
+    agent_id: uuid.UUID, args: dict, session_id: str = ""
+) -> ToolExecutionOutcome:
     from app.services.feishu_service import build_kv_card
+
     title = (args.get("title") or "").strip() or None
     fields = args.get("fields") or []
     summary = (args.get("summary") or "").strip() or None
     if not isinstance(fields, list) or not fields:
-        return "❌ Provide a non-empty `fields` array"
+        return _typed_failure(
+            "send_feishu_card_kv requires a non-empty fields array.",
+            "invalid_tool_arguments",
+        )
 
     def _build(_aid):
         return build_kv_card(title=title, fields=fields, summary=summary)
 
     def _fallback():
-        lines = [f"**{f.get('key')}**: {f.get('value')}" for f in fields if f.get("key") or f.get("value")]
+        lines = [
+            f"**{f.get('key')}**: {f.get('value')}"
+            for f in fields
+            if isinstance(f, dict) and (f.get("key") or f.get("value"))
+        ]
         head = f"**{title}**\n\n" if title else ""
         return head + "\n".join(lines)
 
-    return await _dispatch_feishu_card(
-        agent_id, args,
+    return await _dispatch_feishu_card_outcome(
+        agent_id,
+        args,
         card_kind="card_kv",
         build_card=_build,
         fallback_text_builder=_fallback,
@@ -9497,34 +9966,57 @@ async def _send_feishu_card_kv(agent_id: uuid.UUID, args: dict, session_id: str 
     )
 
 
-async def _send_feishu_card_actions(agent_id: uuid.UUID, args: dict, session_id: str = "") -> str:
+async def _send_feishu_card_kv(agent_id: uuid.UUID, args: dict, session_id: str = "") -> str:
+    """Legacy display adapter; Durable Runtime uses the typed helper."""
+    return _legacy_tool_outcome_text(
+        await _send_feishu_card_kv_outcome(agent_id, args, session_id),
+        fallback="Feishu card did not return a summary.",
+    )
+
+
+async def _send_feishu_card_actions_outcome(
+    agent_id: uuid.UUID, args: dict, session_id: str = ""
+) -> ToolExecutionOutcome:
     from app.services.feishu_service import build_actions_card
+
     title = (args.get("title") or "").strip() or None
     body = (args.get("body") or "").strip()
     actions = args.get("actions") or []
     summary = (args.get("summary") or "").strip() or None
 
     if not body:
-        return "❌ Provide `body`"
+        return _typed_failure(
+            "send_feishu_card_actions requires body.", "invalid_tool_arguments"
+        )
     if not isinstance(actions, list) or not actions:
-        return "❌ Provide at least one button in `actions`"
+        return _typed_failure(
+            "send_feishu_card_actions requires at least one button in actions.",
+            "invalid_tool_arguments",
+        )
     if len(actions) > 4:
-        return "❌ Cards support at most 4 buttons"
-
-    for a in actions:
-        if not isinstance(a, dict) or not a.get("label") or not a.get("action_id"):
-            return "❌ Each action requires `label` and `action_id`"
+        return _typed_failure(
+            "send_feishu_card_actions supports at most 4 buttons.",
+            "invalid_tool_arguments",
+        )
+    for action in actions:
+        if not isinstance(action, dict) or not action.get("label") or not action.get("action_id"):
+            return _typed_failure(
+                "Each action requires label and action_id.", "invalid_tool_arguments"
+            )
 
     def _build(aid):
-        return build_actions_card(title=title, body=body, actions=actions, summary=summary, agent_id=aid)
+        return build_actions_card(
+            title=title, body=body, actions=actions, summary=summary, agent_id=aid
+        )
 
     def _fallback():
         head = f"**{title}**\n\n" if title else ""
         labels = " / ".join(a["label"] for a in actions)
         return f"{head}{body}\n\n_(可选操作: {labels})_"
 
-    return await _dispatch_feishu_card(
-        agent_id, args,
+    return await _dispatch_feishu_card_outcome(
+        agent_id,
+        args,
         card_kind="card_actions",
         build_card=_build,
         fallback_text_builder=_fallback,
@@ -9532,17 +10024,32 @@ async def _send_feishu_card_actions(agent_id: uuid.UUID, args: dict, session_id:
     )
 
 
-async def _send_feishu_card_table(agent_id: uuid.UUID, args: dict, session_id: str = "") -> str:
+async def _send_feishu_card_actions(agent_id: uuid.UUID, args: dict, session_id: str = "") -> str:
+    """Legacy display adapter; Durable Runtime uses the typed helper."""
+    return _legacy_tool_outcome_text(
+        await _send_feishu_card_actions_outcome(agent_id, args, session_id),
+        fallback="Feishu card did not return a summary.",
+    )
+
+
+async def _send_feishu_card_table_outcome(
+    agent_id: uuid.UUID, args: dict, session_id: str = ""
+) -> ToolExecutionOutcome:
     from app.services.feishu_service import build_table_card
+
     title = (args.get("title") or "").strip() or None
     columns = args.get("columns") or []
     rows = args.get("rows") or []
     summary = (args.get("summary") or "").strip() or None
 
     if not isinstance(columns, list) or not columns:
-        return "❌ Provide non-empty `columns`"
+        return _typed_failure(
+            "send_feishu_card_table requires non-empty columns.", "invalid_tool_arguments"
+        )
     if not isinstance(rows, list):
-        return "❌ `rows` must be a list of lists"
+        return _typed_failure(
+            "send_feishu_card_table rows must be a list of lists.", "invalid_tool_arguments"
+        )
 
     def _build(_aid):
         return build_table_card(title=title, columns=columns, rows=rows, summary=summary)
@@ -9551,12 +10058,14 @@ async def _send_feishu_card_table(agent_id: uuid.UUID, args: dict, session_id: s
         head = f"**{title}**\n\n" if title else ""
         head += "| " + " | ".join(str(c) for c in columns) + " |\n"
         head += "| " + " | ".join(["---"] * len(columns)) + " |\n"
-        for r in rows:
-            head += "| " + " | ".join(str(c) for c in r) + " |\n"
+        for row in rows:
+            cells = row if isinstance(row, (list, tuple)) else [row]
+            head += "| " + " | ".join(str(c) for c in cells) + " |\n"
         return head
 
-    return await _dispatch_feishu_card(
-        agent_id, args,
+    return await _dispatch_feishu_card_outcome(
+        agent_id,
+        args,
         card_kind="card_table",
         build_card=_build,
         fallback_text_builder=_fallback,
@@ -9564,8 +10073,19 @@ async def _send_feishu_card_table(agent_id: uuid.UUID, args: dict, session_id: s
     )
 
 
-async def _send_feishu_card_approval(agent_id: uuid.UUID, args: dict, session_id: str = "") -> str:
+async def _send_feishu_card_table(agent_id: uuid.UUID, args: dict, session_id: str = "") -> str:
+    """Legacy display adapter; Durable Runtime uses the typed helper."""
+    return _legacy_tool_outcome_text(
+        await _send_feishu_card_table_outcome(agent_id, args, session_id),
+        fallback="Feishu card did not return a summary.",
+    )
+
+
+async def _send_feishu_card_approval_outcome(
+    agent_id: uuid.UUID, args: dict, session_id: str = ""
+) -> ToolExecutionOutcome:
     from app.services.feishu_service import build_approval_card
+
     title = (args.get("title") or "").strip()
     summary_text = (args.get("summary_text") or "").strip()
     approval_id = (args.get("approval_id") or "").strip()
@@ -9574,26 +10094,61 @@ async def _send_feishu_card_approval(agent_id: uuid.UUID, args: dict, session_id
     summary = (args.get("summary") or "").strip() or None
 
     if not title or not summary_text or not approval_id:
-        return "❌ title / summary_text / approval_id are all required"
+        return _typed_failure(
+            "send_feishu_card_approval requires title, summary_text, and approval_id.",
+            "invalid_tool_arguments",
+        )
 
     def _build(aid):
         return build_approval_card(
-            title=title, summary_text=summary_text, approval_id=approval_id,
+            title=title,
+            summary_text=summary_text,
+            approval_id=approval_id,
             agent_id=aid,
-            approve_label=approve_label, reject_label=reject_label,
+            approve_label=approve_label,
+            reject_label=reject_label,
             summary=summary,
         )
 
     def _fallback():
-        return f"**{title}**\n\n{summary_text}\n\n_(请回复「{approve_label}」或「{reject_label}」以做出决定，approval_id={approval_id})_"
+        return (
+            f"**{title}**\n\n{summary_text}\n\n"
+            f"_(请回复「{approve_label}」或「{reject_label}」以做出决定，"
+            f"approval_id={approval_id})_"
+        )
 
-    return await _dispatch_feishu_card(
-        agent_id, args,
+    return await _dispatch_feishu_card_outcome(
+        agent_id,
+        args,
         card_kind="card_approval",
         build_card=_build,
         fallback_text_builder=_fallback,
         session_id=session_id,
     )
+
+
+async def _send_feishu_card_approval(agent_id: uuid.UUID, args: dict, session_id: str = "") -> str:
+    """Legacy display adapter; Durable Runtime uses the typed helper."""
+    return _legacy_tool_outcome_text(
+        await _send_feishu_card_approval_outcome(agent_id, args, session_id),
+        fallback="Feishu card did not return a summary.",
+    )
+
+
+async def _send_feishu_card_outcome(
+    tool_name: str,
+    agent_id: uuid.UUID,
+    args: dict,
+    session_id: str,
+) -> ToolExecutionOutcome:
+    """把 4 个 send_feishu_card_* 工具名路由到各自的 typed 包装器。"""
+    if tool_name == "send_feishu_card_kv":
+        return await _send_feishu_card_kv_outcome(agent_id, args, session_id)
+    if tool_name == "send_feishu_card_actions":
+        return await _send_feishu_card_actions_outcome(agent_id, args, session_id)
+    if tool_name == "send_feishu_card_table":
+        return await _send_feishu_card_table_outcome(agent_id, args, session_id)
+    return await _send_feishu_card_approval_outcome(agent_id, args, session_id)
 
 
 async def _send_channel_message(agent_id: uuid.UUID, args: dict) -> str:

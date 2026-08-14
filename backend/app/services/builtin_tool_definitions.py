@@ -2095,17 +2095,38 @@ _BUILTIN_TOOL_SOURCE = [
     {
         "name": "send_feishu_message",
         "display_name": "Feishu Message",
-        "description": "Hidden legacy compatibility shortcut for old Feishu tool calls. New model calls must use query_directory followed by send_channel_message(channel='feishu').",
+        "description": (
+            "发送飞书纯文本消息。给个人发：传 target_member_id（来自 query_directory）。"
+            "给群发：传 chat_id（来自 feishu_chat_search）或 chat_name（自动解析成 chat_id）。"
+            "target_member_id 与 chat_id/chat_name 必须且只能给一个。"
+            "需要富文本排版的群公告请改用 send_feishu_card_* 系列工具。"
+        ),
         "category": "feishu",
         "icon": "💬",
         "is_default": False,
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "target_member_id": {"type": "string", "description": "Stable member ID returned by query_directory."},
-                "message": {"type": "string", "description": "Message content"},
+                "target_member_id": {
+                    "type": "string",
+                    "description": "query_directory 返回的稳定 member ID；个人收件人，与 chat_id/chat_name 互斥。",
+                },
+                "chat_id": {
+                    "type": "string",
+                    "description": "群 chat_id（来自 feishu_chat_search）；与 target_member_id/chat_name 互斥。",
+                },
+                "chat_name": {
+                    "type": "string",
+                    "description": "群名称，会自动搜索解析成 chat_id；与 target_member_id/chat_id 互斥。",
+                },
+                "message": {"type": "string", "description": "消息内容"},
             },
-            "required": ["target_member_id", "message"],
+            "required": ["message"],
+            "anyOf": [
+                {"required": ["target_member_id"]},
+                {"required": ["chat_id"]},
+                {"required": ["chat_name"]},
+            ],
             "additionalProperties": False,
         },
         "config": {},
