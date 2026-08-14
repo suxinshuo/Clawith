@@ -194,6 +194,7 @@ async def test_durable_dispatcher_selects_native_mcp_outcome_only_after_exact_re
     monkeypatch,
 ) -> None:
     expected_agent_id = uuid.uuid4()
+    expected_user_id = uuid.uuid4()
     target = {
         "full_name": "mcp_server_lookup",
         "raw_name": "lookup",
@@ -208,10 +209,14 @@ async def test_durable_dispatcher_selects_native_mcp_outcome_only_after_exact_re
         assert kwargs == {}
         return target
 
-    async def execute(resolved, arguments, *, agent_id):
+    async def execute(resolved, arguments, *, agent_id, user_id, session_id):
         assert resolved is target
         assert arguments == {"q": "x"}
         assert agent_id == expected_agent_id
+        # The caller identity must reach the MCP path, otherwise per-user
+        # credentials cannot be resolved for authenticated MCP servers.
+        assert user_id == expected_user_id
+        assert session_id == "sess-1"
         return ToolExecutionOutcome(
             status="succeeded",
             result_summary="ok",
@@ -229,7 +234,8 @@ async def test_durable_dispatcher_selects_native_mcp_outcome_only_after_exact_re
         target["full_name"],
         {"q": "x"},
         agent_id=expected_agent_id,
-        user_id=uuid.uuid4(),
+        user_id=expected_user_id,
+        session_id="sess-1",
     )
     assert outcome.status == "succeeded"
 
@@ -249,8 +255,10 @@ async def test_legacy_mcp_consumer_still_receives_text_wrapper(monkeypatch) -> N
         assert allow_legacy_bare_name is True
         return target
 
-    async def execute(_target, _arguments, *, agent_id):
+    async def execute(_target, _arguments, *, agent_id, user_id, session_id):
         assert agent_id is not None
+        assert user_id is None
+        assert session_id == ""
         return ToolExecutionOutcome(
             status="succeeded",
             result_summary="legacy result",
