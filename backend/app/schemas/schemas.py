@@ -2,8 +2,9 @@
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 # ─── Auth ───────────────────────────────────────────────
@@ -387,6 +388,8 @@ class TaskLogOut(BaseModel):
 
 # ─── LLM ────────────────────────────────────────────────
 
+TokenLimitParam = Literal["auto", "max_tokens", "max_completion_tokens"]
+
 class LLMModelCreate(BaseModel):
     provider: str
     model: str
@@ -399,6 +402,7 @@ class LLMModelCreate(BaseModel):
     supports_vision: bool = False
     max_output_tokens: int | None = None
     request_timeout: int | None = None
+    token_limit_param: TokenLimitParam = "auto"
 
 class LLMModelUpdate(BaseModel):
     provider: str | None = None
@@ -412,6 +416,14 @@ class LLMModelUpdate(BaseModel):
     supports_vision: bool | None = None
     max_output_tokens: int | None = None
     request_timeout: int | None = None
+    token_limit_param: TokenLimitParam | None = None
+
+    @field_validator("token_limit_param", mode="before")
+    @classmethod
+    def reject_null_token_limit_param(cls, value):
+        if value is None:
+            raise ValueError("token_limit_param must not be null; use auto to reset")
+        return value
 
 
 class LLMModelOut(BaseModel):
@@ -427,6 +439,7 @@ class LLMModelOut(BaseModel):
     supports_vision: bool = False
     max_output_tokens: int | None = None
     request_timeout: int | None = None
+    token_limit_param: TokenLimitParam = "auto"
     created_at: datetime
 
     model_config = {"from_attributes": True}

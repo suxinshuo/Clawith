@@ -28,6 +28,7 @@ class LLMModel(Base):
     temperature: Mapped[float | None] = mapped_column(Float, nullable=True)
     request_timeout: Mapped[int | None] = mapped_column(Integer, nullable=True)  # Request timeout in seconds, default 120
     max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)  # Per-model output token limit override
+    token_limit_param: Mapped[str] = mapped_column(String(32), nullable=False, default="auto", server_default="auto")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

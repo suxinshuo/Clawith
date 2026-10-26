@@ -13,6 +13,7 @@ import LinearCopyButton from '../components/LinearCopyButton';
 import { useDialog } from '../components/Dialog/DialogProvider';
 import { useToast } from '../components/Toast/ToastProvider';
 import { buildCompanyRegions, type CompanyRegion } from '../utils/companyRegions';
+import { createLLMModelForm, buildLLMModelPayload, buildLLMTestPayload, type TokenLimitParam } from '../utils/llmModelForm';
 import {
     IconBrowser,
     IconBulb,
@@ -55,6 +56,7 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
 interface LLMModel {
     id: string; provider: string; model: string; label: string;
     base_url?: string; api_key_masked?: string; max_tokens_per_day?: number; enabled: boolean; supports_vision?: boolean; max_output_tokens?: number; request_timeout?: number; temperature?: number; created_at: string;
+    token_limit_param?: TokenLimitParam;
 }
 
 interface LLMProviderSpec {
@@ -3206,7 +3208,7 @@ export default function EnterpriseSettings() {
     });
     const [showAddModel, setShowAddModel] = useState(false);
     const [editingModelId, setEditingModelId] = useState<string | null>(null);
-    const [modelForm, setModelForm] = useState({ provider: 'anthropic', model: '', api_key: '', base_url: '', label: '', supports_vision: false, max_output_tokens: '' as string, request_timeout: '' as string, temperature: '' as string });
+    const [modelForm, setModelForm] = useState(() => createLLMModelForm());
     const { data: providerSpecs = [] } = useQuery({
         queryKey: ['llm-provider-specs'],
         queryFn: () => fetchJson<LLMProviderSpec[]>('/enterprise/llm-providers'),
@@ -3330,15 +3332,11 @@ export default function EnterpriseSettings() {
                             <button className="btn btn-primary" onClick={() => {
                                 setEditingModelId(null);
                                 const defaultSpec = providerOptions[0];
-                                setModelForm({
+                                setModelForm(createLLMModelForm({
                                     provider: defaultSpec?.provider || 'anthropic',
-                                    model: '', api_key: '',
                                     base_url: defaultSpec?.default_base_url || '',
-                                    label: '', supports_vision: false,
-                                    max_output_tokens: defaultSpec ? String(defaultSpec.default_max_tokens) : '4096',
-                                    request_timeout: '',
-                                    temperature: '',
-                                });
+                                    max_output_tokens: defaultSpec?.default_max_tokens || 4096,
+                                }));
                                 setShowAddModel(true);
                             }}>+ {t('enterprise.llm.addModel')}</button>
                         </div>
@@ -3412,6 +3410,15 @@ export default function EnterpriseSettings() {
                                         <input className="form-input" type="number" step="0.1" min="0" max="2" placeholder={t('enterprise.llm.temperaturePlaceholder', 'e.g. 0.7 or 1.0 (Leave empty for default)')} value={modelForm.temperature} onChange={e => setModelForm({ ...modelForm, temperature: e.target.value })} />
                                         <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('enterprise.llm.temperatureDesc', 'Leave empty to use the provider default. o1/o3 reasoning models usually require 1.0')}</div>
                                     </div>
+                                    <div className="form-group">
+                                        <label className="form-label">{t('enterprise.llm.tokenLimitParam')}</label>
+                                        <select className="form-input" value={modelForm.token_limit_param} onChange={e => setModelForm({ ...modelForm, token_limit_param: e.target.value as TokenLimitParam })}>
+                                            <option value="auto">{t('enterprise.llm.tokenLimitParamAuto')}</option>
+                                            <option value="max_tokens">max_tokens</option>
+                                            <option value="max_completion_tokens">max_completion_tokens</option>
+                                        </select>
+                                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('enterprise.llm.tokenLimitParamDesc')}</div>
+                                    </div>
                                 </div>
                                 <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', alignItems: 'center' }}>
                                     <button className="btn btn-secondary" onClick={() => { setShowAddModel(false); setEditingModelId(null); }}>{t('common.cancel')}</button>
@@ -3421,8 +3428,7 @@ export default function EnterpriseSettings() {
                                         if (btn) btn.textContent = t('enterprise.llm.testing');
                                         try {
                                             const token = localStorage.getItem('token');
-                                            const testData: any = { provider: modelForm.provider, model: modelForm.model, base_url: modelForm.base_url || undefined };
-                                            if (modelForm.api_key) testData.api_key = modelForm.api_key;
+                                            const testData = buildLLMTestPayload(modelForm);
                                             const res = await fetch('/api/enterprise/llm-test', {
                                                 method: 'POST',
                                                 headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -3442,12 +3448,7 @@ export default function EnterpriseSettings() {
                                         }
                                     }}>{t('enterprise.llm.test')}</button>
                                     <button className="btn btn-primary" onClick={() => {
-                                        const data = {
-                                            ...modelForm,
-                                            max_output_tokens: modelForm.max_output_tokens ? Number(modelForm.max_output_tokens) : null,
-                                            request_timeout: modelForm.request_timeout ? Number(modelForm.request_timeout) : null,
-                                            temperature: modelForm.temperature !== '' ? Number(modelForm.temperature) : null
-                                        };
+                                        const data = buildLLMModelPayload(modelForm);
                                         addModel.mutate(data);
                                     }} disabled={!modelForm.model || !modelForm.api_key}>
                                         {t('common.save')}
@@ -3521,6 +3522,15 @@ export default function EnterpriseSettings() {
                                                     <input className="form-input" type="number" step="0.1" min="0" max="2" placeholder={t('enterprise.llm.temperaturePlaceholder', 'e.g. 0.7 or 1.0 (Leave empty for default)')} value={modelForm.temperature} onChange={e => setModelForm({ ...modelForm, temperature: e.target.value })} />
                                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('enterprise.llm.temperatureDesc', 'Leave empty to use the provider default. o1/o3 reasoning models usually require 1.0')}</div>
                                                 </div>
+                                                <div className="form-group">
+                                                    <label className="form-label">{t('enterprise.llm.tokenLimitParam')}</label>
+                                                    <select className="form-input" value={modelForm.token_limit_param} onChange={e => setModelForm({ ...modelForm, token_limit_param: e.target.value as TokenLimitParam })}>
+                                                        <option value="auto">{t('enterprise.llm.tokenLimitParamAuto')}</option>
+                                                        <option value="max_tokens">max_tokens</option>
+                                                        <option value="max_completion_tokens">max_completion_tokens</option>
+                                                    </select>
+                                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('enterprise.llm.tokenLimitParamDesc')}</div>
+                                                </div>
                                             </div>
                                             <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', alignItems: 'center' }}>
                                                 <button className="btn btn-secondary" onClick={() => { setShowAddModel(false); setEditingModelId(null); }}>{t('common.cancel')}</button>
@@ -3530,9 +3540,7 @@ export default function EnterpriseSettings() {
                                                     if (btn) btn.textContent = t('enterprise.llm.testing');
                                                     try {
                                                         const token = localStorage.getItem('token');
-                                                        const testData: any = { provider: modelForm.provider, model: modelForm.model, base_url: modelForm.base_url || undefined };
-                                                        if (modelForm.api_key) testData.api_key = modelForm.api_key;
-                                                        testData.model_id = editingModelId;
+                                                        const testData = buildLLMTestPayload(modelForm, editingModelId);
                                                         const res = await fetch('/api/enterprise/llm-test', {
                                                             method: 'POST',
                                                             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -3552,12 +3560,7 @@ export default function EnterpriseSettings() {
                                                     }
                                                 }}>{t('enterprise.llm.test')}</button>
                                                 <button className="btn btn-primary" onClick={() => {
-                                                    const data = {
-                                                        ...modelForm,
-                                                        max_output_tokens: modelForm.max_output_tokens ? Number(modelForm.max_output_tokens) : null,
-                                                        request_timeout: modelForm.request_timeout ? Number(modelForm.request_timeout) : null,
-                                                        temperature: modelForm.temperature !== '' ? Number(modelForm.temperature) : null
-                                                    };
+                                                    const data = buildLLMModelPayload(modelForm);
                                                     updateModel.mutate({ id: editingModelId!, data });
                                                 }} disabled={!modelForm.model}>
                                                     {t('common.save')}
@@ -3611,7 +3614,7 @@ export default function EnterpriseSettings() {
                                                 ) : null}
                                                 <button className="btn btn-ghost" onClick={() => {
                                                     setEditingModelId(m.id);
-                                                    setModelForm({ provider: m.provider, model: m.model, label: m.label, base_url: m.base_url || '', api_key: m.api_key_masked || '', supports_vision: m.supports_vision || false, max_output_tokens: m.max_output_tokens ? String(m.max_output_tokens) : '', request_timeout: m.request_timeout ? String(m.request_timeout) : '', temperature: m.temperature !== null && m.temperature !== undefined ? String(m.temperature) : '' });
+                                                    setModelForm(createLLMModelForm(m));
                                                     setShowAddModel(true);
                                                 }} style={{ fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}><IconEdit size={13} stroke={1.8} /> {t('enterprise.tools.edit')}</button>
                                                 <button className="btn btn-ghost" onClick={() => deleteModel.mutate({ id: m.id })} style={{ color: 'var(--error)' }}>{t('common.delete')}</button>

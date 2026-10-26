@@ -449,6 +449,7 @@ async def call_llm(
             model=model.model,
             base_url=model.base_url,
             timeout=_get_model_timeout(model),
+            token_limit_param=getattr(model, "token_limit_param", "auto"),
         )
     except Exception as e:
         return f"[Error] Failed to create LLM client: {e}"
@@ -852,6 +853,7 @@ async def call_agent_llm_with_tools(
                 model=model.model,
                 base_url=model.base_url,
                 timeout=_get_model_timeout(model),
+                token_limit_param=getattr(model, "token_limit_param", "auto"),
             )
 
             max_tokens = get_max_tokens(
@@ -883,7 +885,7 @@ async def call_agent_llm_with_tools(
                     if agent_id and _accumulated_usage.total_tokens > 0:
                         await record_token_usage(agent_id, _accumulated_usage)
                     await client.close()
-                    return response.content or "[Empty response]", True
+                    return response.content or "[Empty response]", True, tool_executed
 
                 # Execute tool calls
                 sanitized_tool_calls, retry_instruction = _sanitize_tool_calls_for_context(response.tool_calls)

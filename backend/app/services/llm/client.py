@@ -245,6 +245,25 @@ class LLMClient(ABC):
 # OpenAI-Compatible Client
 # ============================================================================
 
+TokenLimitParam = Literal["auto", "max_tokens", "max_completion_tokens"]
+
+# Gateway model names with a confirmed/explicitly configured completion-token contract.
+COMPLETION_TOKEN_MODELS = frozenset({
+    "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra",
+})
+
+
+def resolve_token_limit_param(model: str | None, token_limit_param: TokenLimitParam = "auto") -> str:
+    """Resolve the wire parameter without changing unknown models' legacy behavior."""
+    if token_limit_param not in ("auto", "max_tokens", "max_completion_tokens"):
+        raise ValueError(f"Invalid token_limit_param: {token_limit_param!r}")
+    if token_limit_param != "auto":
+        return token_limit_param
+    if (model or "").strip().lower() in COMPLETION_TOKEN_MODELS:
+        return "max_completion_tokens"
+    return "max_tokens"
+
+
 class OpenAICompatibleClient(LLMClient):
     """Client for OpenAI-compatible APIs (OpenAI, DeepSeek, Qwen, etc.)."""
 
@@ -258,8 +277,10 @@ class OpenAICompatibleClient(LLMClient):
         timeout: float = 120.0,
         supports_tool_choice: bool = True,
         supports_cache_control: bool = False,
+        token_limit_param: TokenLimitParam = "auto",
     ):
         super().__init__(api_key, base_url or self.DEFAULT_BASE_URL, model, timeout)
+        self.token_limit_param = resolve_token_limit_param(model, token_limit_param)
         self.supports_tool_choice = supports_tool_choice
         self.supports_cache_control = supports_cache_control
         self._client: httpx.AsyncClient | None = None
@@ -307,8 +328,11 @@ class OpenAICompatibleClient(LLMClient):
         if stream:
             payload["stream_options"] = {"include_usage": True}
 
+        if "max_completion_tokens" in kwargs:
+            if max_tokens is not None or self.token_limit_param != "max_completion_tokens":
+                raise ValueError("Conflicting token limit parameters; use the unified max_tokens argument")
         if max_tokens:
-            payload["max_tokens"] = max_tokens
+            payload[self.token_limit_param] = max_tokens
 
         if tools:
             payload["tools"] = tools
@@ -2069,6 +2093,7 @@ def create_llm_client(
     model: str,
     base_url: str | None = None,
     timeout: float = 120.0,
+    token_limit_param: TokenLimitParam = "auto",
 ) -> LLMClient:
     """Create an LLM client for the given provider.
 
@@ -2086,6 +2111,7 @@ def create_llm_client(
         ValueError: If provider is not supported
     """
     normalized_provider = normalize_provider(provider)
+    resolve_token_limit_param(model, token_limit_param)  # Validate even for non-chat protocols.
     spec = get_provider_spec(normalized_provider)
 
     # Get base URL
@@ -2124,6 +2150,7 @@ def create_llm_client(
             timeout=timeout,
             supports_tool_choice=supports_tool_choice,
             supports_cache_control=normalized_provider == "qwen",
+            token_limit_param=token_limit_param,
         )
     else:
         # Default to OpenAI-compatible for unknown providers
@@ -2134,6 +2161,7 @@ def create_llm_client(
             timeout=timeout,
             supports_tool_choice=True,
             supports_cache_control=False,
+            token_limit_param=token_limit_param,
         )
 
 
@@ -2151,12 +2179,13 @@ async def chat_complete(
     temperature: float | None = None,
     max_tokens: int | None = None,
     timeout: float = 120.0,
+    token_limit_param: TokenLimitParam = "auto",
 ) -> dict:
     """High-level function for non-streaming chat completion.
 
     Returns response in OpenAI-compatible format for backward compatibility.
     """
-    client = create_llm_client(provider, api_key, model, base_url, timeout)
+    client = create_llm_client(provider, api_key, model, base_url, timeout, token_limit_param=token_limit_param)
 
     try:
         llm_messages = [LLMMessage(**m) for m in messages]
@@ -2195,12 +2224,13 @@ async def chat_stream(
     timeout: float = 120.0,
     on_chunk: ChunkCallback | None = None,
     on_thinking: ThinkingCallback | None = None,
+    token_limit_param: TokenLimitParam = "auto",
 ) -> dict:
     """High-level function for streaming chat completion.
 
     Returns aggregated response in OpenAI-compatible format.
     """
-    client = create_llm_client(provider, api_key, model, base_url, timeout)
+    client = create_llm_client(provider, api_key, model, base_url, timeout, token_limit_param=token_limit_param)
 
     try:
         llm_messages = [LLMMessage(**m) for m in messages]

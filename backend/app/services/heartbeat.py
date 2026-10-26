@@ -151,6 +151,7 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
         model_base_url = None
         model_temperature = None
         model_max_output_tokens = None
+        model_token_limit_param = "auto"
         heartbeat_instruction = DEFAULT_HEARTBEAT_INSTRUCTION
 
         async with async_session() as db:
@@ -179,6 +180,7 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
             model_base_url = model.base_url
             model_temperature = model.temperature
             model_max_output_tokens = getattr(model, 'max_output_tokens', None)
+            model_token_limit_param = getattr(model, "token_limit_param", "auto")
             model_request_timeout = getattr(model, 'request_timeout', None)
 
             # Read HEARTBEAT.md if it exists, otherwise use default
@@ -278,6 +280,7 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
                 model=model_model,
                 base_url=model_base_url,
                 timeout=float(model_request_timeout or 120.0),
+                token_limit_param=model_token_limit_param,
             )
         except Exception as e:
             logger.error(f"Failed to create LLM client: {e}")
@@ -565,6 +568,7 @@ async def run_agent_oneshot(
         model_base_url = None
         model_temperature = None
         model_max_output_tokens = None
+        model_token_limit_param = "auto"
         model_request_timeout = None
 
         async with async_session() as db:
@@ -598,6 +602,7 @@ async def run_agent_oneshot(
             model_base_url = model.base_url
             model_temperature = model.temperature
             model_max_output_tokens = getattr(model, "max_output_tokens", None)
+            model_token_limit_param = getattr(model, "token_limit_param", "auto")
             model_request_timeout = getattr(model, "request_timeout", None)
 
             # Build agent identity context (system prompt + dynamic context)
@@ -629,6 +634,7 @@ async def run_agent_oneshot(
                 model=model_model,
                 base_url=model_base_url,
                 timeout=float(model_request_timeout or 120.0),
+                token_limit_param=model_token_limit_param,
             )
         except Exception as e:
             msg = f"Failed to initialise the LLM client: {e}"

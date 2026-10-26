@@ -527,6 +527,7 @@ async def _generate_llm_report_content(
             temperature=model.temperature,
             max_tokens=min(get_max_tokens(model.provider, model.model, getattr(model, "max_output_tokens", None)), 1800),
             timeout=float(getattr(model, "request_timeout", None) or 120.0),
+            token_limit_param=getattr(model, "token_limit_param", "auto"),
         )
         return (
             response.get("choices", [{}])[0]

@@ -6,7 +6,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import select, func, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,7 +24,7 @@ from app.models.audit import AuditLog, ApprovalRequest, EnterpriseInfo
 from app.schemas.schemas import (
     ApprovalAction, ApprovalRequestOut, AuditLogOut, EnterpriseInfoOut,
     EnterpriseInfoUpdate, LLMModelCreate, LLMModelOut, LLMModelUpdate,
-    IdentityProviderOut, UserInviteRequest
+    IdentityProviderOut, UserInviteRequest, TokenLimitParam
 )
 from app.services.autonomy_service import autonomy_service
 from app.services.enterprise_sync import enterprise_sync_service
@@ -75,17 +75,37 @@ class LLMTestRequest(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     model_id: str | None = None  # existing model ID to use stored API key
+    token_limit_param: TokenLimitParam | None = None  # Omitted: use saved strategy, then auto
+
+    @field_validator("token_limit_param", mode="before")
+    @classmethod
+    def reject_null_token_limit_param(cls, value):
+        if value is None:
+            raise ValueError("token_limit_param must not be null; use auto to reset")
+        return value
 
 
-async def _load_llm_test_api_key(model_id: str | None) -> str | None:
-    """Load the stored API key for llm-test using a short-lived independent session."""
+async def _load_llm_test_config(model_id: str | None, current_user: User) -> tuple[str | None, str]:
+    """Resolve saved test credentials/strategy without holding a session during HTTP."""
     if not model_id:
-        return None
+        return None, "auto"
+
+    try:
+        model_uuid = uuid.UUID(model_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid model ID")
 
     async with async_session() as session:
-        result = await session.execute(select(LLMModel).where(LLMModel.id == model_id))
+        query = select(LLMModel).where(LLMModel.id == model_uuid)
+        if current_user.role != "platform_admin":
+            if not current_user.tenant_id:
+                raise HTTPException(status_code=403, detail="Tenant access required")
+            query = query.where(LLMModel.tenant_id == current_user.tenant_id)
+        result = await session.execute(query)
         existing = result.scalar_one_or_none()
-        return get_model_api_key(existing) if existing else None
+        if not existing:
+            raise HTTPException(status_code=404, detail="Model not found")
+        return get_model_api_key(existing), getattr(existing, "token_limit_param", "auto")
 
 
 @router.post("/llm-test")
@@ -98,23 +118,26 @@ async def test_llm_model(
 
     # Resolve API key: use provided key, or look up from stored model
     api_key = data.api_key if data.api_key and not data.api_key.startswith('****') else None
-    if not api_key and data.model_id:
-        api_key = await _load_llm_test_api_key(data.model_id)
+    stored_key, stored_strategy = await _load_llm_test_config(data.model_id, current_user)
+    api_key = api_key or stored_key
+    token_limit_param = data.token_limit_param if data.token_limit_param is not None else stored_strategy
     if not api_key:
         return {"success": False, "latency_ms": 0, "error": "API Key is required"}
 
     start = time.time()
+    client = None
     try:
         client = create_llm_client(
             provider=data.provider,
             model=data.model,
             api_key=api_key,
             base_url=data.base_url or None,
+            token_limit_param=token_limit_param,
         )
         # Simple test: ask model to say "ok"
         response = await client.complete(
             messages=[LLMMessage(role="user", content="Say 'ok' and nothing else.")],
-            max_tokens=16,
+            max_tokens=256,
         )
         latency_ms = int((time.time() - start) * 1000)
         reply = (response.content or "")[:100] if response else ""
@@ -122,6 +145,9 @@ async def test_llm_model(
     except Exception as e:
         latency_ms = int((time.time() - start) * 1000)
         return {"success": False, "latency_ms": latency_ms, "error": str(e)[:500]}
+    finally:
+        if client is not None:
+            await client.close()
 
 
 
@@ -172,6 +198,7 @@ async def add_llm_model(
         enabled=data.enabled,
         supports_vision=data.supports_vision,
         max_output_tokens=data.max_output_tokens,
+        token_limit_param=data.token_limit_param,
         request_timeout=data.request_timeout,
         tenant_id=uuid.UUID(tid) if tid else None,
     )
@@ -318,6 +345,8 @@ async def update_llm_model(
             model.max_output_tokens = data.max_output_tokens
         if hasattr(data, 'request_timeout') and data.request_timeout is not None:
             model.request_timeout = data.request_timeout
+        if data.token_limit_param is not None:
+            model.token_limit_param = data.token_limit_param
 
         await db.commit()
         await db.refresh(model)
